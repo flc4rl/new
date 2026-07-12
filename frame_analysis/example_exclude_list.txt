@@ -1,0 +1,10 @@
+# One entry per line: a filename substring or a regex, matched
+# case-insensitively against each PDF's filename (and full path).
+# Used to drop unpublished / working documents from the corpus before
+# analysis, e.g. fellow PhD students' working papers or drafts.
+#
+# Examples:
+draft
+working[_ ]paper
+_wip
+unpublished
