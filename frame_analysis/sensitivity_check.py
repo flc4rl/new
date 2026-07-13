@@ -21,6 +21,17 @@ between independently-coded implementations of "the same" method:
                        fascism ("authoritarian", "totalitarian"); note
                        "fascist" needs no separate addition since the
                        base fascism pattern already matches it
+       H. +racialOnly -- D, plus ONLY "racial" for racism. Isolates the
+                       one clean parallel case: "racial" is a true
+                       adjectival form of "racism", exactly analogous to
+                       "colonial"/"imperial". "Authoritarian"/
+                       "totalitarian" are adjectives of their own,
+                       related-but-distinct concepts rather than of
+                       fascism itself (the true fascism adjective,
+                       "fascistic", is rare) -- so F/G's fascism increase
+                       likely overstates what a genuinely matched
+                       adjective test would show, while H isolates the
+                       racism-only effect without that confound.
 
   2. Counting unit:
        token     -- raw regex-match frequency across the whole document
@@ -28,11 +39,13 @@ between independently-coded implementations of "the same" method:
                     (presence, not frequency), matching a common
                     alternative implementation style
 
-Seven variants are run (A/token, B/token, C/token, D/token, D/sentence,
-F/token, F/sentence) so you can see how much of the total spread comes
-from the word list versus from the counting unit, and how much further
-the colonial/imperial-only adjective treatment (D) shifts once the same
-logic is applied evenhandedly to racism and fascism (F).
+Eight variants are run (A/token, B/token, C/token, D/token, D/sentence,
+F/token, F/sentence, H/token) so you can see how much of the total spread
+comes from the word list versus from the counting unit, how much further
+the colonial/imperial-only adjective treatment (D) shifts once applied
+symmetrically to racism and fascism (F), and -- isolating just the one
+theoretically clean case -- how much of that shift "racial" alone
+accounts for (H), without the fascism-boundary confound in F/G.
 
 PDF extraction is done ONCE and cached to a JSONL file; every variant
 re-uses the cached page text, so re-running with --cache-file pointing
@@ -131,6 +144,19 @@ def add_bare_adjectives_all_frames(taxonomy: Dict[str, Dict[str, List[str]]]) ->
     return t
 
 
+def add_racial_adjective_only(taxonomy: Dict[str, Dict[str, List[str]]]) -> Dict[str, Dict[str, List[str]]]:
+    """Isolates just the "racial" addition on top of colonial/imperial
+    adjectives, without touching fascism's boundary at all. "Authoritarian"
+    and "totalitarian" are adjectives of their own separate (if related)
+    concepts, not of fascism itself -- the true bare adjective of fascism
+    would be "fascistic," which is rare enough to be negligible. "Racial"
+    is the cleaner parallel case: a direct adjectival form of "racism",
+    exactly analogous to "colonial"/"imperial" for their frames."""
+    t = add_bare_adjectives(taxonomy)
+    t["racism"]["racial_adj"] = [r"racial"]
+    return t
+
+
 def add_missing_forms(taxonomy: Dict[str, Dict[str, List[str]]]) -> Dict[str, Dict[str, List[str]]]:
     t = _clone(taxonomy)
     t["colonialism"]["colonization"] = t["colonialism"]["colonization"] + [
@@ -148,6 +174,7 @@ VARIANTS: Dict[str, Tuple[Dict[str, Dict[str, List[str]]], str]] = {
     "E_plusAdjForms_sentence": (add_missing_forms(add_bare_adjectives(BASE_TAXONOMY)), "sentence"),
     "F_allAdjForms_token":     (add_missing_forms(add_bare_adjectives_all_frames(BASE_TAXONOMY)), "token"),
     "G_allAdjForms_sentence":  (add_missing_forms(add_bare_adjectives_all_frames(BASE_TAXONOMY)), "sentence"),
+    "H_plusRacialOnly_token":  (add_missing_forms(add_racial_adjective_only(BASE_TAXONOMY)), "token"),
 }
 
 
