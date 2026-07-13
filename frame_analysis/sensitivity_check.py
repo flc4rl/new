@@ -10,10 +10,17 @@ between independently-coded implementations of "the same" method:
                        no agent-noun/adjective forms like colonizer(s),
                        racist(s))
        B. +adj      -- strict + bare descriptive adjectives ("colonial",
-                       "imperial") counted as hits
+                       "imperial") counted as hits -- colonialism/
+                       imperialism only
        C. +forms    -- strict + missing agent/adjective forms
                        (colonizer/colonizers, racist/racists)
-       D. +adj+forms -- both of the above combined
+       D. +adj+forms -- both of the above combined (colonial/imperial
+                       adjectives only)
+       F. +allAdj+forms -- D, plus the same bare-adjective treatment
+                       extended symmetrically to racism ("racial") and
+                       fascism ("authoritarian", "totalitarian"); note
+                       "fascist" needs no separate addition since the
+                       base fascism pattern already matches it
 
   2. Counting unit:
        token     -- raw regex-match frequency across the whole document
@@ -21,9 +28,11 @@ between independently-coded implementations of "the same" method:
                     (presence, not frequency), matching a common
                     alternative implementation style
 
-Five variants are run (A/token, B/token, C/token, D/token, D/sentence)
-so you can see how much of the total spread comes from the word list
-versus from the counting unit.
+Seven variants are run (A/token, B/token, C/token, D/token, D/sentence,
+F/token, F/sentence) so you can see how much of the total spread comes
+from the word list versus from the counting unit, and how much further
+the colonial/imperial-only adjective treatment (D) shifts once the same
+logic is applied evenhandedly to racism and fascism (F).
 
 PDF extraction is done ONCE and cached to a JSONL file; every variant
 re-uses the cached page text, so re-running with --cache-file pointing
@@ -110,6 +119,18 @@ def add_bare_adjectives(taxonomy: Dict[str, Dict[str, List[str]]]) -> Dict[str, 
     return t
 
 
+def add_bare_adjectives_all_frames(taxonomy: Dict[str, Dict[str, List[str]]]) -> Dict[str, Dict[str, List[str]]]:
+    """Same logic as add_bare_adjectives, applied evenhandedly to all four
+    frames. "Fascist" is deliberately NOT added here: the base taxonomy's
+    fascis(?:m|t|ts) pattern already matches it in any grammatical role,
+    so a separate bare-adjective entry would double count the same tokens."""
+    t = add_bare_adjectives(taxonomy)
+    t["racism"]["racial_adj"] = [r"racial"]
+    t["fascism"]["authoritarian_adj"] = [r"authoritarian"]
+    t["fascism"]["totalitarian_adj"] = [r"totalitarian"]
+    return t
+
+
 def add_missing_forms(taxonomy: Dict[str, Dict[str, List[str]]]) -> Dict[str, Dict[str, List[str]]]:
     t = _clone(taxonomy)
     t["colonialism"]["colonization"] = t["colonialism"]["colonization"] + [
@@ -120,11 +141,13 @@ def add_missing_forms(taxonomy: Dict[str, Dict[str, List[str]]]) -> Dict[str, Di
 
 
 VARIANTS: Dict[str, Tuple[Dict[str, Dict[str, List[str]]], str]] = {
-    "A_strict_token":        (BASE_TAXONOMY, "token"),
-    "B_plusAdjectives_token": (add_bare_adjectives(BASE_TAXONOMY), "token"),
-    "C_plusForms_token":      (add_missing_forms(BASE_TAXONOMY), "token"),
-    "D_plusAdjForms_token":   (add_missing_forms(add_bare_adjectives(BASE_TAXONOMY)), "token"),
+    "A_strict_token":          (BASE_TAXONOMY, "token"),
+    "B_plusAdjectives_token":  (add_bare_adjectives(BASE_TAXONOMY), "token"),
+    "C_plusForms_token":       (add_missing_forms(BASE_TAXONOMY), "token"),
+    "D_plusAdjForms_token":    (add_missing_forms(add_bare_adjectives(BASE_TAXONOMY)), "token"),
     "E_plusAdjForms_sentence": (add_missing_forms(add_bare_adjectives(BASE_TAXONOMY)), "sentence"),
+    "F_allAdjForms_token":     (add_missing_forms(add_bare_adjectives_all_frames(BASE_TAXONOMY)), "token"),
+    "G_allAdjForms_sentence":  (add_missing_forms(add_bare_adjectives_all_frames(BASE_TAXONOMY)), "sentence"),
 }
 
 
