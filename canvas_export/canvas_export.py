@@ -197,6 +197,7 @@ class Renderer:
         self.placeholders: dict[str, str] = {}
         self.uses_math = False
         self.uses_mermaid = False
+        self.hide_title_prefixes: tuple[str, ...] = ()
 
     def _hold(self, html_fragment: str) -> str:
         key = f"XPHX{len(self.placeholders)}XPHX"
@@ -466,14 +467,17 @@ def render_node(n, ox, oy, renderer: Renderer, vault: Vault, theme) -> str:
     if kind == "file":
         target = n.get("file", "")
         path = vault.resolve(target)
-        title = (f'<div class="file-title" style="left:{x}px;top:{y - 26}px;max-width:{w}px">'
-                 f'{html.escape(Path(target).stem or target)}</div>')
+        name = Path(target).stem if target.lower().endswith(".md") else Path(target).name
+        title = ""
+        if name and not name.lower().startswith(renderer.hide_title_prefixes):
+            title = (f'<div class="file-title" style="left:{x}px;top:{y - 26}px;max-width:{w}px">'
+                     f'{html.escape(name)}</div>')
         if path is None:
             return (f'<div class="{cls}" style="{style}"><div class="content md">'
                     f'<p class="unresolved">Missing file: {html.escape(target)}</p></div></div>')
         ext = path.suffix.lower()
         if ext in IMAGE_EXTS:
-            return (f'<div class="{cls} image-node" style="{style}">'
+            return (f'{title}<div class="{cls} image-node" style="{style}">'
                     f'<img src="{html.escape(renderer.images.uri(path))}" alt=""></div>')
         if ext == ".md":
             try:
@@ -489,7 +493,7 @@ def render_node(n, ox, oy, renderer: Renderer, vault: Vault, theme) -> str:
             label = "PDF"
         else:
             label = ext.lstrip(".").upper() or "File"
-        return (f'<div class="{cls} link-node" style="{style}"><div class="content">'
+        return (f'{title}<div class="{cls} link-node" style="{style}"><div class="content">'
                 f'<div class="link-icon">📄 {label}</div><div class="link-url">{html.escape(target)}</div></div></div>')
 
     return f'<div class="{cls}" style="{style}"></div>'
@@ -552,10 +556,25 @@ svg#edges { position: absolute; left: 0; top: 0; overflow: visible; }
 """
 
 
+def card_name(n: dict) -> str:
+    """The name Obsidian shows for a card: the file name for file cards, the label for groups."""
+    if n.get("type") == "file":
+        return Path(n.get("file", "")).name
+    return n.get("label", "") if n.get("type") == "group" else ""
+
+
 def build_html(canvas: dict, vault: Vault, theme_name: str, padding: int, dots: bool,
-               allow_remote: bool, images: ImageCache) -> tuple[str, int, int]:
+               allow_remote: bool, images: ImageCache, hide_title_prefixes=(),
+               exclude_prefixes=()) -> tuple[str, int, int]:
     nodes = canvas.get("nodes") or []
     edges = canvas.get("edges") or []
+    exclude = tuple(p.lower() for p in exclude_prefixes)
+    if exclude:
+        dropped = {n.get("id") for n in nodes if card_name(n).lower().startswith(exclude)}
+        nodes = [n for n in nodes if n.get("id") not in dropped]
+        edges = [e for e in edges if e.get("fromNode") not in dropped and e.get("toNode") not in dropped]
+        print(f"  excluded {len(dropped)} cards whose name starts with {', '.join(exclude_prefixes)}",
+              file=sys.stderr)
     if not nodes:
         raise SystemExit("The canvas has no nodes.")
     theme = THEMES[theme_name]
@@ -565,6 +584,7 @@ def build_html(canvas: dict, vault: Vault, theme_name: str, padding: int, dots: 
     height = int(math.ceil(y1 - y0 + 2 * padding))
 
     renderer = Renderer(vault, images)
+    renderer.hide_title_prefixes = tuple(p.lower() for p in hide_title_prefixes)
     nodes_by_id = {n["id"]: n for n in nodes if "id" in n}
     # Obsidian paints groups underneath everything else; larger groups first.
     groups = sorted((n for n in nodes if n.get("type") == "group"),
@@ -686,7 +706,7 @@ def render(args) -> None:
     images = ImageCache(shrink, force_jpeg=is_pdf and shrink > 0)
     try:
         page, css_w, css_h = build_html(canvas, vault, args.theme, args.padding, args.dots,
-                                        not args.offline, images)
+                                        not args.offline, images, args.hide_name, args.exclude)
         if images.cache:
             changed = sum(1 for k, v in images.cache.items() if k != v)
             print(f"  {len(images.cache)} images, {changed} shrunk or recompressed", file=sys.stderr)
@@ -864,6 +884,11 @@ def main(argv=None):
     ap.add_argument("--max-image-px", type=int, default=2000,
                     help="shrink embedded images to at most this many pixels on the longest side "
                          "(keeps PDFs small and PNG renders fast; 0 keeps originals)")
+    ap.add_argument("--hide-name", action="append", default=[], metavar="PREFIX",
+                    help="do not show the file name above cards whose name starts with PREFIX "
+                         "(case-insensitive; repeat for several prefixes)")
+    ap.add_argument("--exclude", action="append", default=[], metavar="PREFIX",
+                    help="leave out cards (and their connections) whose file name starts with PREFIX")
     ap.add_argument("--theme", choices=THEMES, default="light")
     ap.add_argument("--padding", type=int, default=80, help="margin around the content, in canvas units")
     ap.add_argument("--dots", action="store_true", help="draw Obsidian's dotted background grid")

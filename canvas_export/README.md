@@ -54,6 +54,8 @@ Useful options:
 | `-o out.png` | Output path |
 | `--theme dark` | Dark theme (default `light`) |
 | `--dots` | Draw the dotted canvas background |
+| `--hide-name PREFIX` | Don't show the file name above cards whose name starts with PREFIX (e.g. `Bildschirmfoto`); repeatable |
+| `--exclude PREFIX` | Leave out cards whose file name starts with PREFIX, with their connections; repeatable |
 | `--dry-run` | Only print the final pixel size |
 | `--tiles-dir DIR` | Also save each tile separately (useful for print shops or tiling viewers) |
 | `--html-only` | Only write the HTML copy, to check the layout in a browser |
