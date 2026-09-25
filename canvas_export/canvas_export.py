@@ -41,6 +41,8 @@ from PIL import Image
 Image.MAX_IMAGE_PIXELS = None  # we deliberately handle very large images
 
 IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".bmp", ".svg", ".webp", ".avif"}
+VIDEO_EXTS = {".mp4", ".mov", ".m4v", ".webm", ".mkv", ".avi", ".ogv", ".3gp"}
+STILL_EXTS = VIDEO_EXTS | {".pdf"}
 KATEX = "https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/"
 MERMAID = "https://cdn.jsdelivr.net/npm/mermaid@11.4.1/dist/mermaid.min.js"
 
@@ -184,9 +186,91 @@ class ImageCache:
         self.cache[path] = result
         return result
 
+    def still(self, path: Path) -> Path | None:
+        """A still image for a video (a frame ~1 s in) or a PDF (its first page)."""
+        key = path.with_name(path.name + "#still")
+        if key in self.cache:
+            return self.cache[key]
+        out = self.dir / f"still_{len(self.cache):05d}.png"
+        try:
+            if path.suffix.lower() == ".pdf":
+                ok = pdf_first_page(path, out)
+            else:
+                ok = video_frame(path, out)
+        except Exception:
+            ok = False
+        if not ok:
+            ok = quicklook_thumbnail(path, out)
+        result = self.get(out) if ok else None
+        if result is None:
+            self.failed.append(path)
+        self.cache[key] = result
+        return result
+
     def cleanup(self):
         import shutil
         shutil.rmtree(self.dir, ignore_errors=True)
+
+
+def pdf_first_page(path: Path, out: Path, width_px: int = 1600) -> bool:
+    try:
+        import pymupdf
+    except ImportError:
+        return False
+    with pymupdf.open(path) as doc:
+        if doc.page_count == 0:
+            return False
+        page = doc[0]
+        zoom = width_px / max(page.rect.width, 1)
+        page.get_pixmap(matrix=pymupdf.Matrix(zoom, zoom), alpha=False).save(out)
+    return out.exists()
+
+
+def find_ffmpeg() -> str | None:
+    import shutil
+    exe = shutil.which("ffmpeg")
+    if exe:
+        return exe
+    try:
+        import imageio_ffmpeg
+        return imageio_ffmpeg.get_ffmpeg_exe()
+    except Exception:
+        return None
+
+
+def video_frame(path: Path, out: Path) -> bool:
+    import subprocess
+    exe = find_ffmpeg()
+    if not exe:
+        return False
+    # A frame 1 s in avoids the black first frame many clips start with;
+    # very short clips fall back to the first frame.
+    for seek in ("1", "0"):
+        subprocess.run([exe, "-v", "error", "-y", "-ss", seek, "-i", str(path), "-frames:v", "1",
+                        "-vf", "scale='min(1600,iw)':-2", str(out)],
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=120)
+        if out.exists() and out.stat().st_size > 0:
+            return True
+    return False
+
+
+def quicklook_thumbnail(path: Path, out: Path) -> bool:
+    """macOS fallback: Quick Look renders thumbnails for videos and PDFs."""
+    import shutil
+    import subprocess
+    if sys.platform != "darwin" or not shutil.which("qlmanage"):
+        return False
+    tmp = Path(tempfile.mkdtemp(dir=out.parent))
+    try:
+        subprocess.run(["qlmanage", "-t", "-s", "1600", "-o", str(tmp), str(path)],
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=120)
+        made = list(tmp.glob("*.png"))
+        if made:
+            made[0].replace(out)
+            return True
+        return False
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
 
 
 class Renderer:
@@ -198,6 +282,7 @@ class Renderer:
         self.uses_math = False
         self.uses_mermaid = False
         self.hide_title_prefixes: tuple[str, ...] = ()
+        self.no_stills = False
 
     def _hold(self, html_fragment: str) -> str:
         key = f"XPHX{len(self.placeholders)}XPHX"
@@ -221,6 +306,17 @@ class Renderer:
                 style = f' style="width:{m.group(1)}px;' + (f'height:{m.group(2)}px;' if m.group(2) else "") + '"'
         return f'<img src="{html.escape(self.images.uri(path))}" alt="{html.escape(alt)}"{style}>'
 
+    def still_tag(self, path: Path, size: str | None = None) -> str | None:
+        if self.no_stills:
+            return None
+        still = self.images.still(path)
+        if still is None:
+            return None
+        img = self.image_tag(still, size, alt=path.name)
+        if path.suffix.lower() in VIDEO_EXTS:
+            return f'<span class="video-still">{img}<span class="play"></span></span>'
+        return f'<span class="pdf-still">{img}</span>'
+
     def _embed(self, m: re.Match, depth: int, base: Path | None) -> str:
         target, sub, alias = m.group(1), (m.group(2) or ""), m.group(3)
         path = self.vault.resolve(target) if target else base
@@ -228,6 +324,10 @@ class Renderer:
             return self._hold(f'<span class="unresolved">![[{html.escape(target + sub)}]]</span>')
         if path.suffix.lower() in IMAGE_EXTS:
             return self._hold(self.image_tag(path, alias, alt=path.name))
+        if path.suffix.lower() in STILL_EXTS:
+            tag = self.still_tag(path, alias)
+            if tag:
+                return self._hold(tag)
         if path.suffix.lower() == ".md" and depth < self.max_embed_depth:
             try:
                 text = path.read_text(encoding="utf-8", errors="replace")
@@ -479,6 +579,10 @@ def render_node(n, ox, oy, renderer: Renderer, vault: Vault, theme) -> str:
         if ext in IMAGE_EXTS:
             return (f'{title}<div class="{cls} image-node" style="{style}">'
                     f'<img src="{html.escape(renderer.images.uri(path))}" alt=""></div>')
+        if ext in STILL_EXTS:
+            tag = renderer.still_tag(path)
+            if tag:
+                return f'{title}<div class="{cls} image-node still-node" style="{style}">{tag}</div>'
         if ext == ".md":
             try:
                 text = path.read_text(encoding="utf-8", errors="replace")
@@ -522,6 +626,15 @@ svg#edges { position: absolute; left: 0; top: 0; overflow: visible; }
 .node .content { width: 100%; height: 100%; overflow: hidden; padding: 6px 20px; }
 .image-node { padding: 0; background: transparent; border: none; box-shadow: none; }
 .image-node img { width: 100%; height: 100%; object-fit: contain; display: block; border-radius: 8px; }
+.still-node > span { display: block; width: 100%; height: 100%; position: relative; }
+.still-node img { width: 100%; height: 100%; object-fit: contain; }
+.pdf-still img { background: #fff; }
+.still-node.image-node .pdf-still img { object-fit: contain; background: none; }
+.video-still { position: relative; display: inline-block; }
+.video-still .play { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%);
+  width: 64px; height: 64px; border-radius: 50%; background: rgba(0,0,0,.55); }
+.video-still .play::after { content: ""; position: absolute; left: 25px; top: 18px;
+  border-style: solid; border-width: 14px 0 14px 22px; border-color: transparent transparent transparent #fff; }
 .link-node .content { display: flex; flex-direction: column; justify-content: center; gap: 4px; }
 .link-icon { font-weight: 600; color: var(--muted); }
 .link-url { color: var(--link); word-break: break-all; }
@@ -565,7 +678,7 @@ def card_name(n: dict) -> str:
 
 def build_html(canvas: dict, vault: Vault, theme_name: str, padding: int, dots: bool,
                allow_remote: bool, images: ImageCache, hide_title_prefixes=(),
-               exclude_prefixes=()) -> tuple[str, int, int]:
+               exclude_prefixes=(), no_stills: bool = False) -> tuple[str, int, int]:
     nodes = canvas.get("nodes") or []
     edges = canvas.get("edges") or []
     exclude = tuple(p.lower() for p in exclude_prefixes)
@@ -585,6 +698,7 @@ def build_html(canvas: dict, vault: Vault, theme_name: str, padding: int, dots: 
 
     renderer = Renderer(vault, images)
     renderer.hide_title_prefixes = tuple(p.lower() for p in hide_title_prefixes)
+    renderer.no_stills = no_stills
     nodes_by_id = {n["id"]: n for n in nodes if "id" in n}
     # Obsidian paints groups underneath everything else; larger groups first.
     groups = sorted((n for n in nodes if n.get("type") == "group"),
@@ -706,12 +820,15 @@ def render(args) -> None:
     images = ImageCache(shrink, force_jpeg=is_pdf and shrink > 0)
     try:
         page, css_w, css_h = build_html(canvas, vault, args.theme, args.padding, args.dots,
-                                        not args.offline, images, args.hide_name, args.exclude)
+                                        not args.offline, images, args.hide_name, args.exclude,
+                                        no_stills=args.dry_run)
         if images.cache:
             changed = sum(1 for k, v in images.cache.items() if k != v)
-            print(f"  {len(images.cache)} images, {changed} shrunk or recompressed", file=sys.stderr)
+            stills = sum(1 for k, v in images.cache.items() if k.name.endswith("#still") and v)
+            print(f"  {len(images.cache)} images, {changed} shrunk or recompressed, "
+                  f"{stills} video/PDF stills", file=sys.stderr)
         for p in images.failed[:10]:
-            print(f"  could not read image {p.name}; embedded as is", file=sys.stderr)
+            print(f"  could not process {p.name}; shown as is or as a placeholder", file=sys.stderr)
         scale = args.scale
         out_w, out_h = int(math.ceil(css_w * scale)), int(math.ceil(css_h * scale))
         if is_pdf:
@@ -732,7 +849,8 @@ def render(args) -> None:
         else:
             render_png(args, out, html_path, css_w, css_h, out_w, out_h)
     finally:
-        images.cleanup()
+        if not (args.html_only or args.keep_html):
+            images.cleanup()
 
 
 def render_png(args, out: Path, html_path: Path, css_w: int, css_h: int, out_w: int, out_h: int) -> None:

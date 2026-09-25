@@ -90,7 +90,10 @@ python3 canvas_export.py "/path/to/Board.canvas" --theme dark -o board.pdf
   stores WebP, AVIF, GIF and PNG images in a PDF as raw pixels, often 10 times
   their original size, so a vault of saved web images otherwise produces a
   PDF of gigabytes. `--max-image-px 0` keeps the originals.
-- Videos and other non-image files appear as small placeholder cards.
+- Videos appear as a still frame (taken about 1 s in) with a play symbol,
+  and PDFs as their first page. This uses ffmpeg (installed with the
+  requirements) and PyMuPDF. On macOS, Quick Look is the fallback. Files that
+  cannot be read appear as small placeholder cards.
 - PDF viewers limit a page to 200 × 200 inches, so large canvases are scaled
   down to fit. Zoom in to read them. `--scale`, `--tile` and `--preview` do
   not apply to PDF output.
