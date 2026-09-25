@@ -625,12 +625,18 @@ def render(args) -> None:
           file=sys.stderr)
 
     out = Path(args.output).expanduser().resolve() if args.output else canvas_path.with_suffix(".png")
+    if args.pdf and out.suffix.lower() != ".pdf":
+        out = out.with_suffix(".pdf")
+    is_pdf = out.suffix.lower() == ".pdf"
     html_path = out.with_suffix(".html") if args.keep_html else Path(tempfile.mkstemp(suffix=".html")[1])
     html_path.write_text(page, encoding="utf-8")
     if args.html_only:
         print(f"Wrote {html_path}", file=sys.stderr)
         return
     if args.dry_run:
+        return
+    if is_pdf:
+        render_pdf(args, out, html_path, css_w, css_h)
         return
     if max(out_w, out_h) >= 2**31 - 1:
         raise SystemExit("Output exceeds the PNG size limit; lower --scale.")
@@ -656,10 +662,7 @@ def render(args) -> None:
     bg = THEMES[args.theme]["bg"]
     t0 = time.time()
     with sync_playwright() as pw:
-        launch = {"args": ["--disable-gpu", "--force-color-profile=srgb", "--allow-file-access-from-files"]}
-        if args.chromium:
-            launch["executable_path"] = args.chromium
-        browser = pw.chromium.launch(**launch)
+        browser = launch_browser(pw, args)
         # Viewport is a little larger than a tile so fractional scales never leave seams.
         ctx = browser.new_context(viewport={"width": tile_css + 4, "height": tile_css + 4},
                                   device_scale_factor=scale)
@@ -710,14 +713,59 @@ def render(args) -> None:
         print(f"Wrote {ppath} ({preview.width}x{preview.height})", file=sys.stderr)
 
 
+# PDF viewers (Acrobat, Preview) cap a page at 200 x 200 inches = 19,200 CSS px.
+PDF_MAX_CSS = 19200
+
+
+def launch_browser(pw, args):
+    launch = {"args": ["--disable-gpu", "--force-color-profile=srgb", "--allow-file-access-from-files"]}
+    if args.chromium:
+        launch["executable_path"] = args.chromium
+    return pw.chromium.launch(**launch)
+
+
+def render_pdf(args, out: Path, html_path: Path, css_w: int, css_h: int) -> None:
+    """Print the canvas as a single-page vector PDF: sharp at any zoom, small file."""
+    from playwright.sync_api import sync_playwright
+
+    fit = min(1.0, PDF_MAX_CSS / max(css_w, css_h))
+    page_w, page_h = math.ceil(css_w * fit), math.ceil(css_h * fit)
+    if fit < 1:
+        print(f"Scaling the page by {fit:.3f} to stay within the 200-inch PDF page limit; "
+              f"text is vector, so it stays sharp when you zoom in.", file=sys.stderr)
+    t0 = time.time()
+    with sync_playwright() as pw:
+        browser = launch_browser(pw, args)
+        pg = browser.new_page(viewport={"width": 1280, "height": 1024})
+        pg.set_default_timeout(args.timeout * 1000)
+        pg.goto(html_path.as_uri(), wait_until="load")
+        pg.evaluate("window.__ready")
+        pg.add_style_tag(content=(
+            f"@page {{ size: {page_w}px {page_h}px; margin: 0; }}"
+            f"html, body {{ width: {page_w}px; height: {page_h}px; overflow: hidden;"
+            f" -webkit-print-color-adjust: exact; print-color-adjust: exact; }}"
+            f"#world {{ zoom: {fit}; }}"
+        ))
+        print(f"  page loaded in {time.time() - t0:.1f}s, printing PDF...", file=sys.stderr)
+        pg.pdf(path=str(out), width=f"{page_w}px", height=f"{page_h}px", print_background=True,
+               margin={"top": "0", "right": "0", "bottom": "0", "left": "0"}, page_ranges="1")
+        browser.close()
+    if not args.keep_html:
+        html_path.unlink(missing_ok=True)
+    print(f"Wrote {out} ({out.stat().st_size / 1e6:,.1f} MB) in {time.time() - t0:.0f}s", file=sys.stderr)
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0],
                                  formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     ap.add_argument("canvas", help="path to the .canvas file")
-    ap.add_argument("-o", "--output", help="output PNG (default: next to the canvas)")
+    ap.add_argument("-o", "--output", help="output .png or .pdf (default: PNG next to the canvas)")
     ap.add_argument("--vault", help="vault root (default: nearest folder containing .obsidian)")
     ap.add_argument("-s", "--scale", type=float, default=2.0,
                     help="pixels per canvas unit (2 = retina-sharp, 1 = 100%% zoom)")
+    ap.add_argument("--pdf", action="store_true",
+                    help="write a single-page vector PDF instead of a PNG (also chosen by an -o ending in .pdf); "
+                         "text stays sharp at any zoom and the file is far smaller")
     ap.add_argument("--theme", choices=THEMES, default="light")
     ap.add_argument("--padding", type=int, default=80, help="margin around the content, in canvas units")
     ap.add_argument("--dots", action="store_true", help="draw Obsidian's dotted background grid")

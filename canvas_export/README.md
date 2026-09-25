@@ -67,6 +67,27 @@ For very large results, use a viewer built for huge images (for example
 IrfanView, XnView, GIMP, or macOS Preview up to a point), or open the PNG in
 a browser. Or lower `--scale`.
 
+## Smaller files: vector PDF
+
+A huge PNG stores every pixel, so a large canvas at readable resolution easily
+reaches hundreds of MB. Use `--pdf` (or an output name ending in `.pdf`) to get
+a single-page **vector PDF** instead:
+
+```bash
+python3 canvas_export.py "/path/to/Board.canvas" --theme dark -o board.pdf
+```
+
+- Text and shapes are vectors, so they are sharp at any zoom level.
+- The file is usually 10 to 40 times smaller than the PNG. For the test canvas
+  it was 10 MB, compared with 28 MB for a PNG at only scale 1.
+- The text is real, so you can search it (Cmd/Ctrl+F) and copy from it.
+- PDF viewers limit a page to 200 × 200 inches, so large canvases are scaled
+  down to fit. Zoom in to read them. `--scale`, `--tile` and `--preview` do
+  not apply to PDF output.
+- `--dots` works but makes the file roughly twice as large.
+
+Open it in Preview, Acrobat, or a browser.
+
 ## Limits
 
 - Cards are clipped to their size, like on the canvas. Scroll-hidden content
