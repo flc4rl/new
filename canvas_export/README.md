@@ -85,7 +85,12 @@ python3 canvas_export.py "/path/to/Board.canvas" --theme dark -o board.pdf
   scale-2 PNG, which is roughly 100 MB. Size depends mainly on the amount of
   text and on embedded images, not on the canvas area.
 - The text is real, so you can search it (Cmd/Ctrl+F) and copy from it.
-- Images are shrunk to 2000 px on their longest side (`--max-image-px`) and,
+- Each image is stored at twice the size its card shows it
+  (`--image-density 2`), so it stays sharp when zoomed in to 200 % of
+  Obsidian's zoom without carrying pixels nobody can see. Use
+  `--image-density 3` for sharper photos, or `1.5` for a smaller file.
+  `--jpeg-quality` (default 85) is a second, smaller lever.
+- Images are also capped at 2000 px on their longest side (`--max-image-px`) and,
   unless they have transparency, converted to JPEG before embedding. Chromium
   stores WebP, AVIF, GIF and PNG images in a PDF as raw pixels, often 10 times
   their original size, so a vault of saved web images otherwise produces a

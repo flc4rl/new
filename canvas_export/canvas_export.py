@@ -142,8 +142,10 @@ class ImageCache:
     each image is shrunk once to at most `max_px` on its longest side.
     """
 
-    def __init__(self, max_px: int, force_jpeg: bool = False):
+    def __init__(self, max_px: int, force_jpeg: bool = False, density: float = 0, quality: int = 85):
         self.max_px = max_px
+        self.density = density
+        self.quality = quality
         # For PDFs: Chromium embeds JPEGs as they are but stores every other
         # format (WebP, AVIF, PNG photos, GIF) as raw pixels, often 10x larger.
         self.force_jpeg = force_jpeg
@@ -151,27 +153,49 @@ class ImageCache:
         self.cache: dict[Path, Path] = {}
         self.failed: list[Path] = []
 
-    def uri(self, path: Path) -> str:
-        return self.get(path).as_uri()
+    def uri(self, path: Path, box: tuple | None = None) -> str:
+        return self.get(path, box).as_uri()
 
-    def get(self, path: Path) -> Path:
+    def get(self, path: Path, box: tuple | None = None) -> Path:
+        """Return a copy of `path` sized for display.
+
+        `box` is (width, height) in canvas units that the image is drawn into:
+        height None means "width-limited" (images inside Markdown), both set
+        means "fit inside" (image cards). The image keeps `density` pixels per
+        displayed canvas unit, so it stays sharp when zoomed in by that factor.
+        """
         ext = path.suffix.lower()
         if not (self.max_px or self.force_jpeg) or ext == ".svg":
             return path
-        if path in self.cache:
-            return self.cache[path]
+        if not self.density:
+            box = None
+        key = (path, box)
+        if key in self.cache:
+            return self.cache[key]
         result = path
         try:
             from PIL import ImageOps
             with Image.open(path) as im:
                 needs_rotation = im.getexif().get(0x0112, 1) != 1
-                big = bool(self.max_px) and max(im.size) > self.max_px
+                iw, ih = im.size
+                if needs_rotation and im.getexif().get(0x0112) in (5, 6, 7, 8):
+                    iw, ih = ih, iw
+                target_w = iw
+                if self.max_px:
+                    target_w = min(target_w, iw * self.max_px / max(iw, ih))
+                if box and box[0]:
+                    bw, bh = box
+                    shown_w = iw * min(bw / iw, bh / ih) if bh else min(iw, bw)
+                    # Never go below the displayed size, or the layout would change.
+                    target_w = min(target_w, max(math.ceil(shown_w * self.density), math.ceil(shown_w)))
+                target_w = max(1, int(target_w))
+                big = target_w < iw
                 convert = self.force_jpeg and ext not in {".jpg", ".jpeg"}
                 if big or needs_rotation or convert:
                     im.seek(0)  # first frame of animations
                     im = ImageOps.exif_transpose(im)
-                    if self.max_px:
-                        im.thumbnail((self.max_px, self.max_px), Image.LANCZOS)
+                    if big:
+                        im = im.resize((target_w, max(1, round(ih * target_w / iw))), Image.LANCZOS)
                     if im.mode not in ("RGB", "L"):
                         im = im.convert("RGBA")
                     transparent = im.mode == "RGBA" and im.getchannel("A").getextrema()[0] < 255
@@ -179,11 +203,11 @@ class ImageCache:
                     if transparent:
                         im.save(out, optimize=True)
                     else:
-                        im.convert("RGB").save(out, quality=85, optimize=True)
+                        im.convert("RGB").save(out, quality=self.quality, optimize=True)
                     result = out
         except Exception:
             self.failed.append(path)  # unreadable by Pillow (e.g. HEIC): let the browser try
-        self.cache[path] = result
+        self.cache[key] = result
         return result
 
     def still(self, path: Path) -> Path | None:
@@ -201,7 +225,7 @@ class ImageCache:
             ok = False
         if not ok:
             ok = quicklook_thumbnail(path, out)
-        result = self.get(out) if ok else None
+        result = out if ok else None
         if result is None:
             self.failed.append(path)
         self.cache[key] = result
@@ -283,6 +307,7 @@ class Renderer:
         self.uses_mermaid = False
         self.hide_title_prefixes: tuple[str, ...] = ()
         self.no_stills = False
+        self.box: tuple | None = None  # display box of the card being rendered
 
     def _hold(self, html_fragment: str) -> str:
         key = f"XPHX{len(self.placeholders)}XPHX"
@@ -304,7 +329,11 @@ class Renderer:
             m = re.fullmatch(r"\s*(\d+)\s*(?:x\s*(\d+))?\s*", size)
             if m:
                 style = f' style="width:{m.group(1)}px;' + (f'height:{m.group(2)}px;' if m.group(2) else "") + '"'
-        return f'<img src="{html.escape(self.images.uri(path))}" alt="{html.escape(alt)}"{style}>'
+        box = self.box
+        m = re.fullmatch(r"\s*(\d+)\s*(?:x\s*(\d+))?\s*", size or "")
+        if m:
+            box = (int(m.group(1)), None)
+        return f'<img src="{html.escape(self.images.uri(path, box))}" alt="{html.escape(alt)}"{style}>'
 
     def still_tag(self, path: Path, size: str | None = None) -> str | None:
         if self.no_stills:
@@ -543,6 +572,8 @@ def render_node(n, ox, oy, renderer: Renderer, vault: Vault, theme) -> str:
         style += f"--nc:{colour_of(colour, theme['border'])};"
     cls = "node" + (" coloured" if colour else "")
 
+    renderer.box = (max(w - 40, 1), None)  # Markdown content width inside the card
+
     if kind == "group":
         label = n.get("label") or ""
         bg = ""
@@ -578,8 +609,9 @@ def render_node(n, ox, oy, renderer: Renderer, vault: Vault, theme) -> str:
         ext = path.suffix.lower()
         if ext in IMAGE_EXTS:
             return (f'{title}<div class="{cls} image-node" style="{style}">'
-                    f'<img src="{html.escape(renderer.images.uri(path))}" alt=""></div>')
+                    f'<img src="{html.escape(renderer.images.uri(path, (w, h)))}" alt=""></div>')
         if ext in STILL_EXTS:
+            renderer.box = (w, h)
             tag = renderer.still_tag(path)
             if tag:
                 return f'{title}<div class="{cls} image-node still-node" style="{style}">{tag}</div>'
@@ -817,14 +849,16 @@ def render(args) -> None:
 
     # The HTML-only replica must keep pointing at the original images.
     shrink = 0 if (args.html_only or args.dry_run or args.keep_html) else args.max_image_px
-    images = ImageCache(shrink, force_jpeg=is_pdf and shrink > 0)
+    images = ImageCache(shrink, force_jpeg=is_pdf and shrink > 0,
+                        density=args.image_density if is_pdf else args.scale,
+                        quality=args.jpeg_quality)
     try:
         page, css_w, css_h = build_html(canvas, vault, args.theme, args.padding, args.dots,
                                         not args.offline, images, args.hide_name, args.exclude,
                                         no_stills=args.dry_run)
         if images.cache:
-            changed = sum(1 for k, v in images.cache.items() if k != v)
-            stills = sum(1 for k, v in images.cache.items() if k.name.endswith("#still") and v)
+            changed = sum(1 for k, v in images.cache.items() if isinstance(k, tuple) and k[0] != v)
+            stills = sum(1 for k, v in images.cache.items() if isinstance(k, Path) and v)
             print(f"  {len(images.cache)} images, {changed} shrunk or recompressed, "
                   f"{stills} video/PDF stills", file=sys.stderr)
         for p in images.failed[:10]:
@@ -1002,6 +1036,10 @@ def main(argv=None):
     ap.add_argument("--max-image-px", type=int, default=2000,
                     help="shrink embedded images to at most this many pixels on the longest side "
                          "(keeps PDFs small and PNG renders fast; 0 keeps originals)")
+    ap.add_argument("--image-density", type=float, default=2.0,
+                    help="PDF only: image pixels per canvas unit of the card an image is shown in "
+                         "(2 = sharp up to 200%% of Obsidian's zoom; 0 = only apply --max-image-px)")
+    ap.add_argument("--jpeg-quality", type=int, default=85, help="JPEG quality for recompressed images (1-95)")
     ap.add_argument("--hide-name", action="append", default=[], metavar="PREFIX",
                     help="do not show the file name above cards whose name starts with PREFIX "
                          "(case-insensitive; repeat for several prefixes)")
