@@ -78,13 +78,14 @@ python3 canvas_export.py "/path/to/Board.canvas" --theme dark -o board.pdf
 ```
 
 - Text and shapes are vectors, so they are sharp at any zoom level.
-- The file is usually 10 to 40 times smaller than the PNG. For the test canvas
-  it was 10 MB, compared with 28 MB for a PNG at only scale 1.
+- The file is much smaller than a PNG with the same sharpness. For a test
+  canvas with 3,000 cards, the PDF was 18.5 MB and matched the sharpness of a
+  scale-2 PNG, which is roughly 100 MB. Size depends mainly on the amount of
+  text and on embedded images, not on the canvas area.
 - The text is real, so you can search it (Cmd/Ctrl+F) and copy from it.
 - PDF viewers limit a page to 200 × 200 inches, so large canvases are scaled
   down to fit. Zoom in to read them. `--scale`, `--tile` and `--preview` do
   not apply to PDF output.
-- `--dots` works but makes the file roughly twice as large.
 
 Open it in Preview, Acrobat, or a browser.
 
