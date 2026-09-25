@@ -140,17 +140,21 @@ class ImageCache:
     each image is shrunk once to at most `max_px` on its longest side.
     """
 
-    def __init__(self, max_px: int):
+    def __init__(self, max_px: int, force_jpeg: bool = False):
         self.max_px = max_px
+        # For PDFs: Chromium embeds JPEGs as they are but stores every other
+        # format (WebP, AVIF, PNG photos, GIF) as raw pixels, often 10x larger.
+        self.force_jpeg = force_jpeg
         self.dir = Path(tempfile.mkdtemp(prefix="canvas_export_img_"))
         self.cache: dict[Path, Path] = {}
-        self.saved_bytes = 0
+        self.failed: list[Path] = []
 
     def uri(self, path: Path) -> str:
         return self.get(path).as_uri()
 
     def get(self, path: Path) -> Path:
-        if not self.max_px or path.suffix.lower() in {".svg", ".gif"}:
+        ext = path.suffix.lower()
+        if not (self.max_px or self.force_jpeg) or ext == ".svg":
             return path
         if path in self.cache:
             return self.cache[path]
@@ -159,21 +163,24 @@ class ImageCache:
             from PIL import ImageOps
             with Image.open(path) as im:
                 needs_rotation = im.getexif().get(0x0112, 1) != 1
-                big = max(im.size) > self.max_px
-                if big or needs_rotation:
+                big = bool(self.max_px) and max(im.size) > self.max_px
+                convert = self.force_jpeg and ext not in {".jpg", ".jpeg"}
+                if big or needs_rotation or convert:
+                    im.seek(0)  # first frame of animations
                     im = ImageOps.exif_transpose(im)
-                    im.thumbnail((self.max_px, self.max_px), Image.LANCZOS)
-                    has_alpha = im.mode in ("RGBA", "LA", "P") and (
-                        im.mode != "P" or "transparency" in im.info)
-                    out = self.dir / f"{len(self.cache):05d}{'.png' if has_alpha else '.jpg'}"
-                    if has_alpha:
+                    if self.max_px:
+                        im.thumbnail((self.max_px, self.max_px), Image.LANCZOS)
+                    if im.mode not in ("RGB", "L"):
+                        im = im.convert("RGBA")
+                    transparent = im.mode == "RGBA" and im.getchannel("A").getextrema()[0] < 255
+                    out = self.dir / f"{len(self.cache):05d}{'.png' if transparent else '.jpg'}"
+                    if transparent:
                         im.save(out, optimize=True)
                     else:
-                        im.convert("RGB").save(out, quality=88, optimize=True)
-                    self.saved_bytes += max(0, path.stat().st_size - out.stat().st_size)
+                        im.convert("RGB").save(out, quality=85, optimize=True)
                     result = out
         except Exception:
-            result = path  # unreadable by Pillow (e.g. HEIC): let the browser try
+            self.failed.append(path)  # unreadable by Pillow (e.g. HEIC): let the browser try
         self.cache[path] = result
         return result
 
@@ -676,13 +683,15 @@ def render(args) -> None:
 
     # The HTML-only replica must keep pointing at the original images.
     shrink = 0 if (args.html_only or args.dry_run or args.keep_html) else args.max_image_px
-    images = ImageCache(shrink)
+    images = ImageCache(shrink, force_jpeg=is_pdf and shrink > 0)
     try:
         page, css_w, css_h = build_html(canvas, vault, args.theme, args.padding, args.dots,
                                         not args.offline, images)
-        if images.saved_bytes:
-            print(f"  downscaled {sum(1 for k, v in images.cache.items() if k != v)} large images "
-                  f"(saved {images.saved_bytes / 1e6:,.0f} MB)", file=sys.stderr)
+        if images.cache:
+            changed = sum(1 for k, v in images.cache.items() if k != v)
+            print(f"  {len(images.cache)} images, {changed} shrunk or recompressed", file=sys.stderr)
+        for p in images.failed[:10]:
+            print(f"  could not read image {p.name}; embedded as is", file=sys.stderr)
         scale = args.scale
         out_w, out_h = int(math.ceil(css_w * scale)), int(math.ceil(css_h * scale))
         if is_pdf:
