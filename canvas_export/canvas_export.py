@@ -131,9 +131,61 @@ COMMENT = re.compile(r"%%.*?%%", re.S)
 TAG = re.compile(r"(?<![\w&/#])#([A-Za-z_][\w/-]*)")
 
 
+class ImageCache:
+    """Downscaled copies of vault images.
+
+    Photos and screenshots are often several thousand pixels wide but shown in
+    a card a few hundred units across. Embedding the originals makes PDFs
+    balloon (Chromium stores them uncompressed) and slows PNG rendering, so
+    each image is shrunk once to at most `max_px` on its longest side.
+    """
+
+    def __init__(self, max_px: int):
+        self.max_px = max_px
+        self.dir = Path(tempfile.mkdtemp(prefix="canvas_export_img_"))
+        self.cache: dict[Path, Path] = {}
+        self.saved_bytes = 0
+
+    def uri(self, path: Path) -> str:
+        return self.get(path).as_uri()
+
+    def get(self, path: Path) -> Path:
+        if not self.max_px or path.suffix.lower() in {".svg", ".gif"}:
+            return path
+        if path in self.cache:
+            return self.cache[path]
+        result = path
+        try:
+            from PIL import ImageOps
+            with Image.open(path) as im:
+                needs_rotation = im.getexif().get(0x0112, 1) != 1
+                big = max(im.size) > self.max_px
+                if big or needs_rotation:
+                    im = ImageOps.exif_transpose(im)
+                    im.thumbnail((self.max_px, self.max_px), Image.LANCZOS)
+                    has_alpha = im.mode in ("RGBA", "LA", "P") and (
+                        im.mode != "P" or "transparency" in im.info)
+                    out = self.dir / f"{len(self.cache):05d}{'.png' if has_alpha else '.jpg'}"
+                    if has_alpha:
+                        im.save(out, optimize=True)
+                    else:
+                        im.convert("RGB").save(out, quality=88, optimize=True)
+                    self.saved_bytes += max(0, path.stat().st_size - out.stat().st_size)
+                    result = out
+        except Exception:
+            result = path  # unreadable by Pillow (e.g. HEIC): let the browser try
+        self.cache[path] = result
+        return result
+
+    def cleanup(self):
+        import shutil
+        shutil.rmtree(self.dir, ignore_errors=True)
+
+
 class Renderer:
-    def __init__(self, vault: Vault, max_embed_depth: int = 2):
+    def __init__(self, vault: Vault, images: ImageCache, max_embed_depth: int = 2):
         self.vault = vault
+        self.images = images
         self.max_embed_depth = max_embed_depth
         self.placeholders: dict[str, str] = {}
         self.uses_math = False
@@ -159,7 +211,7 @@ class Renderer:
             m = re.fullmatch(r"\s*(\d+)\s*(?:x\s*(\d+))?\s*", size)
             if m:
                 style = f' style="width:{m.group(1)}px;' + (f'height:{m.group(2)}px;' if m.group(2) else "") + '"'
-        return f'<img src="{html.escape(path.as_uri())}" alt="{html.escape(alt)}"{style}>'
+        return f'<img src="{html.escape(self.images.uri(path))}" alt="{html.escape(alt)}"{style}>'
 
     def _embed(self, m: re.Match, depth: int, base: Path | None) -> str:
         target, sub, alias = m.group(1), (m.group(2) or ""), m.group(3)
@@ -391,7 +443,7 @@ def render_node(n, ox, oy, renderer: Renderer, vault: Vault, theme) -> str:
             if p:
                 size = {"cover": "cover", "ratio": "contain", "repeat": "auto"}.get(n.get("backgroundStyle"), "cover")
                 rep = "repeat" if n.get("backgroundStyle") == "repeat" else "no-repeat"
-                bg = f'background-image:url("{p.as_uri()}");background-size:{size};background-repeat:{rep};'
+                bg = f'background-image:url("{renderer.images.uri(p)}");background-size:{size};background-repeat:{rep};'
         lab = f'<div class="group-label">{html.escape(label)}</div>' if label else ""
         return f'<div class="group{" coloured" if colour else ""}" style="{style}{bg}">{lab}</div>'
 
@@ -415,7 +467,7 @@ def render_node(n, ox, oy, renderer: Renderer, vault: Vault, theme) -> str:
         ext = path.suffix.lower()
         if ext in IMAGE_EXTS:
             return (f'<div class="{cls} image-node" style="{style}">'
-                    f'<img src="{html.escape(path.as_uri())}" alt=""></div>')
+                    f'<img src="{html.escape(renderer.images.uri(path))}" alt=""></div>')
         if ext == ".md":
             try:
                 text = path.read_text(encoding="utf-8", errors="replace")
@@ -494,7 +546,7 @@ svg#edges { position: absolute; left: 0; top: 0; overflow: visible; }
 
 
 def build_html(canvas: dict, vault: Vault, theme_name: str, padding: int, dots: bool,
-               allow_remote: bool) -> tuple[str, int, int]:
+               allow_remote: bool, images: ImageCache) -> tuple[str, int, int]:
     nodes = canvas.get("nodes") or []
     edges = canvas.get("edges") or []
     if not nodes:
@@ -505,7 +557,7 @@ def build_html(canvas: dict, vault: Vault, theme_name: str, padding: int, dots: 
     width = int(math.ceil(x1 - x0 + 2 * padding))
     height = int(math.ceil(y1 - y0 + 2 * padding))
 
-    renderer = Renderer(vault)
+    renderer = Renderer(vault, images)
     nodes_by_id = {n["id"]: n for n in nodes if "id" in n}
     # Obsidian paints groups underneath everything else; larger groups first.
     groups = sorted((n for n in nodes if n.get("type") == "group"),
@@ -617,27 +669,45 @@ def render(args) -> None:
     canvas = json.loads(canvas_path.read_text(encoding="utf-8"))
     print(f"Canvas: {canvas_path}\nVault:  {vault.root}", file=sys.stderr)
 
-    page, css_w, css_h = build_html(canvas, vault, args.theme, args.padding, args.dots, not args.offline)
-    scale = args.scale
-    out_w, out_h = int(math.ceil(css_w * scale)), int(math.ceil(css_h * scale))
-    mp = out_w * out_h / 1e6
-    print(f"Canvas area {css_w}x{css_h} units -> PNG {out_w}x{out_h} px ({mp:,.0f} MP) at scale {scale}",
-          file=sys.stderr)
-
     out = Path(args.output).expanduser().resolve() if args.output else canvas_path.with_suffix(".png")
     if args.pdf and out.suffix.lower() != ".pdf":
         out = out.with_suffix(".pdf")
     is_pdf = out.suffix.lower() == ".pdf"
-    html_path = out.with_suffix(".html") if args.keep_html else Path(tempfile.mkstemp(suffix=".html")[1])
-    html_path.write_text(page, encoding="utf-8")
-    if args.html_only:
-        print(f"Wrote {html_path}", file=sys.stderr)
-        return
-    if args.dry_run:
-        return
-    if is_pdf:
-        render_pdf(args, out, html_path, css_w, css_h)
-        return
+
+    # The HTML-only replica must keep pointing at the original images.
+    shrink = 0 if (args.html_only or args.dry_run or args.keep_html) else args.max_image_px
+    images = ImageCache(shrink)
+    try:
+        page, css_w, css_h = build_html(canvas, vault, args.theme, args.padding, args.dots,
+                                        not args.offline, images)
+        if images.saved_bytes:
+            print(f"  downscaled {sum(1 for k, v in images.cache.items() if k != v)} large images "
+                  f"(saved {images.saved_bytes / 1e6:,.0f} MB)", file=sys.stderr)
+        scale = args.scale
+        out_w, out_h = int(math.ceil(css_w * scale)), int(math.ceil(css_h * scale))
+        if is_pdf:
+            print(f"Canvas area {css_w}x{css_h} units -> single-page vector PDF", file=sys.stderr)
+        else:
+            print(f"Canvas area {css_w}x{css_h} units -> PNG {out_w}x{out_h} px "
+                  f"({out_w * out_h / 1e6:,.0f} MP) at scale {scale}", file=sys.stderr)
+
+        html_path = out.with_suffix(".html") if args.keep_html else Path(tempfile.mkstemp(suffix=".html")[1])
+        html_path.write_text(page, encoding="utf-8")
+        if args.html_only:
+            print(f"Wrote {html_path}", file=sys.stderr)
+            return
+        if args.dry_run:
+            return
+        if is_pdf:
+            render_pdf(args, out, html_path, css_w, css_h)
+        else:
+            render_png(args, out, html_path, css_w, css_h, out_w, out_h)
+    finally:
+        images.cleanup()
+
+
+def render_png(args, out: Path, html_path: Path, css_w: int, css_h: int, out_w: int, out_h: int) -> None:
+    scale = args.scale
     if max(out_w, out_h) >= 2**31 - 1:
         raise SystemExit("Output exceeds the PNG size limit; lower --scale.")
 
@@ -747,8 +817,24 @@ def render_pdf(args, out: Path, html_path: Path, css_w: int, css_h: int) -> None
             f"#world {{ zoom: {fit}; }}"
         ))
         print(f"  page loaded in {time.time() - t0:.1f}s, printing PDF...", file=sys.stderr)
-        pg.pdf(path=str(out), width=f"{page_w}px", height=f"{page_h}px", print_background=True,
-               margin={"top": "0", "right": "0", "bottom": "0", "left": "0"}, page_ranges="1")
+        # Stream the PDF out through the DevTools protocol. Playwright's page.pdf()
+        # returns it as one string, which fails for PDFs over a few hundred MB.
+        cdp = pg.context.new_cdp_session(pg)
+        res = cdp.send("Page.printToPDF", {
+            "paperWidth": page_w / 96, "paperHeight": page_h / 96,
+            "marginTop": 0, "marginBottom": 0, "marginLeft": 0, "marginRight": 0,
+            "printBackground": True, "preferCSSPageSize": True, "pageRanges": "1",
+            "transferMode": "ReturnAsStream",
+        })
+        import base64
+        with open(out, "wb") as f:
+            while True:
+                chunk = cdp.send("IO.read", {"handle": res["stream"], "size": 16 << 20})
+                data = chunk.get("data", "")
+                f.write(base64.b64decode(data) if chunk.get("base64Encoded") else data.encode("latin-1"))
+                if chunk.get("eof"):
+                    break
+        cdp.send("IO.close", {"handle": res["stream"]})
         browser.close()
     if not args.keep_html:
         html_path.unlink(missing_ok=True)
@@ -766,6 +852,9 @@ def main(argv=None):
     ap.add_argument("--pdf", action="store_true",
                     help="write a single-page vector PDF instead of a PNG (also chosen by an -o ending in .pdf); "
                          "text stays sharp at any zoom and the file is far smaller")
+    ap.add_argument("--max-image-px", type=int, default=2000,
+                    help="shrink embedded images to at most this many pixels on the longest side "
+                         "(keeps PDFs small and PNG renders fast; 0 keeps originals)")
     ap.add_argument("--theme", choices=THEMES, default="light")
     ap.add_argument("--padding", type=int, default=80, help="margin around the content, in canvas units")
     ap.add_argument("--dots", action="store_true", help="draw Obsidian's dotted background grid")

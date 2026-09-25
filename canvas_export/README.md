@@ -83,6 +83,9 @@ python3 canvas_export.py "/path/to/Board.canvas" --theme dark -o board.pdf
   scale-2 PNG, which is roughly 100 MB. Size depends mainly on the amount of
   text and on embedded images, not on the canvas area.
 - The text is real, so you can search it (Cmd/Ctrl+F) and copy from it.
+- Large photos and screenshots are shrunk to 2000 px on their longest side
+  before embedding (`--max-image-px`, 0 keeps originals). Otherwise a vault
+  with many photos produces a PDF of hundreds of MB.
 - PDF viewers limit a page to 200 × 200 inches, so large canvases are scaled
   down to fit. Zoom in to read them. `--scale`, `--tile` and `--preview` do
   not apply to PDF output.
