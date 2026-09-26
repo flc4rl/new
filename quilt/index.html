@@ -1,0 +1,606 @@
+<meta charset="utf-8">
+<title>Climate Colonialism Quilt</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo+Black&family=Instrument+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<style>
+:root {
+  --ground: #e6e4dd;
+  --panel: #f3f1ec;
+  --ink: #1d2030;
+  --ink-soft: #5b5e6c;
+  --line: #c9c6bd;
+  --sashing: #f6f4ee;
+  --binding: #1d2030;
+  --thread: #2f55c9;
+  --stitch: rgba(255,255,255,.55);
+  --setting: #dcd9cf;
+  --focus: #2f55c9;
+  --display: "Archivo Black", "Arial Black", Impact, sans-serif;
+  --body: "Instrument Sans", "Helvetica Neue", Arial, sans-serif;
+  --mono: "IBM Plex Mono", ui-monospace, Menlo, Consolas, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+    --ground: #15171e;
+    --panel: #1d2029;
+    --ink: #ecebe6;
+    --ink-soft: #a3a5b1;
+    --line: #343846;
+    --sashing: #2a2e3a;
+    --binding: #0b0c10;
+    --thread: #8aa6ff;
+    --setting: #232733;
+    --focus: #8aa6ff;
+  }
+}
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --ground: #15171e;
+  --panel: #1d2029;
+  --ink: #ecebe6;
+  --ink-soft: #a3a5b1;
+  --line: #343846;
+  --sashing: #2a2e3a;
+  --binding: #0b0c10;
+  --thread: #8aa6ff;
+  --setting: #232733;
+  --focus: #8aa6ff;
+}
+
+* { box-sizing: border-box; }
+body {
+  background: var(--ground);
+  color: var(--ink);
+  font: 15px/1.5 var(--body);
+  padding: 24px 16px 48px;
+}
+.wrap { max-width: 1320px; margin: 0 auto; display: grid; gap: 20px; }
+
+header { display: grid; gap: 6px; }
+h1 {
+  font: 400 clamp(26px, 4.4vw, 44px)/1.02 var(--display);
+  letter-spacing: -.01em;
+  margin: 0;
+  text-wrap: balance;
+}
+.lede { margin: 0; max-width: 68ch; color: var(--ink-soft); }
+
+.controls {
+  display: flex; flex-wrap: wrap; gap: 10px 18px; align-items: end;
+  padding: 12px 14px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+}
+.ctl { display: grid; gap: 4px; }
+.ctl > span, .label {
+  font: 500 11px/1 var(--mono);
+  text-transform: uppercase; letter-spacing: .08em; color: var(--ink-soft);
+}
+.seg { display: inline-flex; border: 1px solid var(--line); border-radius: 4px; overflow: hidden; }
+.seg button {
+  font: 500 13px/1 var(--body); color: var(--ink);
+  background: transparent; border: 0; padding: 8px 11px; cursor: pointer;
+}
+.seg button + button { border-left: 1px solid var(--line); }
+.seg button[aria-pressed="true"] { background: var(--ink); color: var(--panel); }
+input[type="range"] { width: 130px; accent-color: var(--thread); }
+.check { display: inline-flex; gap: 6px; align-items: center; font-size: 13px; cursor: pointer; }
+.check input { accent-color: var(--thread); }
+.btn {
+  font: 600 13px/1 var(--body);
+  background: var(--thread); color: #fff; border: 0; border-radius: 4px;
+  padding: 10px 14px; cursor: pointer;
+}
+:root[data-theme="dark"] .btn { color: #0f1320; }
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) .btn { color: #0f1320; } }
+.btn.ghost { background: transparent; color: var(--ink); border: 1px solid var(--line); }
+button:focus-visible, input:focus-visible, .patch:focus-visible, .key-row:focus-visible {
+  outline: 2px solid var(--focus); outline-offset: 2px;
+}
+.status { font: 12px/1.4 var(--mono); color: var(--ink-soft); margin-left: auto; min-width: 0; }
+
+.main { display: grid; grid-template-columns: minmax(0, 1fr) 260px; gap: 20px; align-items: start; }
+@media (max-width: 860px) { .main { grid-template-columns: minmax(0, 1fr); } }
+
+.frame {
+  overflow: auto;
+  border-radius: 6px;
+  min-height: 200px;
+  display: grid; place-items: start center;
+}
+.frame.drag { outline: 2px dashed var(--thread); outline-offset: -2px; }
+
+/* The quilt top: binding (outer edge), border, then blocks set with sashing */
+.quilt {
+  --p: 34px;
+  --gap: 8px;
+  background: var(--sashing);
+  border: 6px solid var(--binding);
+  padding: var(--gap);
+  display: grid;
+  gap: var(--gap);
+  width: max-content;
+}
+.block {
+  display: grid;
+  grid-template-columns: repeat(var(--b), var(--p));
+  grid-auto-rows: var(--p);
+  position: relative;
+}
+.block.setting {
+  background:
+    repeating-linear-gradient(45deg, transparent 0 9px, var(--line) 9px 10px),
+    var(--setting);
+}
+.patch {
+  width: var(--p); height: var(--p);
+  background-color: var(--c);
+  background-size: cover; background-position: center;
+  position: relative; border: 0; padding: 0; cursor: pointer;
+  transition: opacity .2s, filter .2s;
+}
+.patch.plain { cursor: default; }
+.quilt.stitched .patch::after {
+  content: ""; position: absolute; inset: 3px;
+  border: 1px dashed var(--stitch);
+  pointer-events: none;
+}
+.quilt.swatch .patch { background-image: none !important; }
+.patch.dim { opacity: .12; filter: grayscale(1); }
+.patch:hover { z-index: 2; outline: 2px solid var(--ink); }
+
+.key {
+  background: var(--panel); border: 1px solid var(--line); border-radius: 6px;
+  padding: 14px; display: grid; gap: 10px;
+}
+.key h2 { font: 400 17px/1.1 var(--display); margin: 0; }
+.key p { margin: 0; font-size: 13px; color: var(--ink-soft); }
+.key-list { display: grid; gap: 2px; margin: 0; padding: 0; list-style: none; }
+.key-row {
+  display: grid; grid-template-columns: 22px 1fr auto; gap: 10px; align-items: center;
+  padding: 5px 6px; border-radius: 4px; cursor: pointer; border: 0; width: 100%;
+  background: transparent; color: var(--ink); text-align: left; font: inherit;
+}
+.key-row:hover { background: var(--ground); }
+.key-row[aria-pressed="true"] { background: var(--ground); box-shadow: inset 0 0 0 1px var(--ink); }
+.key-row.empty { opacity: .4; }
+.sw { width: 22px; height: 22px; border-radius: 3px; box-shadow: inset 0 0 0 1px rgba(0,0,0,.15); }
+.key-name { display: grid; line-height: 1.2; font-size: 14px; }
+.key-name small { font: 11px/1.3 var(--mono); color: var(--ink-soft); }
+.key-count { font: 500 13px/1 var(--mono); font-variant-numeric: tabular-nums; }
+.bar { height: 3px; background: var(--line); border-radius: 2px; overflow: hidden; grid-column: 2 / 4; }
+.bar i { display: block; height: 100%; background: var(--c); }
+
+dialog {
+  border: 0; padding: 0; border-radius: 8px; max-width: min(92vw, 720px);
+  background: var(--panel); color: var(--ink);
+}
+dialog::backdrop { background: rgba(10,12,18,.72); }
+.lb { display: grid; gap: 0; }
+.lb img { display: block; width: 100%; max-height: 70vh; object-fit: contain; background: #000; }
+.lb-meta { display: flex; flex-wrap: wrap; gap: 8px 16px; align-items: center; padding: 12px 14px; font: 13px/1.4 var(--mono); }
+.lb-meta .sw { width: 28px; height: 28px; }
+.lb-meta button { margin-left: auto; }
+
+@media (prefers-reduced-motion: reduce) { .patch { transition: none; } }
+</style>
+
+<div class="wrap">
+  <header>
+    <h1>Climate Colonialism Quilt</h1>
+    <p class="lede">Every image becomes a patch, filed by its dominant colour and pieced into a quilt top. The sample is cut from your five collages; add your full set of images to piece the real thing. Nothing is uploaded: images are read in your browser.</p>
+  </header>
+
+  <div class="controls">
+    <div class="ctl">
+      <span>Pattern</span>
+      <div class="seg" role="group" aria-label="Quilt pattern" id="pattern">
+        <button type="button" data-v="blocks" aria-pressed="true">Sampler blocks</button>
+        <button type="button" data-v="trip" aria-pressed="false">Trip around the world</button>
+        <button type="button" data-v="strips" aria-pressed="false">Strips</button>
+      </div>
+    </div>
+    <label class="ctl" for="size"><span>Patch size</span><input id="size" type="range" min="14" max="72" value="34"></label>
+    <div class="ctl" id="blockCtl">
+      <span>Block</span>
+      <div class="seg" role="group" aria-label="Block size" id="blocksize">
+        <button type="button" data-v="3" aria-pressed="false">3&times;3</button>
+        <button type="button" data-v="4" aria-pressed="true">4&times;4</button>
+        <button type="button" data-v="5" aria-pressed="false">5&times;5</button>
+      </div>
+    </div>
+    <div class="ctl">
+      <span>Show</span>
+      <div style="display:flex;gap:12px">
+        <label class="check"><input id="swatch" type="checkbox"> Colour only</label>
+        <label class="check"><input id="stitch" type="checkbox" checked> Stitching</label>
+      </div>
+    </div>
+    <div class="ctl">
+      <span>Images</span>
+      <div style="display:flex;gap:8px">
+        <button class="btn" type="button" id="addBtn">Add images</button>
+        <button class="btn ghost" type="button" id="sampleBtn">Reload sample</button>
+      </div>
+      <input id="file" type="file" accept="image/*" multiple hidden>
+    </div>
+    <div class="status" id="status" aria-live="polite">Cutting sample patches…</div>
+  </div>
+
+  <div class="main">
+    <div class="frame" id="frame"><div class="quilt stitched" id="quilt"></div></div>
+    <aside class="key">
+      <h2>Fabric key</h2>
+      <p>Patches are filed by the hue that dominates their saturated pixels. Mostly grey images go to black, grey or paper. Select a colour to pick it out of the quilt.</p>
+      <ul class="key-list" id="key"></ul>
+    </aside>
+  </div>
+</div>
+
+<dialog id="lb">
+  <div class="lb">
+    <img id="lbImg" alt="">
+    <div class="lb-meta">
+      <span class="sw" id="lbSw"></span>
+      <span id="lbTxt"></span>
+      <button class="btn ghost" type="button" id="lbClose">Close</button>
+    </div>
+  </div>
+</dialog>
+
+<script>
+// Colour families, in quilt order around the wheel. Hue ranges in degrees.
+const FAMILIES = [
+  { id: "red",     name: "Red",          range: [345, 15],  sw: "#c8302c" },
+  { id: "orange",  name: "Orange",       range: [15, 40],   sw: "#e2762a" },
+  { id: "yellow",  name: "Yellow",       range: [40, 68],   sw: "#e9c43a" },
+  { id: "green",   name: "Green",        range: [68, 160],  sw: "#4f9a45" },
+  { id: "teal",    name: "Teal",         range: [160, 195], sw: "#2a9a92" },
+  { id: "blue",    name: "Blue",         range: [195, 250], sw: "#2f63b8" },
+  { id: "violet",  name: "Violet",       range: [250, 290], sw: "#6a45a8" },
+  { id: "magenta", name: "Pink/magenta", range: [290, 345], sw: "#c73a8a" },
+  { id: "black",   name: "Black",        range: null,       sw: "#18191d", note: "lightness < 16%" },
+  { id: "grey",    name: "Grey",         range: null,       sw: "#8a8c90", note: "saturation < 18%" },
+  { id: "paper",   name: "Paper",        range: null,       sw: "#efece3", note: "lightness > 88%" },
+];
+const FAM_INDEX = Object.fromEntries(FAMILIES.map((f, i) => [f.id, i]));
+
+function rgbToHsl(r, g, b) {
+  r /= 255; g /= 255; b /= 255;
+  const max = Math.max(r, g, b), min = Math.min(r, g, b), l = (max + min) / 2;
+  if (max === min) return [0, 0, l];
+  const d = max - min;
+  const s = l > .5 ? d / (2 - max - min) : d / (max + min);
+  let h;
+  if (max === r) h = (g - b) / d + (g < b ? 6 : 0);
+  else if (max === g) h = (b - r) / d + 2;
+  else h = (r - g) / d + 4;
+  return [h * 60, s, l];
+}
+function hueFamily(h) {
+  for (const f of FAMILIES) {
+    if (!f.range) continue;
+    const [a, b] = f.range;
+    if (a > b ? (h >= a || h < b) : (h >= a && h < b)) return f.id;
+  }
+  return "red";
+}
+const hex = (r, g, b) => "#" + [r, g, b].map(v => Math.round(v).toString(16).padStart(2, "0")).join("");
+
+// Weigh every pixel by vividness so a red banner beats a white margin,
+// but a mostly-grey photo still lands in a neutral family.
+function analyse(data) {
+  const acc = {};
+  for (let i = 0; i < data.length; i += 4) {
+    if (data[i + 3] < 128) continue;
+    const r = data[i], g = data[i + 1], b = data[i + 2];
+    const [h, s, l] = rgbToHsl(r, g, b);
+    let fam, w;
+    if (l < .16) { fam = "black"; w = 1; }
+    else if (l > .88 && s < .5) { fam = "paper"; w = .8; }
+    else if (s < .18) { fam = "grey"; w = .9; }
+    else { fam = hueFamily(h); w = 1 + 3 * s * (1 - Math.abs(2 * l - 1)); }
+    const a = acc[fam] || (acc[fam] = { w: 0, r: 0, g: 0, b: 0, hx: 0, hy: 0, l: 0 });
+    a.w += w; a.r += r * w; a.g += g * w; a.b += b * w; a.l += l * w;
+    a.hx += Math.cos(h * Math.PI / 180) * w; a.hy += Math.sin(h * Math.PI / 180) * w;
+  }
+  let best = "grey", bw = -1;
+  for (const k in acc) if (acc[k].w > bw) { bw = acc[k].w; best = k; }
+  const a = acc[best] || { w: 1, r: 128, g: 128, b: 128, hx: 0, hy: 0, l: .5 };
+  let hue = Math.atan2(a.hy, a.hx) * 180 / Math.PI; if (hue < 0) hue += 360;
+  return { fam: best, color: hex(a.r / a.w, a.g / a.w, a.b / a.w), hue, light: a.l / a.w };
+}
+
+const THUMB = 160, PROBE = 40;
+const thumbCanvas = document.createElement("canvas");
+thumbCanvas.width = thumbCanvas.height = THUMB;
+const tctx = thumbCanvas.getContext("2d");
+const probe = document.createElement("canvas");
+probe.width = probe.height = PROBE;
+const pctx = probe.getContext("2d", { willReadFrequently: true });
+
+// Cut a square patch (cover crop) from a source rectangle
+function cutPatch(src, sx, sy, sw, sh, meta) {
+  const side = Math.min(sw, sh);
+  const cx = sx + (sw - side) / 2, cy = sy + (sh - side) / 2;
+  pctx.drawImage(src, sx, sy, sw, sh, 0, 0, PROBE, PROBE);
+  const info = analyse(pctx.getImageData(0, 0, PROBE, PROBE).data);
+  tctx.drawImage(src, cx, cy, side, side, 0, 0, THUMB, THUMB);
+  return { ...info, ...meta, thumb: thumbCanvas.toDataURL("image/jpeg", .8) };
+}
+
+let patches = [];
+let usingSample = true;
+const state = { pattern: "blocks", size: 34, block: 4, swatch: false, stitch: true, focus: null };
+
+const $ = id => document.getElementById(id);
+const statusEl = $("status");
+
+async function loadSample() {
+  usingSample = true;
+  patches = [];
+  statusEl.textContent = "Cutting sample patches…";
+  const COLS = 8, ROWS = 6;
+  for (let n = 1; n <= 5; n++) {
+    try {
+      const img = new Image();
+      img.src = `sample/collage-${n}.webp`;
+      await img.decode();
+      const cw = img.naturalWidth / COLS, ch = img.naturalHeight / ROWS;
+      for (let y = 0; y < ROWS; y++) for (let x = 0; x < COLS; x++) {
+        patches.push(cutPatch(img, x * cw, y * ch, cw, ch, {
+          name: `Collage ${n}, row ${y + 1} col ${x + 1}`,
+          full: img.src, crop: [x * cw, y * ch, cw, ch],
+        }));
+      }
+    } catch (e) {
+      console.warn("Sample collage missing", n, e);
+    }
+  }
+  statusEl.textContent = patches.length
+    ? `Sample: ${patches.length} patches cut from 5 collages`
+    : "Sample collages not found. Add your own images to start.";
+  render();
+}
+
+async function addFiles(files) {
+  const list = [...files].filter(f => f.type.startsWith("image/"));
+  if (!list.length) { statusEl.textContent = "No image files in that selection."; return; }
+  if (usingSample) { patches = []; usingSample = false; }
+  let done = 0, failed = 0;
+  for (const f of list) {
+    try {
+      const bmp = await createImageBitmap(f);
+      patches.push(cutPatch(bmp, 0, 0, bmp.width, bmp.height, { name: f.name, full: URL.createObjectURL(f) }));
+      bmp.close && bmp.close();
+    } catch (e) { failed++; }
+    done++;
+    if (done % 10 === 0 || done === list.length) {
+      statusEl.textContent = `Reading images ${done}/${list.length}…`;
+      render();
+      await new Promise(r => requestAnimationFrame(r));
+    }
+  }
+  statusEl.textContent = `${patches.length} images pieced` + (failed ? `, ${failed} could not be read` : "");
+  render();
+}
+
+// Order: family around the wheel, then hue, then light to dark
+function sorted() {
+  return [...patches].sort((a, b) =>
+    FAM_INDEX[a.fam] - FAM_INDEX[b.fam] || a.hue - b.hue || b.light - a.light);
+}
+
+function patchEl(p, i) {
+  const el = document.createElement("button");
+  el.type = "button";
+  el.className = "patch";
+  el.style.setProperty("--c", p.color);
+  el.style.backgroundImage = `url(${p.thumb})`;
+  el.dataset.fam = p.fam;
+  el.dataset.i = i;
+  el.title = `${p.name} · ${p.color}`;
+  el.setAttribute("aria-label", `${p.name}, ${FAMILIES[FAM_INDEX[p.fam]].name}, ${p.color}`);
+  return el;
+}
+function plainEl(color, fam) {
+  const el = document.createElement("span");
+  el.className = "patch plain";
+  el.style.setProperty("--c", color);
+  if (fam) el.dataset.fam = fam;
+  return el;
+}
+// A lighter or darker cut of the same fabric, for filling out a block
+function shade(hexc, k) {
+  const n = parseInt(hexc.slice(1), 16);
+  const f = v => Math.max(0, Math.min(255, v + k));
+  return hex(f(n >> 16), f((n >> 8) & 255), f(n & 255));
+}
+
+function availWidth() {
+  return Math.max(200, $("frame").clientWidth - 2);
+}
+
+let order = [];
+function render() {
+  const q = $("quilt");
+  q.innerHTML = "";
+  q.classList.toggle("swatch", state.swatch);
+  q.classList.toggle("stitched", state.stitch);
+  $("blockCtl").hidden = state.pattern !== "blocks";
+  order = sorted();
+  const frameW = availWidth();
+  const edge = 2 * 6; // binding
+
+  if (state.pattern === "blocks") {
+    const B = state.block, p = state.size, gap = Math.max(4, Math.round(p / 4));
+    q.style.setProperty("--p", p + "px");
+    q.style.setProperty("--gap", gap + "px");
+    const blocks = [];
+    let i = 0;
+    for (const f of FAMILIES) {
+      const members = [];
+      while (i < order.length && order[i].fam === f.id) members.push(i++);
+      // Share a family evenly across its blocks so no block is mostly plain
+      const nb = Math.ceil(members.length / (B * B));
+      for (let s = 0; s < nb; s++) {
+        const from = Math.round(s * members.length / nb), to = Math.round((s + 1) * members.length / nb);
+        blocks.push({ fam: f, idx: members.slice(from, to) });
+      }
+    }
+    const blockPx = B * p;
+    const maxCols = Math.max(1, Math.floor((frameW - edge - gap) / (blockPx + gap)));
+    const cols = Math.max(1, Math.min(maxCols, Math.ceil(Math.sqrt(blocks.length * 1.3))));
+    q.style.gridTemplateColumns = `repeat(${cols}, ${blockPx}px)`;
+    const total = Math.ceil(blocks.length / cols) * cols;
+    for (let n = 0; n < total; n++) {
+      const blk = document.createElement("div");
+      blk.className = "block";
+      blk.style.setProperty("--b", B);
+      const b = blocks[n];
+      if (!b) { blk.classList.add("setting"); blk.style.height = blockPx + "px"; q.appendChild(blk); continue; }
+      blk.title = b.fam.name;
+      const base = order[b.idx[0]].color;
+      // Spread plain squares evenly between the pieced ones
+      const cells = new Array(B * B).fill(-1);
+      b.idx.forEach((k, j) => { cells[Math.floor(j * B * B / b.idx.length)] = k; });
+      cells.forEach((k, e) => blk.appendChild(k >= 0 ? patchEl(order[k], k) : plainEl(shade(base, e % 2 ? 18 : -14), b.fam.id)));
+      q.appendChild(blk);
+    }
+  } else if (state.pattern === "trip") {
+    // Concentric diamonds from the centre, colour-sorted outward
+    let N = Math.ceil(Math.sqrt(order.length)); if (N % 2 === 0) N++;
+    N = Math.max(N, 3);
+    const p = Math.max(8, Math.min(state.size, Math.floor((frameW - edge - 2 * 8) / N)));
+    q.style.setProperty("--p", p + "px");
+    q.style.setProperty("--gap", "8px");
+    const blk = document.createElement("div");
+    blk.className = "block";
+    blk.style.setProperty("--b", N);
+    const c = (N - 1) / 2, cells = [];
+    for (let y = 0; y < N; y++) for (let x = 0; x < N; x++) {
+      cells.push({ x, y, d: Math.abs(x - c) + Math.abs(y - c), a: Math.atan2(y - c, x - c) });
+    }
+    const rank = [...cells].sort((m, n) => m.d - n.d || m.a - n.a);
+    const grid = new Array(N * N).fill(-1);
+    rank.forEach((cell, k) => { if (k < order.length) grid[cell.y * N + cell.x] = k; });
+    const border = getComputedStyle(document.documentElement).getPropertyValue("--setting").trim();
+    grid.forEach(k => blk.appendChild(k >= 0 ? patchEl(order[k], k) : plainEl(border)));
+    q.style.gridTemplateColumns = `${N * p}px`;
+    q.appendChild(blk);
+  } else {
+    // Strips: one colour family per row, wrapped at the quilt width
+    const p = state.size;
+    q.style.setProperty("--p", p + "px");
+    q.style.setProperty("--gap", Math.max(3, Math.round(p / 6)) + "px");
+    const W = Math.max(4, Math.min(24, Math.floor((frameW - edge - 16) / p)));
+    q.style.gridTemplateColumns = `${W * p}px`;
+    let i = 0;
+    for (const f of FAMILIES) {
+      const members = [];
+      while (i < order.length && order[i].fam === f.id) members.push(i++);
+      if (!members.length) continue;
+      const blk = document.createElement("div");
+      blk.className = "block";
+      blk.style.setProperty("--b", W);
+      blk.title = f.name;
+      members.forEach(k => blk.appendChild(patchEl(order[k], k)));
+      const base = order[members[0]].color;
+      const pad = (W - members.length % W) % W;
+      for (let e = 0; e < pad; e++) blk.appendChild(plainEl(shade(base, e % 2 ? 18 : -14), f.id));
+      q.appendChild(blk);
+    }
+  }
+  applyFocus();
+  renderKey();
+}
+
+function applyFocus() {
+  document.querySelectorAll("#quilt .patch").forEach(el => {
+    el.classList.toggle("dim", !!state.focus && el.dataset.fam !== state.focus);
+  });
+}
+
+function renderKey() {
+  const counts = {}, colours = {};
+  for (const p of patches) {
+    counts[p.fam] = (counts[p.fam] || 0) + 1;
+  }
+  const max = Math.max(1, ...Object.values(counts));
+  const ul = $("key");
+  ul.innerHTML = "";
+  for (const f of FAMILIES) {
+    const n = counts[f.id] || 0;
+    const li = document.createElement("li");
+    const b = document.createElement("button");
+    b.type = "button";
+    b.className = "key-row" + (n ? "" : " empty");
+    b.setAttribute("aria-pressed", String(state.focus === f.id));
+    const note = f.range ? `${f.range[0]}\u00b0\u2013${f.range[1]}\u00b0` : f.note;
+    b.innerHTML = `<span class="sw" style="background:${f.sw}"></span>
+      <span class="key-name">${f.name}<small>${note}</small></span>
+      <span class="key-count">${n}</span>
+      <span class="bar" style="--c:${f.sw}"><i style="width:${(n / max) * 100}%"></i></span>`;
+    b.addEventListener("click", () => {
+      state.focus = state.focus === f.id ? null : f.id;
+      applyFocus();
+      renderKey();
+    });
+    li.appendChild(b);
+    ul.appendChild(li);
+  }
+}
+
+// Controls
+function seg(id, key, cast = v => v) {
+  $(id).addEventListener("click", e => {
+    const b = e.target.closest("button"); if (!b) return;
+    state[key] = cast(b.dataset.v);
+    $(id).querySelectorAll("button").forEach(x => x.setAttribute("aria-pressed", String(x === b)));
+    render();
+  });
+}
+seg("pattern", "pattern");
+seg("blocksize", "block", Number);
+$("size").addEventListener("input", e => { state.size = +e.target.value; render(); });
+$("swatch").addEventListener("change", e => { state.swatch = e.target.checked; render(); });
+$("stitch").addEventListener("change", e => { state.stitch = e.target.checked; render(); });
+$("addBtn").addEventListener("click", () => $("file").click());
+$("file").addEventListener("change", e => { addFiles(e.target.files); e.target.value = ""; });
+$("sampleBtn").addEventListener("click", loadSample);
+
+const frame = $("frame");
+["dragenter", "dragover"].forEach(t => document.addEventListener(t, e => { e.preventDefault(); frame.classList.add("drag"); }));
+["dragleave", "drop"].forEach(t => document.addEventListener(t, e => { e.preventDefault(); if (t === "drop" || e.target === document.documentElement) frame.classList.remove("drag"); }));
+document.addEventListener("drop", e => { if (e.dataTransfer?.files?.length) addFiles(e.dataTransfer.files); });
+
+// Lightbox: shows the whole image (or, for sample patches, the cut region)
+const lb = $("lb");
+$("quilt").addEventListener("click", e => {
+  const el = e.target.closest("button.patch"); if (!el) return;
+  const p = order[+el.dataset.i]; if (!p) return;
+  const img = $("lbImg");
+  if (p.crop) {
+    const src = new Image(); src.src = p.full;
+    src.decode().then(() => {
+      const [x, y, w, h] = p.crop, c = document.createElement("canvas");
+      c.width = w; c.height = h; c.getContext("2d").drawImage(src, x, y, w, h, 0, 0, w, h);
+      img.src = c.toDataURL("image/jpeg", .9);
+    });
+  } else img.src = p.full;
+  img.alt = p.name;
+  $("lbSw").style.background = p.color;
+  $("lbTxt").textContent = `${p.name} · ${FAMILIES[FAM_INDEX[p.fam]].name} · ${p.color} · hue ${Math.round(p.hue)}\u00b0`;
+  lb.showModal();
+});
+$("lbClose").addEventListener("click", () => lb.close());
+lb.addEventListener("click", e => { if (e.target === lb) lb.close(); });
+
+let rt;
+window.addEventListener("resize", () => { clearTimeout(rt); rt = setTimeout(render, 150); });
+
+loadSample();
+</script>
