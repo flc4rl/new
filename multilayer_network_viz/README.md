@@ -20,10 +20,11 @@ joined by thin flows for the actors that appear in more than one layer.
    centre. There is no network layout, so **positions carry no meaning**.
    Actors that bridge layers are kept on the half facing the viewer so their
    lines stay visible.
-3. Actor size and brightness scale with degree within the layer. Depth cueing
-   makes actors at the back of a blob smaller and dimmer.
-4. Blob radius scales with the cube root of the actor count, so blob volume is
-   proportional to network size.
+3. Actor size scales with degree on one scale shared by all three layers, so
+   equal sizes mean equal numbers of ties. Depth cueing makes actors at the
+   back of a blob smaller and dimmer.
+4. Blob area on the page is proportional to the actor count (radius scales
+   with the square root), so all three blobs have the same density of actors.
 5. Each flow is a thin, gently bowed curve from an actor in one blob to the
    same actor in another. The lines are not bundled, so they cross and weave
    into a web between the blobs.

@@ -163,12 +163,15 @@ def render(csv, out, light=False, labels=True, seed=7, dpi=600):
     ink = "#1c1d21" if light else "#e8e9ec"
     sub_ink = "#55575e" if light else "#9a9ca3"
 
-    # Blob radius scales with the cube root of the actor count (volume ~ n).
+    # Blob area on the page is proportional to the actor count (radius ~ sqrt n),
+    # so every blob has the same density of actors.
     n = {L: len(graphs[L][0]) for L in LAYERS}
-    R = {L: (n[L] / n["Macro"]) ** (1 / 3) for L in LAYERS}
+    R = {L: (n[L] / n["Macro"]) ** 0.5 for L in LAYERS}
     C = {"Macro": np.array([0.0, 0.0]),
-         "Meso": np.array([1.0 + R["Meso"] + 0.95, 0.42]),
-         "Micro": np.array([1.0 + 2 * R["Meso"] + R["Micro"] + 1.65, 0.85])}
+         "Meso": np.array([1.0 + R["Meso"] + 1.15, 0.42]),
+         "Micro": np.array([1.0 + 2 * R["Meso"] + R["Micro"] + 2.2, 0.85])}
+    # Actor size encodes degree on one scale shared by all layers.
+    max_log_deg = max(np.log1p(degrees(*graphs[L]).max()) for L in LAYERS)
 
     bridging = set(triple)
     for actors in pairs.values():
@@ -202,9 +205,8 @@ def render(csv, out, light=False, labels=True, seed=7, dpi=600):
                      0.25 if light else 0.55, 1)
 
         # actors: size by degree, lighter for hubs and for the front of the blob
-        hub = np.log1p(deg) / np.log1p(max(deg.max(), 1))
-        s_base = {"Macro": 1.3, "Meso": 3.2, "Micro": 6.0}[L]
-        size = s_base * (0.45 + 0.8 * depth) * (1 + 14 * hub ** 2.2)
+        hub = np.log1p(deg) / max_log_deg
+        size = 1.5 * (0.45 + 0.8 * depth) * (1 + 14 * hub ** 2.2)
         whiten = np.clip(0.05 + 0.35 * depth + 0.75 * hub ** 1.5, 0, 0.92)
         ncol = np.zeros((len(nodes), 4))
         ncol[:, :3] = mix(col, "#ffffff", whiten * (0.5 if light else 1.0))
@@ -212,7 +214,7 @@ def render(csv, out, light=False, labels=True, seed=7, dpi=600):
         order = np.argsort(z)
         ax.scatter(xy[order, 0], xy[order, 1], s=size[order], c=ncol[order],
                    edgecolors=(1, 1, 1, 0.9) if light else (0.02, 0.03, 0.05, 0.6),
-                   linewidths=0.15 if L == "Macro" else 0.3, zorder=3, rasterized=True)
+                   linewidths=0.15, zorder=3, rasterized=True)
 
     # ------------------------------------------------------------ flows
     # Thin, gently bowed lines from each actor in one blob to the same actor in
