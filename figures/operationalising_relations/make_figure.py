@@ -1,16 +1,22 @@
-"""Figure 3.y: Operationalising relations in this thesis.
+"""Figure 3.y: Operationalising relations.
 
-A single row of four panels that carries one network through the four moves
-of the method: nodes as tendencies identified through instances, ties
-qualified by the relational function they carry, categories as operations
-that relations cross, reproduce or refuse, and the function as what must
-persist over time. Panels 1 to 3 share their node positions, so each panel
-adds exactly one move.
+A generated field rather than a diagram. Nothing in it is drawn as a finished
+shape: tendencies are wherever instances cohere, and their edges are density
+contours, so they stay porous and can form or dissolve. Relations are bundles
+of individual traces that fray between the tendencies they connect. The
+assignment by the order is a current running through the whole field. Time
+runs left to right through three moments (t1, t2, t3): the instances drift,
+one tendency dissolves and new ones form where generative relations cross the
+order, while the generative pattern itself recurs.
 
-The figure is drawn on a 1600 x 800 design canvas (1 design px = 0.1 mm at
-the 16 cm print width) and written as SVG, PDF and 300 dpi PNG. The script
-fails if a text block overlaps another or runs off the canvas, or if any text
-is set below 8 pt at print size.
+Encodings carried over from the relevance, qualification and significance
+figure: generative #1F6F78 (solid), extractive #C4622D (dashed), not
+qualified #A3A8AE (thin), band #E9EDF1. Function is always carried by both
+colour and dash, so the figure survives greyscale printing.
+
+The field is drawn on a 1600 x 900 design canvas (1 px = 0.1 mm at 16 cm
+wide) and written as SVG, PDF and 300 dpi PNG. It is seeded, so every run
+gives the same image.
 
     python make_figure.py            # writes into ./output
     python make_figure.py --out DIR
@@ -18,97 +24,59 @@ is set below 8 pt at print size.
 
 import argparse
 import math
-import random
 from pathlib import Path
 
 import matplotlib
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+import numpy as np
+from matplotlib.collections import LineCollection
+from matplotlib.colors import LinearSegmentedColormap, to_rgba
 from matplotlib.lines import Line2D
-from matplotlib.patches import Circle, FancyBboxPatch, Polygon, Rectangle
+from scipy.ndimage import gaussian_filter
 
 # ---------------------------------------------------------------------------
-# Canvas and units
+# Canvas, units, palette
 # ---------------------------------------------------------------------------
 
-W, H = 1600, 800                      # design canvas in px
+W, H = 1600, 900
 PRINT_W_CM = 16.0
-PRINT_H_CM = PRINT_W_CM * H / W       # 8.0 cm
-DPI_DESIGN = W / (PRINT_W_CM / 2.54)  # 254 design px per inch
+PRINT_H_CM = PRINT_W_CM * H / W       # 9 cm
+DPI_DESIGN = W / (PRINT_W_CM / 2.54)
 PT = 72.0 / DPI_DESIGN                # one design px in points
 
 FONT = ["Arial", "Liberation Sans", "DejaVu Sans"]
-FS_TEXT = 8.0                         # minimum size at print size
-FS_HEAD = 9.5
-FS_CLAIM = 9.0
-LEADING = 1.25
+FS = 8.0                              # minimum size at print size
 
-# ---------------------------------------------------------------------------
-# Palette (as in the relevance, qualification and significance figure)
-# ---------------------------------------------------------------------------
+GEN = "#1F6F78"
+EXT = "#C4622D"
+UNQ = "#A3A8AE"
+BAND = "#E9EDF1"
+BAND_LINE = "#A7B2BC"
+INK = "#2A2F34"
+INK_SOFT = "#586068"
+DOT = "#353B41"
+CONTOUR = "#6E767E"
 
-GEN = "#1F6F78"                       # generative: solid, 3.5 px
-EXT = "#C4622D"                       # extractive: dashed 9/6, 3 px
-UNQ = "#A3A8AE"                       # not qualified: 1.2 px
-BAND = "#E9EDF1"                      # assignment by the order
-
-INK = "#24282C"
-INK_SOFT = "#5A6068"
-INK_FAINT = "#9AA0A6"
-DOT = "#3E444A"
-FIELD = "#F3F5F7"                     # inside of a tendency
-HALO = "#E4E8EC"
-TAB = "#DADEE2"
-RULE = "#C9CDD2"
-
-# ---------------------------------------------------------------------------
-# Layout
-# ---------------------------------------------------------------------------
-
-N_PANELS = 4
-GUTTER = 52
-PANEL_W = (W - (N_PANELS - 1) * GUTTER) / N_PANELS    # 361
-PANEL_X = [i * (PANEL_W + GUTTER) for i in range(N_PANELS)]
-
-HEAD_BASE = 70                        # baseline of the last header line
-DIAG_Y = 96                           # top of the diagram area
-DIAG_H = 320
-LABEL_Y = DIAG_Y + DIAG_H + 42
-CLAIM_Y = 636
-FOOT_Y = 732
-
-HEADERS = [
-    "What is a node?",
-    "What is a tie?",
-    "Where do categories sit?",
-    "What must persist over time?",
-]
-LABELS = [
-    "structured tendency identified through instances; "
-    "the name serves only as an index",
-    "tie qualified by the relational function it carries; "
-    "a trace of the relation, not a proxy",
-    "categories as operations that relations reproduce or refuse",
-    "the function must persist; units may change",
-]
-CLAIM_HEAD = "What can be claimed?"
-CLAIM = ("What relations do, and whether this holds as a tendency across "
-         "layers, sites and time")
-SCHEMATIC = "Schematic illustration, not a plot of the data."
+FIELD_TOP, FIELD_BOTTOM = 70, 770     # vertical extent of the field
+PHASES = {"t1": 0, "t2": 540, "t3": 1080}
+PHASE_W = 520
 
 ALT_TEXT = (
-    "Four panels carry one small network through the steps of the method. "
-    "First, each node is a loose cluster of dots, its instances, inside a "
-    "soft dashed boundary, with its name on a small grey tab outside. Second, "
-    "ties between the clusters are typed: a solid teal generative tie and a "
-    "dashed orange extractive tie each carry a small mark for the interviews, "
-    "ethnography and events that qualify them, and thin grey ties stay "
-    "unqualified. Third, a single shaded band marks assignment by the order: "
-    "two generative ties cross it and meet in a new node, one extractive tie "
-    "runs along its edge and another stops at it. Fourth, the same chain of "
-    "three generative ties appears at two time points while the instances "
-    "inside the nodes change, one node fades and a new node joins."
+    "A continuous field read from left to right across three moments, t1, "
+    "t2 and t3. Thousands of small dots are instances. Where they cohere, "
+    "faint dashed contour lines emerge around them as tendencies, whose edges "
+    "stay open. Between tendencies run bundles of fine, fraying traces: teal "
+    "solid ones for generative relations and orange dashed ones for "
+    "extractive relations, each dotted with small marks for interview, "
+    "ethnography and event evidence, and a few faint grey ones that are not "
+    "qualified. A pale current, the assignment by the order, winds through "
+    "the whole field. Teal traces cross it and new tendencies gather on the "
+    "far side; orange traces are drawn into it and follow it, or thin out "
+    "at its edge. Across the three moments the instances drift, one tendency "
+    "dissolves and a new one forms, while the same chain of generative "
+    "relations recurs."
 )
 
 plt.rcParams.update({
@@ -125,467 +93,517 @@ def lw(px):
     return px * PT
 
 
-def dashes(on, off):
-    return (0, (on * PT, off * PT))
+# ---------------------------------------------------------------------------
+# Smooth noise
+# ---------------------------------------------------------------------------
+
+class Noise:
+    """Sum of random plane waves: cheap, smooth, deterministic."""
+
+    def __init__(self, seed, waves=6, scale=160.0):
+        r = np.random.default_rng(seed)
+        ang = r.uniform(0, 2 * np.pi, waves)
+        k = 2 * np.pi / (scale * r.uniform(0.6, 1.6, waves))
+        self.kx, self.ky = k * np.cos(ang), k * np.sin(ang)
+        self.ph = r.uniform(0, 2 * np.pi, waves)
+        self.amp = r.uniform(0.5, 1.0, waves) / waves ** 0.5
+
+    def __call__(self, x, y):
+        x, y = np.asarray(x, float), np.asarray(y, float)
+        return sum(a * np.sin(kx * x + ky * y + p)
+                   for a, kx, ky, p in zip(self.amp, self.kx, self.ky,
+                                           self.ph))
+
+
+def wave1d(t, rng, terms=3, lo=1.0, hi=3.5):
+    """Smooth random function on [0, 1]."""
+    out = np.zeros_like(t)
+    for _ in range(terms):
+        out += rng.uniform(0.4, 1.0) * np.sin(
+            2 * np.pi * rng.uniform(lo, hi) * t + rng.uniform(0, 2 * np.pi))
+    return out / terms ** 0.5
 
 
 # ---------------------------------------------------------------------------
-# Geometry helpers
+# The order: a current through the field
 # ---------------------------------------------------------------------------
 
-def blob(cx, cy, r, seed, scale=1.0, n=160):
-    """A smooth, slightly irregular closed outline around (cx, cy)."""
-    rng = random.Random(seed)
-    a2, a3 = rng.uniform(0.04, 0.08), rng.uniform(0.02, 0.05)
-    p2, p3 = rng.uniform(0, 2 * math.pi), rng.uniform(0, 2 * math.pi)
-    pts = []
-    for i in range(n):
-        t = 2 * math.pi * i / n
-        rr = r * scale * (1 + a2 * math.cos(2 * t + p2)
-                          + a3 * math.cos(3 * t + p3))
-        pts.append((cx + rr * math.cos(t), cy + rr * math.sin(t)))
-    return pts
+def band_y(x):
+    x = np.asarray(x, float)
+    return (478 + 36 * np.sin(2 * np.pi * x / 900 + 0.5)
+            + 13 * np.sin(2 * np.pi * x / 330 + 1.7))
 
 
-def scatter(r, k, seed, dot_r):
-    """k instance positions inside a disc, kept apart from each other."""
-    rng = random.Random(seed)
-    pts, tries = [], 0
-    while len(pts) < k and tries < 5000:
-        tries += 1
-        a, d = rng.uniform(0, 2 * math.pi), r * math.sqrt(rng.uniform(0, 1))
-        q = (d * math.cos(a), d * math.sin(a))
-        if all(math.dist(q, p) > dot_r * 3.4 for p in pts):
-            pts.append(q)
-    return pts
+def band_slope(x):
+    return (band_y(x + 1) - band_y(x - 1)) / 2
 
 
-def bezier(a, b, bend=0.0, through=None, n=80):
-    """Quadratic curve from a to b. bend is a sideways offset relative to the
-    chord length; through puts the curve's midpoint on a given point."""
-    (x1, y1), (x2, y2) = a, b
-    mx, my = (x1 + x2) / 2, (y1 + y2) / 2
-    if through is not None:
-        cx, cy = 2 * through[0] - mx, 2 * through[1] - my
-    else:
-        dx, dy = x2 - x1, y2 - y1
-        cx, cy = mx - dy * bend, my + dx * bend
-    return [((1 - t) ** 2 * x1 + 2 * (1 - t) * t * cx + t * t * x2,
-             (1 - t) ** 2 * y1 + 2 * (1 - t) * t * cy + t * t * y2)
-            for t in (i / n for i in range(n + 1))]
-
-
-def trim(pts, a=None, ra=0.0, b=None, rb=0.0):
-    """Drop the parts of a polyline that lie inside the end nodes."""
-    return [p for p in pts
-            if (a is None or math.dist(p, a) >= ra)
-            and (b is None or math.dist(p, b) >= rb)]
-
-
-def at(pts, t):
-    """Point and tangent angle at fraction t of a polyline's length."""
-    seg = [math.dist(pts[i], pts[i + 1]) for i in range(len(pts) - 1)]
-    goal, acc = t * sum(seg), 0.0
-    for i, s in enumerate(seg):
-        if acc + s >= goal:
-            f = (goal - acc) / s if s else 0
-            (x1, y1), (x2, y2) = pts[i], pts[i + 1]
-            return (x1 + f * (x2 - x1), y1 + f * (y2 - y1)), \
-                math.atan2(y2 - y1, x2 - x1)
-        acc += s
-    (x1, y1), (x2, y2) = pts[-2], pts[-1]
-    return pts[-1], math.atan2(y2 - y1, x2 - x1)
+BAND_HALF = 34
 
 
 # ---------------------------------------------------------------------------
-# Canvas
+# Instances and tendencies
 # ---------------------------------------------------------------------------
 
-class Canvas:
+class Field:
     def __init__(self):
-        self.fig = plt.figure(figsize=(PRINT_W_CM / 2.54, PRINT_H_CM / 2.54),
-                              dpi=DPI_DESIGN)
-        self.ax = self.fig.add_axes([0, 0, 1, 1])
-        self.ax.set_xlim(0, W)
-        self.ax.set_ylim(H, 0)
-        self.ax.axis("off")
-        self.fig.patch.set_facecolor("white")
-        self._renderer = self.fig.canvas.get_renderer()
-        self.ox, self.oy = 0.0, 0.0
-        self.blocks = []
+        self.points = []              # (N, 2) arrays that feed the density
+        self.dots = []                # (xy, size, alpha)
+        self.trails = []              # (xy_from, xy_to, alpha)
 
-    def panel(self, i, dx=0.0):
-        self.ox, self.oy = PANEL_X[i] + dx, DIAG_Y
+    def tendency(self, c, n, sx, sy, rot, seed, state="stable",
+                 drift=(0.0, 0.0), toward=None):
+        """Sample the instances of one tendency.
 
-    def page(self):
-        self.ox, self.oy = 0.0, 0.0
+        state: stable | forming | dissolving | faint
+        """
+        r = np.random.default_rng(seed)
+        pts = r.normal(size=(n, 2)) * (sx, sy)
+        ca, sa = math.cos(rot), math.sin(rot)
+        pts = pts @ np.array([[ca, sa], [-sa, ca]])
+        warp = Noise(seed + 7, scale=70)
+        pts[:, 0] += 10 * warp(pts[:, 0], pts[:, 1])
+        pts[:, 1] += 10 * warp(pts[:, 1] + 40, pts[:, 0])
+        pts += c
+        prev = None
+        if state == "dissolving":
+            # instances disperse; trails point back to where they were
+            out = pts - c
+            prev = pts.copy()
+            pts = c + out * r.uniform(1.3, 2.0, (n, 1)) + drift
+        elif state == "forming":
+            # fewer instances arrive, from the direction of the relation
+            d = np.array(toward if toward is not None else (0, -1), float)
+            d /= np.linalg.norm(d)
+            prev = pts + d * r.uniform(10, 28, (n, 1)) \
+                + r.normal(scale=5, size=(n, 2))
+        elif drift != (0.0, 0.0):
+            prev = pts - np.array(drift) * r.uniform(0.6, 1.2, (n, 1))
+        size = r.uniform(1.6, 3.1, n)
+        alpha = {"stable": 0.85, "forming": 0.8, "dissolving": 0.45,
+                 "faint": 0.3}[state]
+        self.dots.append((pts, size, alpha))
+        if prev is not None:
+            k = n // 2 if state != "stable" else n // 4
+            idx = r.choice(n, k, replace=False)
+            self.trails.append((prev[idx], pts[idx], 0.22))
+        weight = {"stable": 1.0, "forming": 1.0, "dissolving": 0.35,
+                  "faint": 0.4}[state]
+        self.points.append((pts, weight))
+        return pts
 
-    def p(self, x, y):
-        return self.ox + x, self.oy + y
+    def dust(self, n, seed):
+        r = np.random.default_rng(seed)
+        pts = np.column_stack([r.uniform(0, W, n),
+                               r.uniform(FIELD_TOP, FIELD_BOTTOM, n)])
+        self.dots.append((pts, r.uniform(0.9, 1.8, n), 0.28))
 
-    # -- text ----------------------------------------------------------------
+    def density(self, cell=4, sigma=5.0):
+        nx, ny = W // cell, (FIELD_BOTTOM - FIELD_TOP) // cell
+        grid = np.zeros((ny, nx))
+        for pts, wgt in self.points:
+            h, _, _ = np.histogram2d(
+                pts[:, 1], pts[:, 0], bins=(ny, nx),
+                range=((FIELD_TOP, FIELD_BOTTOM), (0, W)))
+            grid += wgt * h
+        grid = gaussian_filter(grid, sigma)
+        xs = np.linspace(0, W, nx)
+        ys = np.linspace(FIELD_TOP, FIELD_BOTTOM, ny)
+        return xs, ys, grid
 
-    def width(self, s, size, weight="normal", style="normal"):
-        t = self.ax.text(0, 0, s, fontsize=size, fontweight=weight,
-                         fontstyle=style)
-        w = t.get_window_extent(renderer=self._renderer).width
-        t.remove()
-        return w                      # display px == design px
 
-    def wrap(self, s, width, size, weight="normal", style="normal"):
-        lines, cur = [], ""
-        for word in s.split():
-            trial = f"{cur} {word}".strip()
-            if cur and self.width(trial, size, weight, style) > width:
-                lines.append(cur)
-                cur = word
-            else:
-                cur = trial
-        return lines + [cur]
+# ---------------------------------------------------------------------------
+# Relations: bundles of traces
+# ---------------------------------------------------------------------------
 
-    def paragraph(self, x, y, s, width, size, name, weight="normal",
-                  style="normal", color=INK, leading=LEADING):
-        lines = self.wrap(s, width, size, weight, style)
-        step = size * leading / PT
-        for i, line in enumerate(lines):
-            self.ax.text(x, y + i * step, line, fontsize=size,
-                         fontweight=weight, fontstyle=style, color=color,
-                         va="top")
-            assert self.width(line, size, weight, style) <= width + 0.5, line
-        self.blocks.append((name, x, y, x + width, y + len(lines) * step))
-        return y + len(lines) * step
+def quad(a, b, bend, t):
+    a, b = np.asarray(a, float), np.asarray(b, float)
+    d = b - a
+    ctrl = (a + b) / 2 + np.array([-d[1], d[0]]) * bend
+    t = t[:, None]
+    return (1 - t) ** 2 * a + 2 * (1 - t) * t * ctrl + t ** 2 * b
 
-    def note(self, x, y, s, color=INK_SOFT, style="italic", ha="left",
-             va="center", **kw):
-        X, Y = self.p(x, y)
-        kw.setdefault("zorder", 9)
-        return self.ax.text(X, Y, s, fontsize=FS_TEXT, color=color,
-                            fontstyle=style, ha=ha, va=va, **kw)
 
-    # -- marks ---------------------------------------------------------------
+def normals(curve):
+    d = np.gradient(curve, axis=0)
+    d /= np.linalg.norm(d, axis=1, keepdims=True) + 1e-9
+    return np.column_stack([-d[:, 1], d[:, 0]])
 
-    def poly(self, pts, color, width_px, dash=None, z=3, alpha=1.0,
-             cap="round"):
-        xs, ys = zip(*(self.p(*q) for q in pts))
-        ln = Line2D(xs, ys, color=color, linewidth=lw(width_px), zorder=z,
-                    alpha=alpha, solid_capstyle=cap, dash_capstyle="round",
-                    solid_joinstyle="round")
+
+def bundle(a, b, n, seed, bend=0.0, spread=16.0, fray=10.0, reach=18.0,
+           m=90):
+    """n traces from inside tendency a to inside tendency b. They pinch
+    where they leave and enter, and fray in between."""
+    r = np.random.default_rng(seed)
+    t = np.linspace(0, 1, m)
+    out = []
+    for _ in range(n):
+        a_j = np.asarray(a) + r.normal(scale=reach, size=2)
+        b_j = np.asarray(b) + r.normal(scale=reach, size=2)
+        base = quad(a_j, b_j, bend + r.normal(scale=0.03), t)
+        env = np.sin(np.pi * t) ** 0.9
+        off = env * (r.normal(scale=spread * 0.5)
+                     + fray * wave1d(t, r, 3, 1.0, 3.0))
+        out.append(base + normals(base) * off[:, None])
+    return out
+
+
+def add_traces(ax, traces, color, width_px, alpha=(0.35, 0.75), dash=None,
+               z=4, fade=None, rng=None):
+    """Draw traces; fade=(t0, t1) thins them out along their length."""
+    rng = rng or np.random.default_rng(0)
+    segs, cols, widths = [], [], []
+    for tr in traces:
+        a0 = rng.uniform(*alpha)
+        w = width_px * rng.uniform(0.6, 1.25)
+        if fade is None:
+            segs.append(tr)
+            cols.append(to_rgba(color, a0))
+            widths.append(lw(w))
+        else:
+            n = len(tr)
+            for i in range(0, n - 1, 3):
+                f = i / (n - 1)
+                k = 1.0 if f < fade[0] else max(
+                    0.0, 1 - (f - fade[0]) / (fade[1] - fade[0]))
+                if k <= 0.02:
+                    continue
+                segs.append(tr[i:i + 4])
+                cols.append(to_rgba(color, a0 * k))
+                widths.append(lw(w * (0.5 + 0.5 * k)))
+    lc = LineCollection(segs, colors=cols, linewidths=widths, zorder=z,
+                        capstyle="round", joinstyle="round")
+    if dash:
+        lc.set_linestyle((0, (dash[0] * PT, dash[1] * PT)))
+    ax.add_collection(lc)
+
+
+def evidence(ax, traces, color, seed, k=6, z=6):
+    """Small marks along a bundle: interview, ethnography, event."""
+    r = np.random.default_rng(seed)
+    core = np.mean(np.stack(traces), axis=0)
+    ts = np.sort(r.uniform(0.22, 0.78, k))
+    for i, t in enumerate(ts):
+        p = core[int(t * (len(core) - 1))] + r.normal(scale=5, size=2)
+        mark = "osv"[i % 3]
+        ax.scatter([p[0]], [p[1]], s=(4.6 * PT * 2) ** 2, marker=mark,
+                   facecolor="white", edgecolor=color, linewidths=lw(1.3),
+                   zorder=z)
+
+
+def along_band(start, x_end, n, seed, side=-1):
+    """Traces that are drawn into the order and follow it."""
+    r = np.random.default_rng(seed)
+    out = []
+    for _ in range(n):
+        s = np.asarray(start) + r.normal(scale=12, size=2)
+        xe = x_end + r.normal(scale=25)
+        lane = side * r.uniform(4, BAND_HALF - 6)
+        entry_x = s[0] + (xe - s[0]) * 0.28
+        t = np.linspace(0, 1, 40)
+        p0 = quad(s, (entry_x, band_y(entry_x) + lane),
+                  r.normal(scale=0.05) - 0.12, t)
+        xs = np.linspace(entry_x, xe, 90)
+        wob = 4 * wave1d(np.linspace(0, 1, 90), r, 2, 1, 3)
+        p1 = np.column_stack([xs, band_y(xs) + lane + wob])
+        out.append(np.vstack([p0, p1[1:]]))
+    return out
+
+
+def toward_band(start, x_target, n, seed, side=+1):
+    """Traces that head for the order and thin out at its edge."""
+    r = np.random.default_rng(seed)
+    out = []
+    for _ in range(n):
+        s = np.asarray(start) + r.normal(scale=12, size=2)
+        xt = x_target + r.normal(scale=14)
+        e = (xt, band_y(xt) + side * (BAND_HALF + r.uniform(-4, 8)))
+        t = np.linspace(0, 1, 60)
+        base = quad(s, e, r.normal(scale=0.06), t)
+        off = np.sin(np.pi * t) * 6 * wave1d(t, r)
+        out.append(base + normals(base) * off[:, None])
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Composition
+# ---------------------------------------------------------------------------
+
+# How far each tendency has moved by a given moment: the configuration
+# drifts, so the recurring pattern is never a copy of the one before.
+DRIFT = {
+    "t1": {},
+    "t2": {"A": (10, 12), "B": (-8, 16), "C": (14, -10), "D": (-6, -8),
+           "F": (-10, 12)},
+    "t3": {"A": (-4, 6), "B": (12, -6), "C": (-14, 14), "D": (26, -12),
+           "F": (-6, 0)},
+}
+
+
+def phase_layout(key):
+    """Tendency centres for one moment, placed relative to the order."""
+    ox = PHASES[key]
+
+    def above(x, h):
+        return (ox + x, float(band_y(ox + x)) - h)
+
+    def below(x, h):
+        return (ox + x, float(band_y(ox + x)) + h)
+
+    base = {
+        "A": (ox + 82, 188), "B": (ox + 236, 142), "C": (ox + 392, 262),
+        "D": below(318, 150), "E": above(128, 105), "F": below(470, 175),
+    }
+    return {k: (x + DRIFT[key].get(k, (0, 0))[0],
+                y + DRIFT[key].get(k, (0, 0))[1])
+            for k, (x, y) in base.items()}
+
+
+CHAIN = [("A", "B", -0.10), ("B", "C", 0.12), ("C", "D", -0.08)]
+
+
+def compose(ax):
+    f = Field()
+    f.dust(1400, 1)
+    L = {k: phase_layout(k) for k in PHASES}
+
+    # t1: an established configuration
+    l1 = L["t1"]
+    f.tendency(l1["A"], 110, 30, 22, 0.3, 11)
+    f.tendency(l1["B"], 90, 34, 18, -0.2, 12)
+    f.tendency(l1["C"], 105, 26, 26, 0.8, 13)
+    f.tendency(l1["D"], 120, 36, 22, -0.3, 14)
+    f.tendency(l1["E"], 75, 26, 16, 0.1, 15)
+    f.tendency(l1["F"], 55, 22, 18, 0.5, 16)
+
+    # t2: instances drift, B reshapes, E dissolves
+    l2 = L["t2"]
+    f.tendency(l2["A"], 105, 28, 24, 0.5, 21, drift=(6, -4))
+    f.tendency(l2["B"], 85, 24, 26, 0.9, 22, drift=(-8, 6))
+    f.tendency(l2["C"], 100, 28, 24, 0.4, 23, drift=(4, 6))
+    f.tendency(l2["D"], 105, 34, 24, -0.1, 24, drift=(8, 2))
+    f.tendency(l2["E"], 60, 22, 14, 0.1, 25, state="dissolving",
+               drift=(-10, -14))
+    f.tendency(l2["F"], 60, 24, 18, 0.3, 26, drift=(-6, 4))
+
+    # t3: E is gone, the old D drifts off and a new D forms where the
+    # generative relation crosses the order; the chain recurs
+    l3 = L["t3"]
+    old_d = (l3["D"][0] + 90, l3["D"][1] + 58)
+    f.tendency(l3["A"], 100, 30, 22, 0.2, 31, drift=(-5, 5))
+    f.tendency(l3["B"], 95, 30, 20, 0.1, 32, drift=(6, -3))
+    f.tendency(l3["C"], 95, 26, 28, 0.9, 33, drift=(-4, 5))
+    f.tendency(old_d, 55, 26, 18, -0.2, 34, state="dissolving",
+               drift=(22, 10))
+    f.tendency(l3["D"], 70, 26, 20, -0.4, 35, state="forming",
+               toward=np.subtract(l3["C"], l3["D"]))
+    f.tendency(l3["F"], 70, 26, 20, 0.2, 36, drift=(-4, -3))
+    f.tendency(l3["E"], 18, 30, 20, 0.0, 37, state="faint")
+
+    # --- trajectories: each tendency carried through the moments ----------
+    old_d = tuple(old_d)
+    paths = [[L["t1"][k], L["t2"][k], L["t3"][k]] for k in "ABCF"]
+    paths += [[L["t1"]["D"], L["t2"]["D"], old_d],
+              [L["t1"]["E"], L["t2"]["E"]]]
+    tr_rng = np.random.default_rng(9)
+    trajs = []
+    for pts in paths:
+        for a, b in zip(pts, pts[1:]):
+            trajs += bundle(a, b, 2, int(tr_rng.integers(1e6)), bend=0.06,
+                            spread=6, fray=8, reach=6, m=120)
+    add_traces(ax, trajs, "#8E969E", 0.7, alpha=(0.28, 0.4), dash=(1.5, 4),
+               z=0.8, rng=tr_rng)
+
+    # --- density: halo and porous contours --------------------------------
+    xs, ys, dens = f.density()
+    dens /= dens.max()
+    halo = LinearSegmentedColormap.from_list(
+        "halo", [(1, 1, 1, 0), to_rgba("#DDE3E8", 0.9)])
+    ax.imshow(np.clip(dens / 0.55, 0, 1) ** 0.8, extent=(0, W, FIELD_BOTTOM,
+              FIELD_TOP), cmap=halo, interpolation="bicubic", zorder=0.5,
+              aspect="auto")
+    ax.contour(xs, ys, dens, levels=[0.16, 0.30, 0.48], colors=CONTOUR,
+               linewidths=[lw(0.9), lw(1.0), lw(1.1)],
+               linestyles=[(0, (1.5 * PT, 3.5 * PT)),
+                           (0, (3 * PT, 4 * PT)),
+                           (0, (5 * PT, 4 * PT))],
+               alpha=0.85, zorder=2)
+
+    # --- the order ---------------------------------------------------------
+    bx = np.linspace(-20, W + 20, 700)
+    by = band_y(bx)
+    for half, a in ((BAND_HALF * 1.9, 0.25), (BAND_HALF * 1.45, 0.35),
+                    (BAND_HALF * 1.1, 0.5), (BAND_HALF * 0.8, 0.6)):
+        ax.fill_between(bx, by - half, by + half, color=BAND, alpha=a,
+                        lw=0, zorder=1)
+    r = np.random.default_rng(3)
+    lanes = []
+    for j in range(22):
+        lane = r.uniform(-BAND_HALF, BAND_HALF)
+        wob = 3.5 * wave1d(np.linspace(0, 1, len(bx)), r, 3, 3, 9)
+        x0 = r.uniform(-20, W * 0.35)
+        x1 = x0 + r.uniform(W * 0.4, W)
+        m = (bx >= x0) & (bx <= x1)
+        lanes.append(np.column_stack([bx[m], by[m] + lane + wob[m]]))
+    add_traces(ax, lanes, BAND_LINE, 0.8, alpha=(0.35, 0.7), z=1.2,
+               rng=np.random.default_rng(4))
+
+    # --- relations, moment by moment ---------------------------------------
+    rel_seed = 100
+    for key, lay in L.items():
+        rel_seed += 100
+        rng = np.random.default_rng(rel_seed)
+        # the generative chain recurs in every moment
+        for i, (u, v, bend) in enumerate(CHAIN):
+            n = 14 if (key, v) != ("t3", "D") else 11
+            tr = bundle(lay[u], lay[v], n, rel_seed + i, bend=bend)
+            add_traces(ax, tr, GEN, 1.25, rng=rng)
+            evidence(ax, tr, GEN, rel_seed + 10 + i, k=3)
+        # extractive: drawn into the order and following it
+        if key != "t3":
+            tr = along_band(lay["E"], lay["E"][0] + 330, 11, rel_seed + 5,
+                            side=-1)
+            add_traces(ax, tr, EXT, 1.1, alpha=(0.4, 0.8), dash=(6, 4.5),
+                       fade=(0.6, 1.0), rng=rng)
+            evidence(ax, tr[:6], EXT, rel_seed + 15, k=3)
+        # extractive: heading for the order and thinning out at its edge
+        tr = toward_band(lay["F"], lay["F"][0] - 70, 9, rel_seed + 6, +1)
+        add_traces(ax, tr, EXT, 1.0, alpha=(0.4, 0.75), dash=(6, 4.5),
+                   fade=(0.55, 1.0), rng=rng)
+        # not qualified: a few faint wisps
+        tr = bundle(lay["A"], lay["E"] if key != "t3" else lay["C"], 4,
+                    rel_seed + 7, bend=0.15, spread=10, fray=6)
+        add_traces(ax, tr, UNQ, 0.8, alpha=(0.45, 0.7), z=3, rng=rng)
+        tr = bundle(lay["D"], lay["F"], 3, rel_seed + 8, bend=-0.1,
+                    spread=8, fray=5)
+        add_traces(ax, tr, UNQ, 0.8, alpha=(0.45, 0.7), z=3, rng=rng)
+
+    # --- instances on top ----------------------------------------------------
+    for pts, size, alpha in f.dots:
+        ax.scatter(pts[:, 0], pts[:, 1], s=(size * PT * 2) ** 2, color=DOT,
+                   alpha=alpha, linewidths=0, zorder=5)
+    tsegs = [np.stack([a, b]) for fr, to, _ in f.trails
+             for a, b in zip(fr, to)]
+    talpha = [al for fr, to, al in f.trails for _ in fr]
+    ax.add_collection(LineCollection(
+        tsegs, colors=[to_rgba(DOT, a) for a in talpha],
+        linewidths=lw(0.6), zorder=4.5))
+    return L, old_d
+
+
+# ---------------------------------------------------------------------------
+# Annotation
+# ---------------------------------------------------------------------------
+
+def annotate(ax, text, xy, xytext, ha="left", va="center"):
+    ax.annotate(text, xy=xy, xytext=xytext, fontsize=FS, fontstyle="italic",
+                color=INK_SOFT, ha=ha, va=va, zorder=10,
+                arrowprops=dict(arrowstyle="-", color="#8C939A",
+                                lw=lw(0.8), shrinkA=3, shrinkB=2,
+                                connectionstyle="arc3,rad=0.15"))
+
+
+def tag(ax, xy, text):
+    ax.text(xy[0], xy[1], text, fontsize=FS, color="#5B6269", ha="center",
+            va="center", zorder=9,
+            bbox=dict(boxstyle="round,pad=0.25,rounding_size=0.5",
+                      facecolor="#E3E7EB", edgecolor="none"))
+
+
+def frame(ax, L, old_d):
+    # time
+    y = 46
+    ax.add_line(Line2D([10, W - 14], [y, y], color="#9AA0A6",
+                       linewidth=lw(1.0)))
+    ax.add_line(Line2D([W - 26, W - 12, W - 26], [y - 6, y, y + 6],
+                       color="#9AA0A6", linewidth=lw(1.0)))
+    for key, ox in PHASES.items():
+        cx = ox + PHASE_W / 2
+        ax.add_line(Line2D([cx, cx], [y - 5, y + 5], color="#9AA0A6",
+                           linewidth=lw(1.0)))
+        ax.text(cx, y - 10, key, fontsize=9.5, fontweight="bold",
+                color=INK_SOFT, ha="center", va="bottom")
+
+    l1, l2, l3 = L["t1"], L["t2"], L["t3"]
+    # names hang on two tendencies, as an index only
+    tag(ax, (l1["A"][0] + 4, l1["A"][1] + 58), "Group 1")
+    tag(ax, (l1["D"][0] + 6, l1["D"][1] + 62), "Group 2")
+
+    annotate(ax, "instances", (l1["A"][0] - 34, l1["A"][1] - 16), (14, 86))
+    annotate(ax, "a tendency: instances cohering, porous at its edge",
+             (l1["B"][0] + 24, l1["B"][1] - 34), (178, 86))
+    annotate(ax, "a name is only an index",
+             (l1["D"][0] - 34, l1["D"][1] + 66), (14, 786))
+    annotate(ax, "extractive relations are\ndrawn into the order",
+             (236, float(band_y(236)) - 8), (200, 330), ha="center")
+    annotate(ax, "or thin out\nat its edge",
+             (l1["F"][0] - 52, float(band_y(l1["F"][0] - 60)) + 48),
+             (536, 640))
+    annotate(ax, "generative relations cross the order;\n"
+             "a new tendency forms",
+             (l3["D"][0] - 40, l3["D"][1] + 30), (1064, 712))
+    annotate(ax, "units drift; a tendency dissolves",
+             (old_d[0] + 10, old_d[1] + 44), (W - 4, 786), ha="right")
+    ax.text(W - 4, 86, "the generative pattern recurs; the units carrying "
+            "it change", fontsize=FS, fontstyle="italic", color=GEN,
+            ha="right", va="center", zorder=10)
+    # the order's name, on the current where nothing crosses it
+    x = 630.0
+    ang = math.degrees(math.atan(-band_slope(x)))
+    ax.text(x, float(band_y(x)), "assignment by the order", fontsize=FS,
+            fontstyle="italic", color="#56606A", ha="center", va="center",
+            rotation=ang, rotation_mode="anchor", zorder=1.5)
+
+
+def legend(ax):
+    y = 832
+    x = 0.0
+
+    def text(s):
+        nonlocal x
+        t = ax.text(x, y, s, fontsize=FS, color=INK_SOFT, va="center")
+        x += t.get_window_extent(
+            renderer=ax.figure.canvas.get_renderer()).width + 34
+
+    for color, dash, width, label in (
+            (GEN, None, 3.0, "generative"),
+            (EXT, (7, 5), 2.6, "extractive"),
+            (UNQ, None, 1.2, "not qualified")):
+        ln = Line2D([x, x + 50], [y, y], color=color, linewidth=lw(width),
+                    solid_capstyle="round")
         if dash:
-            ln.set_linestyle(dashes(*dash))
-        self.ax.add_line(ln)
-
-    def tie(self, pts, kind):
-        if kind == "gen":
-            self.poly(pts, GEN, 3.5, z=4)
-        elif kind == "ext":
-            self.poly(pts, EXT, 3.0, dash=(9, 6), z=4)
-        else:
-            self.poly(pts, UNQ, 1.2, z=3)
-
-    def tendency(self, x, y, r, seed, k=6, dot_r=5.0, faded=False,
-                 new=False):
-        """A node: instances inside a soft, dashed, slightly irregular edge."""
-        alpha = 0.32 if faded else 1.0
-        for scale, a in ((1.22, 0.22), (1.12, 0.45)):
-            self.ax.add_patch(Polygon(
-                [self.p(*q) for q in blob(x, y, r, seed, scale)], closed=True,
-                facecolor=HALO, edgecolor="none", alpha=a * alpha, zorder=1.8))
-        self.ax.add_patch(Polygon(
-            [self.p(*q) for q in blob(x, y, r, seed)], closed=True,
-            facecolor=FIELD, edgecolor=INK if new else INK_SOFT,
-            linewidth=lw(1.9 if new else 1.5),
-            linestyle=dashes(2.2, 3.2) if new else dashes(5, 4),
-            alpha=alpha, zorder=2))
-        for dx, dy in scatter(r * 0.62, k, seed + 101, dot_r):
-            self.ax.add_patch(Circle(self.p(x + dx, y + dy), dot_r,
-                                     facecolor=DOT, edgecolor="none",
-                                     alpha=alpha, zorder=2.5))
-
-    def tab(self, x, y, text, side):
-        """Name tab attached to the outside of a boundary."""
-        w, h = self.width(text, FS_TEXT) + 18, 25
-        tx = {"right": x, "left": x - w, "above": x - w / 2,
-              "below": x - w / 2}[side]
-        ty = {"right": y - h / 2, "left": y - h / 2, "above": y - h,
-              "below": y}[side]
-        self.ax.add_patch(FancyBboxPatch(
-            self.p(tx, ty), w, h, boxstyle="round,pad=0,rounding_size=5",
-            facecolor=TAB, edgecolor="none", zorder=1.9))
-        X, Y = self.p(tx + w / 2, ty + h / 2 + 0.5)
-        self.ax.text(X, Y, text, fontsize=FS_TEXT, color="#4B5157",
-                     ha="center", va="center", zorder=3)
-
-    def glyph(self, pts, color, t=0.5):
-        (cx, cy), ang = at(pts, t)
-        self.glyph_at(cx, cy, ang, color)
-
-    def glyph_at(self, cx, cy, ang, color):
-        """Three tiny tabs sitting on a tie: interview, ethnography, event."""
-        tw, th, gap = 12.0, 10.0, 2.5
-        ux, uy = math.cos(ang), math.sin(ang)
-        nx, ny = -uy, ux
-        for k in (-1, 0, 1):
-            mx, my = cx + ux * k * (tw + gap), cy + uy * k * (tw + gap)
-            corners = [self.p(mx + ux * sx * tw / 2 + nx * sy * th / 2,
-                              my + uy * sx * tw / 2 + ny * sy * th / 2)
-                       for sx, sy in ((-1, -1), (1, -1), (1, 1), (-1, 1))]
-            self.ax.add_patch(Polygon(corners, closed=True, facecolor="white",
-                                      edgecolor=color, linewidth=lw(1.6),
-                                      joinstyle="round", zorder=6))
-
-    def save(self, out: Path, stem: str):
-        out.mkdir(parents=True, exist_ok=True)
-        title = "Operationalising relations"
-        self.fig.savefig(out / f"{stem}.svg",
-                         metadata={"Title": title, "Description": ALT_TEXT})
-        self.fig.savefig(out / f"{stem}.pdf",
-                         metadata={"Title": title, "Subject": ALT_TEXT})
-        self.fig.savefig(out / f"{stem}.png", dpi=300,
-                         metadata={"Title": title, "Description": ALT_TEXT})
-
-
-# ---------------------------------------------------------------------------
-# Shared network (panel-local px; a diagram panel is 361 x 320)
-# ---------------------------------------------------------------------------
-
-R_NODE = 34
-NODES = {"P": (62, 70), "Q": (192, 44), "S": (70, 206),
-         "R": (318, 118), "T": (178, 286)}
-SEEDS = {"P": 3, "Q": 11, "S": 7, "R": 19, "T": 23, "N": 31}
-COUNTS = {"P": 6, "Q": 5, "S": 7, "R": 6, "T": 5, "N": 4}
-# The node the crossing produces. Its position and the label centre were
-# found by search so that straight lines from S and Q to it pass almost
-# exactly through the word gaps of the band label.
-NEW = (226, 206)
-LABEL_CX = 150.0
-
-# Band: centre line y = BAND_Y0 + BAND_K * x, BAND_HALF measured normal to it
-BAND_Y0, BAND_K, BAND_HALF = 382.0, -1.25, 24.0
-BAND_LABEL = "assignment by the order"
-
-
-def curve(u, v, bend):
-    a, b = NODES[u], NODES[v]
-    return trim(bezier(a, b, bend), a, R_NODE + 5, b, R_NODE + 5)
-
-
-def panel_nodes(c):
-    c.panel(0)
-    # every name tab hangs from the lower edge of its boundary
-    for i, (k, (x, y)) in enumerate(NODES.items(), start=1):
-        c.tendency(x, y, R_NODE, SEEDS[k], COUNTS[k])
-        bottom = max(q[1] for q in blob(x, y, R_NODE, SEEDS[k])
-                     if abs(q[0] - x) < 6)
-        c.tab(x, bottom - 1.5, f"Group {i}", "below")
-
-
-def panel_ties(c):
-    c.panel(1)
-    for u, v, kind, bend, glyph in [
-        ("P", "Q", "gen", -0.10, True),
-        ("Q", "R", "ext", -0.10, True),
-        ("P", "S", "unq", 0.08, False),
-        ("S", "T", "unq", 0.10, False),
-    ]:
-        pts = curve(u, v, bend)
-        c.tie(pts, kind)
-        if glyph:
-            c.glyph(pts, GEN if kind == "gen" else EXT)
-    for k, (x, y) in NODES.items():
-        c.tendency(x, y, R_NODE, SEEDS[k], COUNTS[k])
-
-
-def band_dy():
-    return BAND_HALF * math.sqrt(1 + BAND_K ** 2)
-
-
-def label_gaps(c, mx):
-    """Centre of the band label and the positions of its word gaps."""
-    L = c.width(BAND_LABEL, FS_TEXT, style="italic")
-    space = c.width("a b", FS_TEXT, style="italic") - \
-        c.width("ab", FS_TEXT, style="italic")
-    k = math.hypot(1, BAND_K)
-    ux, uy = 1 / k, BAND_K / k
-    my = BAND_Y0 + BAND_K * mx
-    sx, sy = mx - ux * L / 2, my - uy * L / 2
-    words = BAND_LABEL.split()
-    gaps = []
-    for i in range(1, len(words)):
-        d = c.width(" ".join(words[:i]), FS_TEXT, style="italic") + space / 2
-        gaps.append((sx + ux * d, sy + uy * d))
-    return (mx, my), gaps
-
-
-def panel_categories(c):
-    c.panel(2)
-    # the single band, feathered: a solid core and two faint fringes
-    clip = Rectangle(c.p(-6, -6), PANEL_W + 12, DIAG_H + 12,
-                     transform=c.ax.transData)
-    x0, x1 = -40, PANEL_W + 40
-    for grow, a in ((1.5, 0.35), (1.22, 0.6), (1.0, 1.0)):
-        dy = band_dy() * grow
-        pts = [(x0, BAND_Y0 + BAND_K * x0 - dy), (x1, BAND_Y0 + BAND_K * x1 - dy),
-               (x1, BAND_Y0 + BAND_K * x1 + dy), (x0, BAND_Y0 + BAND_K * x0 + dy)]
-        patch = Polygon([c.p(*q) for q in pts], closed=True, facecolor=BAND,
-                        edgecolor="none", alpha=a, zorder=1)
-        c.ax.add_patch(patch)
-        patch.set_clip_path(clip)
-    (mx, my), gaps = label_gaps(c, LABEL_CX)
-    ang = -math.degrees(math.atan(BAND_K))
-    c.note(mx, my, BAND_LABEL, ha="center", rotation=ang,
-           rotation_mode="anchor", color="#5B636B", zorder=1.5)
-
-    # the two generative ties cross through the label's word gaps, so the
-    # label never covers them, and meet in the node they produce
-    for u, g in (("S", gaps[0]), ("Q", gaps[2])):
-        a = NODES[u]
-        c.tie(trim(bezier(a, NEW, through=g), a, R_NODE + 5, NEW, R_NODE + 5),
-              "gen")
-    # extractive: one runs along the band's edge, one stops at it
-    c.tie(curve("S", "Q", 0.0), "ext")
-    a, toward = NODES["R"], NODES["P"]
-    ux, uy = toward[0] - a[0], toward[1] - a[1]
-    t = (BAND_Y0 + band_dy() + BAND_K * a[0] - a[1]) / (uy - BAND_K * ux)
-    stop = (a[0] + t * ux, a[1] + t * uy)
-    c.tie(trim(bezier(a, stop), a, R_NODE + 5), "ext")
-    d = math.hypot(ux, uy)
-    nx, ny = -uy / d * 9, ux / d * 9
-    c.poly([(stop[0] - nx, stop[1] - ny), (stop[0] + nx, stop[1] + ny)],
-           EXT, 3.0, z=4)
-    # left unqualified
-    c.tie(curve("P", "Q", -0.10), "unq")
-    a = NODES["T"]
-    c.tie(trim(bezier(a, NEW, -0.10), a, R_NODE + 5, NEW, R_NODE + 5), "unq")
-
-    for k, (x, y) in NODES.items():
-        c.tendency(x, y, R_NODE, SEEDS[k], COUNTS[k])
-    c.tendency(*NEW, R_NODE, SEEDS["N"], COUNTS["N"], new=True)
-    c.note(NEW[0] + R_NODE + 10, NEW[1] + 4, "new")
-
-
-# Panel 4: the same generative chain at two time points
-SLICE_W = 150
-SLICE_X = {"T1": 0, "T2": PANEL_W - SLICE_W}
-R_MINI = 22
-MINI = {"a": (34, 62), "b": (118, 50), "c": (52, 150), "d": (120, 228),
-        "e": (30, 276)}
-MINI_NEW = (100, 298)
-CHAIN = [("a", "b", -0.12), ("b", "c", 0.10), ("c", "d", -0.12)]
-
-
-def mini_curve(a, b, bend):
-    return trim(bezier(a, b, bend), a, R_MINI + 4, b, R_MINI + 4)
-
-
-def panel_time(c):
-    for key, x0 in SLICE_X.items():
-        c.panel(3, x0)
-        c.note(SLICE_W / 2, 8, key, style="normal", ha="center",
-               color=INK_SOFT, fontweight="bold")
-        # the instances differ between T1 and T2; the tendency is the same
-        shift = 0 if key == "T1" else 500
-        for u, v, bend in CHAIN:
-            c.tie(mini_curve(MINI[u], MINI[v], bend), "gen")
-        if key == "T1":
-            c.tie(mini_curve(MINI["c"], MINI["e"], 0.1), "unq")
-        else:
-            c.tie(mini_curve(MINI["d"], MINI_NEW, -0.1), "unq")
-        for k, (x, y) in MINI.items():
-            s = ord(k) + shift
-            c.tendency(x, y, R_MINI, s, k=4 + s % 2, dot_r=3.6,
-                       faded=(key == "T2" and k == "e"))
-        if key == "T2":
-            c.tendency(*MINI_NEW, R_MINI, 77, k=3, dot_r=3.6, new=True)
-            c.note(MINI_NEW[0], MINI_NEW[1] + R_MINI + 16, "new",
-                   ha="center")
-    # a quiet arrow of time between the slices
-    c.panel(3)
-    y, x_from, x_to = 8, SLICE_W - 30, PANEL_W - SLICE_W + 30
-    c.poly([(x_from, y), (x_to, y)], INK_FAINT, 1.2, z=2)
-    c.poly([(x_to - 9, y - 5), (x_to, y), (x_to - 9, y + 5)], INK_FAINT, 1.2,
-           z=2)
-
-
-# ---------------------------------------------------------------------------
-# Text frame
-# ---------------------------------------------------------------------------
-
-def frame(c):
-    c.page()
-    step = FS_HEAD * 1.15 / PT
-    for i, q in enumerate(HEADERS):
-        num_w = c.width(f"{i + 1}", FS_HEAD, "bold") + 14
-        lines = c.wrap(q, PANEL_W - num_w, FS_HEAD, "bold")
-        top = HEAD_BASE - (len(lines) - 1) * step
-        c.ax.text(PANEL_X[i], top, f"{i + 1}", fontsize=FS_HEAD,
-                  fontweight="bold", color=GEN, va="baseline")
-        for k, line in enumerate(lines):
-            c.ax.text(PANEL_X[i] + num_w, top + k * step, line,
-                      fontsize=FS_HEAD, fontweight="bold", color=INK,
-                      va="baseline")
-        c.blocks.append((q, PANEL_X[i], top - FS_HEAD * 0.8 / PT,
-                         PANEL_X[i] + PANEL_W, HEAD_BASE + 4))
-        c.paragraph(PANEL_X[i] + num_w, LABEL_Y, LABELS[i], PANEL_W - num_w,
-                    FS_TEXT, f"label {i + 1}", color=INK_SOFT)
-
-    # what can be claimed
-    c.ax.add_line(Line2D([0, W], [CLAIM_Y - 22, CLAIM_Y - 22], color=RULE,
-                         linewidth=lw(1.0)))
-    c.paragraph(0, CLAIM_Y, CLAIM_HEAD, W, FS_HEAD, "claim head",
-                weight="bold", leading=1.1)
-    c.paragraph(0, CLAIM_Y + 40, CLAIM, W, FS_CLAIM, "claim", color=INK)
-
-    legend(c)
-    c.ax.text(0, FOOT_Y + 50, SCHEMATIC, fontsize=FS_TEXT, fontstyle="italic",
-              color=INK_SOFT, va="center")
-    c.blocks.append(("schematic", 0, FOOT_Y + 36,
-                     c.width(SCHEMATIC, FS_TEXT, style="italic"), FOOT_Y + 64))
-
-
-def legend(c):
-    """One quiet line of keys under the figure."""
-    c.page()
-    x, y = 0.0, FOOT_Y + 12
-    for kind, text in [("gen", "generative"), ("ext", "extractive"),
-                       ("unq", "not qualified"),
-                       ("glyph", "interview, ethnography, event")]:
-        if kind == "glyph":
-            c.poly([(x, y), (x + 56, y)], INK_FAINT, 1.2, z=3)
-            c.glyph_at(x + 28, y, 0.0, INK_SOFT)
-        else:
-            c.tie([(x, y), (x + 56, y)], kind)
-        c.ax.text(x + 68, y, text, fontsize=FS_TEXT, color=INK_SOFT,
-                  va="center")
-        x += 68 + c.width(text, FS_TEXT) + 40
-    c.blocks.append(("legend", 0, FOOT_Y, x - 40, FOOT_Y + 26))
-
-
-def check_layout(c):
-    b = c.blocks
-    for name, x0, y0, x1, y1 in b:
-        assert 0 <= x0 and x1 <= W + 0.5 and 0 <= y0 and y1 <= H, \
-            f"{name} leaves the canvas: {(x0, y0, x1, y1)}"
-        if name.startswith("label"):
-            assert y1 < CLAIM_Y - 30, f"{name} reaches the claim rule"
-    for i in range(len(b)):
-        for j in range(i + 1, len(b)):
-            _, ax0, ay0, ax1, ay1 = b[i]
-            _, bx0, by0, bx1, by1 = b[j]
-            if ax0 < bx1 and bx0 < ax1 and ay0 < by1 and by0 < ay1:
-                raise AssertionError(f"overlap: {b[i][0]!r} / {b[j][0]!r}")
-    for t in c.ax.texts:
-        assert t.get_fontsize() >= FS_TEXT, t.get_text()
+            ln.set_linestyle((0, (dash[0] * PT, dash[1] * PT)))
+        ax.add_line(ln)
+        x += 62
+        text(label)
+    for mark, label in (("o", "interview"), ("s", "ethnography"),
+                        ("v", "event")):
+        ax.scatter([x + 6], [y], s=(4.6 * PT * 2) ** 2, marker=mark,
+                   facecolor="white", edgecolor=INK_SOFT, linewidths=lw(1.3))
+        x += 20
+        text(label)
+    ax.scatter([x + 4], [y], s=(2.4 * PT * 2) ** 2, color=DOT)
+    x += 16
+    text("instance")
+    ax.text(W, y + 42, "Generated illustration, not a plot of the data.",
+            fontsize=FS, fontstyle="italic", color=INK_SOFT, ha="right",
+            va="center")
 
 
 def build():
-    c = Canvas()
-    frame(c)
-    panel_nodes(c)
-    panel_ties(c)
-    panel_categories(c)
-    panel_time(c)
-    check_layout(c)
-    return c
+    fig = plt.figure(figsize=(PRINT_W_CM / 2.54, PRINT_H_CM / 2.54),
+                     dpi=DPI_DESIGN)
+    ax = fig.add_axes([0, 0, 1, 1])
+    ax.set_xlim(0, W)
+    ax.set_ylim(H, 0)
+    ax.axis("off")
+    fig.patch.set_facecolor("white")
+    L, old_d = compose(ax)
+    frame(ax, L, old_d)
+    legend(ax)
+    for t in ax.texts:
+        assert t.get_fontsize() >= FS, t.get_text()
+    return fig
 
 
 def main():
@@ -594,8 +612,15 @@ def main():
                     default=Path(__file__).resolve().parent / "output")
     ap.add_argument("--stem", default="fig3y_operationalising_relations")
     args = ap.parse_args()
-    c = build()
-    c.save(args.out, args.stem)
+    fig = build()
+    args.out.mkdir(parents=True, exist_ok=True)
+    meta = {"Title": "Operationalising relations"}
+    fig.savefig(args.out / f"{args.stem}.svg",
+                metadata={**meta, "Description": ALT_TEXT})
+    fig.savefig(args.out / f"{args.stem}.pdf",
+                metadata={**meta, "Subject": ALT_TEXT})
+    fig.savefig(args.out / f"{args.stem}.png", dpi=300,
+                metadata={**meta, "Description": ALT_TEXT})
     for ext in ("svg", "pdf", "png"):
         print(args.out / f"{args.stem}.{ext}")
 
