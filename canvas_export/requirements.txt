@@ -3,3 +3,4 @@ Pillow>=10.0
 playwright>=1.40
 pymupdf>=1.23
 imageio-ffmpeg>=0.5
+pyobjc-framework-Vision>=10; sys_platform == "darwin"

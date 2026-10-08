@@ -113,3 +113,40 @@ Open it in Preview, Acrobat, or a browser.
   callouts, Excalidraw embeds) are not reproduced. Dataview blocks appear as
   their source code. Web link cards show the URL, not the live page.
 - Edge curves are an approximation of Obsidian's and may differ slightly.
+
+# Extracting all content into one file: `canvas_extract.py`
+
+`canvas_extract.py` collects everything on a canvas into one Markdown file,
+which you can open in Obsidian or any editor. Use an output name ending in
+`.json` to get JSON instead.
+
+```bash
+python3 canvas_extract.py "/path/to/Board.canvas" -o "Board - extracted.md"
+```
+
+What it includes, in reading order and grouped by the canvas groups:
+
+| Card | Extracted |
+| --- | --- |
+| Text cards, notes | Full Markdown text, note properties (front matter), and everything they embed |
+| Images | Text in the image (OCR), date taken and camera from EXIF; GPS with `--gps` |
+| Videos | Recording date, duration, on-screen text from 6 sampled frames (`--video-frames`); speech transcript with `--transcribe` |
+| PDFs | Text of every page; scanned pages are OCR'd |
+| Links | The URL |
+| All cards | Colour, a date found in the card name, and connections (→ / ←) with their labels |
+
+It ends with a **timeline** of every card whose name contains a date
+(`2024-05-18`, `18.05.2024`, `IMG_20240518…`) and a list of all connections.
+
+- **OCR:** on macOS it uses Apple's Vision framework, the engine behind Live
+  Text, which needs no extra setup beyond `pip install -r requirements.txt`.
+  Elsewhere it uses Tesseract (`pytesseract` plus the `tesseract` program).
+  Set the languages with `--languages de,en`.
+- **Transcripts:** `python3 -m pip install faster-whisper` once, then add
+  `--transcribe`. The speech model (`--whisper-model small` by default;
+  `medium` is more accurate but slower) downloads on first use. Language is
+  detected per video, or set it with `--speech-language de`.
+- **Cache:** OCR and transcription results are cached in
+  `<output>.cache.json`, so re-running after you edit the canvas only
+  processes new or changed files.
+- `--exclude PREFIX` leaves out cards whose file name starts with PREFIX.
