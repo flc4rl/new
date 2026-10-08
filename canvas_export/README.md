@@ -140,8 +140,15 @@ It ends with a **timeline** of every card whose name contains a date
 
 - **OCR:** on macOS it uses Apple's Vision framework, the engine behind Live
   Text, which needs no extra setup beyond `pip install -r requirements.txt`.
-  Elsewhere it uses Tesseract (`pytesseract` plus the `tesseract` program).
-  Set the languages with `--languages de,en`.
+  Elsewhere it uses Tesseract (`pytesseract` plus the `tesseract` program
+  with its language packs).
+- **Languages:** English, French, Italian, Portuguese, Spanish and German by
+  default (`--languages en,fr,it,pt,es,de`, most common first). On macOS 13+
+  Vision also detects the language of each image. With Tesseract, each image
+  is read a second time with its detected language first, which keeps
+  accents such as à, ù, ç and ü. Speech transcripts detect the language of
+  each video; only set `--speech-language` if every video is in the same
+  language.
 - **Transcripts:** `python3 -m pip install faster-whisper` once, then add
   `--transcribe`. The speech model (`--whisper-model small` by default;
   `medium` is more accurate but slower) downloads on first use. Language is

@@ -67,7 +67,7 @@ def find_date(text: str) -> dt.date | None:
 class OCR:
     """Text recognition: Apple Vision on macOS, otherwise Tesseract."""
 
-    def __init__(self, engine: str = "auto", languages: str = "de,en"):
+    def __init__(self, engine: str = "auto", languages: str = "en,fr,it,pt,es,de"):
         self.languages = [l.strip() for l in languages.split(",") if l.strip()]
         self.name = None
         if engine in ("auto", "vision") and sys.platform == "darwin":
@@ -119,6 +119,9 @@ class OCR:
                 langs = [{"de": "de-DE", "en": "en-US", "fr": "fr-FR", "it": "it-IT", "es": "es-ES",
                           "pt": "pt-BR", "nl": "nl-NL"}.get(l, l) for l in self.languages]
                 req.setRecognitionLanguages_(langs)
+                # macOS 13+: pick the language per image instead of assuming the first one.
+                if hasattr(req, "setAutomaticallyDetectsLanguage_"):
+                    req.setAutomaticallyDetectsLanguage_(True)
             ok, _ = handler.performRequests_error_([req], None)
             return list(req.results() or []) if ok else None
 
@@ -150,7 +153,34 @@ class OCR:
                 f = 1400 / max(im.size)
                 im = im.resize((round(im.width * f), round(im.height * f)), Image.LANCZOS)
             text = pytesseract.image_to_string(im, lang=self.tess_lang)
+            # Tesseract favours the first language; re-read with the detected one first,
+            # which restores accents (à, ù, ü) that a mixed first pass tends to drop.
+            langs = self.tess_lang.split("+")
+            best = guess_language(text)
+            if best and best in langs and best != langs[0]:
+                text = pytesseract.image_to_string(im, lang="+".join([best] + [l for l in langs if l != best]))
         return clean_text(text)
+
+
+STOPWORDS = {
+    "eng": "the and of to in is that for on with you this are it be at we our not your",
+    "fra": "le la les des et est une un pour dans que qui sur pas nous vous du au avec ce",
+    "ita": "il di che la per non una sono della del le gli con ma anche più è al nel",
+    "por": "de que não uma os as para com por mais nossa nosso dos das ao é à também",
+    "spa": "el la los las que de del por para una con es no y en se lo más al está",
+    "deu": "der die das und ist nicht ein eine einen zu mit für auf den dem wir sie ich im am "
+           "ohne von zum zur auch sich um bei nach aus über",
+}
+STOPWORDS = {k: set(v.split()) for k, v in STOPWORDS.items()}
+
+
+def guess_language(text: str) -> str | None:
+    words = re.findall(r"[^\W\d_]+", text.lower())
+    if len(words) < 3:
+        return None
+    scores = {lang: sum(w in sw for w in words) for lang, sw in STOPWORDS.items()}
+    best = max(scores, key=scores.get)
+    return best if scores[best] >= 2 else None
 
 
 def join_lines(lines: list[tuple[float, float, float, str]]) -> str:
@@ -641,7 +671,8 @@ def main(argv=None):
     ap.add_argument("-o", "--output", help="output .md (default) or .json; default: next to this tool")
     ap.add_argument("--vault", help="vault root (default: nearest folder containing .obsidian)")
     ap.add_argument("--ocr", choices=["auto", "vision", "tesseract", "none"], default="auto")
-    ap.add_argument("--languages", default="de,en", help="OCR languages, most likely first")
+    ap.add_argument("--languages", default="en,fr,it,pt,es,de",
+                    help="OCR languages, most common first (en, fr, it, pt, es, de, nl, ...)")
     ap.add_argument("--video-frames", type=int, default=6,
                     help="frames per video to read on-screen text from (0 = none)")
     ap.add_argument("--transcribe", action="store_true",
