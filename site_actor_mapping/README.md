@@ -150,19 +150,24 @@ Every run ends by writing two condensed files (as `.xlsx` and `.csv`):
 - **`master_network`** — one row per event × organisation × source page:
   event name, event date, event link, organisation, type, confidence, how many
   times it was mentioned on that source, the source link, and an example
-  passage. A second sheet (`events`, xlsx only) lists each event once with all
-  of its organisations. Organisations found on a site's general pages (not tied
-  to an event) are kept under "(not tied to an event)".
+  passage. `named_in_event_title` marks names that are (part of) the event's
+  own title, often the organiser ("Ende Gelände action") but sometimes just
+  the event name; filter on it as you see fit. A second sheet (`events`, xlsx
+  only) lists each event once with all of its organisations. A third
+  (`menus_and_footers`) holds names found only in menus, headers, footers or
+  text repeated on every page of a site, kept apart so site furniture does not
+  inflate the network.
 - **`master_themes`** — one row per theme term found: theme, term, event,
   event date, event link, source link, the sentence, two sentences before and
   after, the organisations named in that paragraph, and whether the same
   sentence was already found elsewhere (`duplicate_of`).
 
-How pages are tied to events: an event page to itself; a page of a website
-linked from an event to that event (other pages of the same website to every
-event that linked to it); a PDF to the page it was found on; calendar cells and
-lines of a seed PDF to the events named in them (in a seed PDF, description
-lines belong to the entry above them). Event dates come from the calendar
+How pages are tied to events: an event page to itself; the page an event links
+to, to that event; the other pages of that website to the same event if only
+one event links to the site, otherwise to "(other pages of <site>)" with the
+linking events listed in `site_linked_from_events`; a PDF to the page it was
+found on; calendar cells to the event in the cell; every line of a seed PDF to
+the agenda entry it belongs to. Theme words inside web addresses are ignored. Event dates come from the calendar
 cells (start to end), the event page's structured data, or the date written
 next to a link in a seed PDF.
 
@@ -174,11 +179,19 @@ python make_master.py results/run1 results/run2 -o results/master [--min-confide
 
 ## Seed PDFs (link lists)
 
-`--seed-pdf FILE` reads every link in a PDF (clickable links and URLs written
-out in the text), takes the event name and date from the link's line (or the
-lines just above it), and crawls each linked website like a linked site. The
-PDF's own text is analysed too. Repeat the option for several PDFs; it can be
-combined with a website, or used without one.
+`--seed-pdf FILE` reads an agenda or link list saved as PDF. It is split into
+entries: an entry starts at a line beginning with a date — "(05-09.07) Code
+Rood …", "(24.5.-1.6.) …", "– 29 juillet au 1er août : Anti-Colonial Attack! …",
+"– 18th / 24th of august : …", "25 Jul 2025 - 27 Jul 2025 …" — and runs to the
+next one, so wrapped lines and descriptions stay with their entry. Month/year
+headings ("ANNÉE 2025", "JUNE 2023") supply the year for dates written without
+one; entries before any year heading keep their date as written. Every link in
+an entry (clickable or written out, re-joined when a line wrap broke it) is
+crawled like a linked site, and the entry becomes one event with its name and
+start/end dates. The PDF's own text is analysed too, line by line, each line
+tied to its entry. `seed_links.json` lists every entry and link found, to check
+the reading. Repeat the option for several PDFs; it can be combined with a
+website, or used without one.
 
 ## Calendars and linked websites
 

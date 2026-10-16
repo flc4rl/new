@@ -5,7 +5,10 @@ Build the two master files from one or more result folders:
   master_network   one row per event x organisation x source page: which
                    organisations were found for which event, and where.
                    A second sheet lists each event once with all its
-                   organisations.
+                   organisations; a third holds names found only in menus,
+                   headers, footers or text repeated on every page of a site
+                   (site furniture), kept apart so they do not inflate the
+                   network.
   master_themes    one row per theme term found: the event, the source link,
                    and the passage (two sentences before and after).
 
@@ -33,9 +36,11 @@ CONFIDENCE_RANK = {"low": 0, "medium": 1, "high": 2}
 
 NETWORK_FIELDS = ["event", "event_date", "event_link", "organisation", "org_type", "confidence",
                   "mentions_on_source", "source_link", "source_title", "site", "site_role",
-                  "found_by", "only_in_menus_or_footers", "example_context"]
+                  "site_linked_from_events", "found_by", "named_in_event_title",
+                  "only_in_menus_or_footers", "example_context"]
 EVENT_FIELDS = ["event", "event_date", "event_link", "n_organisations", "organisations", "sources"]
-THEME_FIELDS = ["theme", "term", "event", "event_date", "event_link", "source_link", "page_title",
+THEME_FIELDS = ["theme", "term", "event", "event_date", "event_link", "site_linked_from_events",
+                "source_link", "page_title",
                 "context_before", "sentence", "context_after", "organisations_in_paragraph",
                 "site", "site_role", "is_pdf", "pdf_found_on", "region", "boilerplate",
                 "duplicate_of"]
@@ -80,11 +85,14 @@ def network_rows(results: Sequence[Path], min_confidence: str = "low") -> List[d
                         "confidence": confidence, "mentions_on_source": 0,
                         "source_link": m["url"], "source_title": m.get("page_title", ""),
                         "site": m.get("site", ""), "site_role": m.get("site_role", ""),
+                        "site_linked_from_events": m.get("site_linked_from_events", ""),
+                        "named_in_event_title": m.get("named_in_event_title") == "True",
                         "_methods": Counter(), "_bp": True, "example_context": "", "_ex_bp": True,
                     }
                 r["mentions_on_source"] += 1
                 r["_methods"].update(m.get("methods", "").split("+"))
-                is_bp = m.get("boilerplate") == "True"
+                # Menus, headers, footers and text repeated across a site's pages.
+                is_bp = m.get("boilerplate") == "True" or m.get("in_menu") == "True"
                 r["_bp"] = r["_bp"] and is_bp
                 if not r["example_context"] or (r["_ex_bp"] and not is_bp):  # prefer real content
                     r["example_context"] = (m.get("context") or "")[:500]
@@ -95,7 +103,7 @@ def network_rows(results: Sequence[Path], min_confidence: str = "low") -> List[d
         r["only_in_menus_or_footers"] = r.pop("_bp")
         r.pop("_ex_bp")
         out.append(r)
-    out.sort(key=lambda r: (r["event"] == NO_EVENT, r["event_date"], r["event"].casefold(),
+    out.sort(key=lambda r: (r["event"].startswith("("), r["event_date"] or "", r["event"].casefold(),
                             r["organisation"].casefold()))
     return out
 
@@ -124,7 +132,7 @@ def theme_rows(results: Sequence[Path]) -> List[dict]:
     for r in out:
         if not (r.get("event") or "").strip():
             r["event"] = NO_EVENT
-    out.sort(key=lambda r: (r["event"] == NO_EVENT, r.get("event_date", ""), r["event"].casefold(),
+    out.sort(key=lambda r: (r["event"].startswith("("), r.get("event_date") or "", r["event"].casefold(),
                             r.get("source_link", ""), r.get("theme", "")))
     return out
 
@@ -181,7 +189,9 @@ def _cell(v):
 
 def build_masters(results: Sequence[Path], out_dir: Path, min_confidence: str = "low") -> List[Path]:
     out_dir.mkdir(parents=True, exist_ok=True)
-    net = network_rows(results, min_confidence)
+    all_net = network_rows(results, min_confidence)
+    net = [r for r in all_net if not r["only_in_menus_or_footers"]]
+    furniture = [r for r in all_net if r["only_in_menus_or_footers"]]
     events = event_rows(net)
     themes = theme_rows(results)
     paths = []
@@ -189,7 +199,8 @@ def build_masters(results: Sequence[Path], out_dir: Path, min_confidence: str = 
     _write_csv(out_dir / "master_themes.csv", themes, THEME_FIELDS)
     paths += [out_dir / "master_network.csv", out_dir / "master_themes.csv"]
     if _write_xlsx(out_dir / "master_network.xlsx", [("event_organisations", net, NETWORK_FIELDS),
-                                                      ("events", events, EVENT_FIELDS)]):
+                                                      ("events", events, EVENT_FIELDS),
+                                                      ("menus_and_footers", furniture, NETWORK_FIELDS)]):
         paths.append(out_dir / "master_network.xlsx")
     if _write_xlsx(out_dir / "master_themes.xlsx", [("theme_instances", themes, THEME_FIELDS)]):
         paths.append(out_dir / "master_themes.xlsx")

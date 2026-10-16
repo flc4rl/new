@@ -1,8 +1,13 @@
 """
-Read link lists from PDFs ("seed PDFs"): every hyperlink (clickable link
-annotations and URLs written out in the text), with the text of the link, the
-line it sits on, and an event name and date taken from that line or the lines
-just above it.
+Read activist agendas / link lists from PDFs ("seed PDFs").
+
+A PDF is read line by line and split into entries. An entry starts at a line
+that begins with a date ("(05-09.07) Code Rood ...", "– 29 juillet au 1er août :
+Anti-Colonial Attack! ...", "25 Jul 2025 - 27 Jul 2025 ...") and runs until the
+next one. Month/year headings ("ANNÉE 2025", "JUNE 2023") give the year for
+dates written without one. Every link (clickable or written out) belongs to
+the entry it sits in, and so does every line of description, so themes and
+organisations found in the PDF can be tied to the right event.
 """
 
 from __future__ import annotations
@@ -10,30 +15,61 @@ from __future__ import annotations
 import io
 import logging
 import re
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import List, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import requests
 
 from crawler import normalise_url
-from events import find_date
+from events import heading_year, normalise_date_text, parse_entry_date
 
 log = logging.getLogger(__name__)
 
 URL_IN_TEXT = re.compile(r"(?:https?://|www\.)[^\s<>\"')\]]+", re.I)
+VALID_HOST = re.compile(r"^(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+[a-z]{2,}$", re.I)
+# Links that are part of the PDF's own page furniture, never events.
+JUNK_LINK = re.compile(r"^https?://(?:www\.)?(?:wordpress\.com|wp\.me|gravatar\.com|riseup\.net|pad\.riseup\.net)/?$",
+                       re.I)
+URLISH = re.compile(r"(?:https?://|www\.)|\b[\w-]+\.(?:org|com|net|eu|de|fr|nl|be|at|it|es|dk|se|uk|info|io)\b|/\S", re.I)
+
+
+def _title_like(line: str) -> bool:
+    """A short heading-like line that could be an entry's title ("NoMinesLand - Anti-extractivist Camp")."""
+    t = line.strip()
+    return (4 <= len(t) < 80 and t[:1].isupper() and not URLISH.search(t)
+            and not t.endswith((")", "-", ",", "(")) and not parse_entry_date(t, None)[0])
 
 
 @dataclass
 class PdfLink:
-    pdf: str          # file path or URL of the PDF
+    pdf: str          # file URI or URL of the PDF
     page: int
     url: str
     anchor: str       # text inside the link area
     line: str         # the line the link is on
-    event: str        # best guess at the event / entry name
+    event: str        # the entry's name
     date_raw: str
-    date_iso: str
+    date_iso: str     # "2025-07-29" or "2025-07-29 to 2025-08-01" ("" if the year is unknown)
+    entry: int = -1   # index into the PDF's entries
+
+
+@dataclass
+class Entry:
+    pdf: str
+    index: int
+    page: int
+    lines: List[str] = field(default_factory=list)
+    date_raw: str = ""
+    start: str = ""
+    end: str = ""
+    year_known: bool = False
+    name: str = ""
+    links: List[str] = field(default_factory=list)
+
+    @property
+    def date_iso(self) -> str:
+        return f"{self.start} to {self.end}" if self.start and self.end else self.start
 
 
 def load_pdf_bytes(source: str, timeout: float = 30.0) -> bytes:
@@ -44,103 +80,163 @@ def load_pdf_bytes(source: str, timeout: float = 30.0) -> bytes:
     return Path(source).expanduser().read_bytes()
 
 
-def _lines(page) -> List[Tuple[float, float, str]]:
-    """(top, bottom, text) of each text line on a pdfplumber page."""
-    out = []
-    for ln in page.extract_text_lines(keep_blank_chars=False) or []:
-        out.append((ln["top"], ln["bottom"], ln["text"]))
-    return out
-
-
-GENERIC_LINK_TEXT = re.compile(
-    r"(?i)(here|link|lien|website|site|web|more|more info\w*|info\w*|read more|register|sign up|"
-    r"tickets?|programme|program|plus d['’]infos?|en savoir plus|inscription|mehr( infos?)?|"
-    r"weitere infos|anmeldung|meer info|meer informatie|aanmelden|más info|más información|"
-    r"inscripción|maggiori informazioni|info e iscrizioni|hier|ici|qui|aquí|aqui|"
-    r"læs mere|mere info|tilmelding|tilmeld dig|her|läs mer|mer info|anmälan|anmäl dig|här)")
-
-
-def _strip_date(text: str, date_raw: str) -> str:
-    if date_raw:
-        text = text.replace(date_raw, " ")
-    return re.sub(r"\s+", " ", text).strip(" -–—:|•·,;/")
-
-
-def _event_name(anchor: str, line: str, above: List[str], url: str, date_raw: str) -> str:
-    """The link text if it reads like a title, else the line without URL and date,
-    else the nearest line above that is more than a date."""
-    def usable(t: str) -> bool:
-        return (len(t) >= 4 and not URL_IN_TEXT.fullmatch(t) and not GENERIC_LINK_TEXT.fullmatch(t)
-                and not re.fullmatch(r"[\d\s./\-–]+", t))
-    for cand in (anchor, URL_IN_TEXT.sub("", line)):
-        cand = _strip_date(cand, date_raw)
-        if usable(cand):
-            return cand
-    for prev in reversed(above):
-        prev = _strip_date(URL_IN_TEXT.sub("", prev), find_date(prev)[0])
-        if usable(prev):
-            return prev
+def _clean_url(raw: str) -> Optional[str]:
+    raw = raw.rstrip(".,;:!?»”")
+    if raw.endswith(")") and raw.count("(") < raw.count(")"):
+        raw = raw.rstrip(")")
+    url = normalise_url(raw if "://" in raw else "https://" + raw)
+    if not url:
+        return None
+    host = re.sub(r"^https?://", "", url).split("/")[0].split(":")[0]
+    if not VALID_HOST.match(host) or JUNK_LINK.match(url):
+        return None
     return url
 
 
-def _date_near(line: str, above: List[str]):
-    """The date on the link's own line, else on the nearest line above."""
-    for t in [line] + list(reversed(above)):
-        raw, iso = find_date(t)
-        if raw:
-            return raw, iso
-    return "", ""
+def _entry_name(entry: Entry) -> str:
+    text = normalise_date_text(re.sub(r"^[\s–—\-•*·>]+", "", " ".join(entry.lines)))
+    if entry.date_raw:
+        text = text.replace(entry.date_raw, " ", 1)
+    first_url = URL_IN_TEXT.search(text)
+    if first_url and first_url.start() > 8:       # the name ends where the first link starts
+        text = text[:first_url.start()]
+    text = re.sub(r"\(\s*(?:https?://|www\.)[^)]*\)", " ", text)   # "(https://...)" duplicates
+    text = URL_IN_TEXT.sub(" ", text)
+    text = re.sub(r"^[\s()\[\]:\-–—,.;/>]+", "", text)
+    text = re.sub(r"\s+", " ", text).strip(" :-–—,;/>(")
+    if len(text) > 160:
+        cut = re.search(r"(?<=[.;])\s", text[60:200])
+        text = text[:60 + cut.start()] if cut else text[:160].rsplit(" ", 1)[0] + " …"
+    return text
 
 
-def extract_links(source: str) -> Tuple[List[PdfLink], str]:
-    """All links in a PDF, and its full text (pages separated by form feeds)."""
+def extract_entries(source: str) -> Tuple[List[Entry], List[PdfLink], List[List[str]], Dict[int, List[int]]]:
+    """Entries, links, the lines of each page, and for each page the entry index of
+    each non-empty line (-1 before the first entry)."""
     import pdfplumber
     data = load_pdf_bytes(source)
+    entries: List[Entry] = []
     links: List[PdfLink] = []
-    texts: List[str] = []
+    page_lines: List[List[str]] = []
+    line_entry: Dict[int, List[int]] = {}
+    year: Optional[int] = None
+    current: Optional[Entry] = None
+
     with pdfplumber.open(io.BytesIO(data)) as pdf:
         for pno, page in enumerate(pdf.pages, 1):
-            texts.append(page.extract_text() or "")
-            lines = _lines(page)
-            seen_here = set()
+            raw_lines = [(ln["top"], ln["bottom"], ln["text"]) for ln in (page.extract_text_lines() or [])
+                         if ln["text"].strip()]
+            page_lines.append([t for _, _, t in raw_lines])
+            owners: List[int] = []
+            headings: List[bool] = []
+            for i, (_, _, text) in enumerate(raw_lines):
+                is_heading, hy = heading_year(text)
+                if is_heading:
+                    if hy:
+                        year = hy
+                    current = None
+                    owners.append(-1)
+                    headings.append(True)
+                    continue
+                headings.append(False)
+                raw, start, end = parse_entry_date(text, year)
+                if raw:
+                    new = Entry(source, len(entries), pno, [text], raw, start, end, year_known=bool(start))
+                    # "Title line" then "date line" (entries pasted from other calendars,
+                    # "25 Jul 2025 - 27 Jul 2025 Place"): the title line above joins this entry.
+                    after_date = normalise_date_text(re.sub(r"^[\s–—\-•*·>(]+", "", text))
+                    after_date = after_date[after_date.find(raw) + len(raw):] if raw in after_date else ""
+                    pasted_style = not re.match(r"^\s*[):]", after_date) and len(after_date.strip()) < 50
+                    if pasted_style and i > 0 and not headings[i - 1] and _title_like(raw_lines[i - 1][2]):
+                        prev = raw_lines[i - 1][2]
+                        if owners[-1] == -1:
+                            new.lines.insert(0, prev)
+                            owners[-1] = new.index
+                        elif current is not None and owners[-1] == current.index and len(current.lines) >= 2 \
+                                and any(URL_IN_TEXT.search(x) for x in current.lines[:-1]):
+                            current.lines.pop()
+                            new.lines.insert(0, prev)
+                            owners[-1] = new.index
+                    entries.append(new)
+                    current = new
+                elif current is not None:
+                    current.lines.append(text)
+                owners.append(current.index if current is not None else -1)
+            line_entry[pno] = owners
 
-            def context(top: float, bottom: float) -> Tuple[str, List[str]]:
+            def owner_at(top: float, bottom: float) -> int:
                 mid = (top + bottom) / 2
-                same = [t for (a, b, t) in lines if a - 2 <= mid <= b + 2]
-                above = [t for (a, b, t) in lines if b <= top + 1][-3:]
-                return " ".join(same), above
+                for k, (a, b, _) in enumerate(raw_lines):
+                    if a - 2 <= mid <= b + 2:
+                        return owners[k]
+                return -1
 
             # 1. clickable links
+            annotated = []
             for h in page.hyperlinks or []:
-                uri = (h.get("uri") or "").strip()
-                if not uri.lower().startswith(("http://", "https://", "www.")):
-                    continue
-                url = normalise_url(uri if "://" in uri else "https://" + uri)
+                url = _clean_url((h.get("uri") or "").strip())
                 if not url:
                     continue
                 try:
                     box = (max(h["x0"], 0), max(h["top"], 0), min(h["x1"], page.width),
                            min(h["bottom"], page.height))
-                    anchor = (page.within_bbox(box).extract_text() or "").strip()
+                    anchor = re.sub(r"\s+", " ", page.within_bbox(box).extract_text() or "").strip()
                 except ValueError:
                     anchor = ""
-                line, above = context(h["top"], h["bottom"])
-                raw, iso = _date_near(line, above)
-                links.append(PdfLink(source, pno, url, anchor, line,
-                                     _event_name(anchor, line, above, url, raw), raw, iso))
-                seen_here.add(url)
+                ent = owner_at(h["top"], h["bottom"])
+                line = next((t for a, b, t in raw_lines if a - 2 <= (h["top"] + h["bottom"]) / 2 <= b + 2), "")
+                links.append(PdfLink(source, pno, url, anchor, line, "", "", "", ent))
+                annotated.append(url)
 
-            # 2. URLs written out in the text without a link annotation
-            for top, bottom, line in lines:
-                for m in URL_IN_TEXT.finditer(line):
-                    raw_url = m.group(0).rstrip(".,;:")
-                    url = normalise_url(raw_url if "://" in raw_url else "https://" + raw_url)
-                    if not url or url in seen_here:
+            # 2. URLs written out in the text (re-joined when a line wrap broke them)
+            for k, (top, bottom, text) in enumerate(raw_lines):
+                for m in URL_IN_TEXT.finditer(text):
+                    raw = m.group(0)
+                    rest = text[m.end():]
+                    if raw.endswith("-") and rest[:1] == " ":          # "ende- gelaende.org"
+                        nxt = re.match(r"\s(\S+)", rest)
+                        raw += nxt.group(1) if nxt else ""
+                    elif m.end() == len(text) and k + 1 < len(raw_lines):  # continues on next line
+                        nxt = raw_lines[k + 1][2].split(" ", 1)[0]
+                        if (raw.endswith(("-", "/", "?", "=", "&", "_")) or re.match(r"^[\w%=&?/.#-]*[/=&%][\w%=&?/.#-]*$", nxt)) \
+                                and not parse_entry_date(raw_lines[k + 1][2], year)[0]:
+                            raw += nxt
+                    url = _clean_url(raw)
+                    if not url:
                         continue
-                    seen_here.add(url)
-                    _, above = context(top, bottom)
-                    raw, iso = _date_near(line, above)
-                    links.append(PdfLink(source, pno, url, "", line,
-                                         _event_name("", line, above, url, raw), raw, iso))
-    log.info("Seed PDF %s: %d links on %d pages", source, len(links), len(texts))
-    return links, "\f".join(texts)
+                    stem = url.split("://", 1)[-1][:40]
+                    if any(stem in a or a.split("://", 1)[-1][:40] in url for a in annotated):
+                        continue   # the clickable version of the same link
+                    links.append(PdfLink(source, pno, url, "", text, "", "", "", owners[k]))
+
+    # Names, dates and links per entry
+    for e in entries:
+        e.name = _entry_name(e)
+    seen = set()
+    unique: List[PdfLink] = []
+    for ln in links:
+        if (ln.entry, ln.url) in seen:
+            continue
+        seen.add((ln.entry, ln.url))
+        if 0 <= ln.entry < len(entries):
+            e = entries[ln.entry]
+            ln.event, ln.date_raw, ln.date_iso = e.name, e.date_raw, e.date_iso
+            e.links.append(ln.url)
+        else:
+            ln.event = ln.anchor or re.sub(r"\s+", " ", URL_IN_TEXT.sub(" ", ln.line)).strip() or ln.url
+        unique.append(ln)
+    no_year = sum(1 for e in entries if not e.year_known)
+    log.info("Seed PDF %s: %d entries, %d links on %d pages%s", source, len(entries), len(unique),
+             len(page_lines), f" ({no_year} entries without a known year)" if no_year else "")
+    return entries, unique, page_lines, line_entry
+
+
+def extract_links(source: str) -> Tuple[List[PdfLink], str]:
+    """Links and the PDF text (pages separated by form feeds, one entry line per line)."""
+    _, links, page_lines, _ = extract_entries(source)
+    return links, "\f".join("\n".join(p) for p in page_lines)
+
+
+def entries_to_json(entries: List[Entry], line_entry: Dict[int, List[int]]) -> dict:
+    return {"entries": [asdict(e) for e in entries],
+            "line_entry": {str(k): v for k, v in line_entry.items()}}

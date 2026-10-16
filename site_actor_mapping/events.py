@@ -227,3 +227,94 @@ def _walk_json(data):
         for v in data.values():
             if isinstance(v, (list, dict)):
                 yield from _walk_json(v)
+
+
+# ---------------------------------------------------------------- agenda entries
+_ORD = r"(?:st|nd|rd|th|er|e|ème|º|°)?"
+_MON = rf"(?:{_MONTH_RE})(?![^\W\d_])"
+_RANGE_SEP = r"(?:[-–—/]|au|à|to|till|til|until|bis|al|tot|t/m|–)"
+_ENTRY_DATE_PATTERNS = [
+    # (05-09.07)  (24.5.-1.6.)  (14.-26.08.)  (18.8 - 24.8)  (01.10 - 28.02)  29.05-01.06.
+    re.compile(r"^\(?\s*(?P<d1>\d{1,2})(?!\d)\.?(?:(?P<m1>\d{1,2})(?!\d)\.?(?:(?P<y1>20\d\d|\d\d)(?!\d)\.?)?)?"
+               rf"\s*{_RANGE_SEP}\s*(?P<d2>\d{{1,2}})(?!\d)\.\s*(?P<m2>\d{{1,2}})(?!\d)\.?"
+               r"(?:(?P<y2>20\d\d|\d\d)(?!\d))?\.?"),
+    # (24.05)  20.06.2026
+    re.compile(r"^\(?\s*(?P<d1>\d{1,2})(?!\d)\.(?P<m1>\d{1,2})(?!\d)\.?(?:(?P<y1>20\d\d|\d\d)(?!\d))?"),
+    # 24 of may – 1st of june / 29 juillet au 1er août / 15 au 18 juillet / 1 Aug - 8 Aug 2025
+    re.compile(rf"^(?:du|from|vom|van|dal|del|de|från|fra)?\s*(?P<d1>\d{{1,2}})(?!\d){_ORD}\s*(?:of\s+|de\s+)?"
+               rf"(?:(?P<mon1>{_MON})\.?\s*(?P<y1>20\d\d)?)?\s*{_RANGE_SEP}\s*"
+               rf"(?P<d2>\d{{1,2}})(?!\d){_ORD}\s*(?:of\s+|de\s+)?(?P<mon2>{_MON})\.?,?\s*(?P<y2>20\d\d)?", re.I),
+    # 30 juillet / 24th of may / 16th september 2025
+    re.compile(rf"^(?:le|on|am|op|il|el|den|d\.)?\s*(?P<d1>\d{{1,2}})(?!\d){_ORD}\.?\s*(?:of\s+|de\s+)?"
+               rf"(?P<mon1>{_MON})\.?,?\s*(?P<y1>20\d\d)?", re.I),
+    # June 29-30, 2026 / May 24
+    re.compile(rf"^(?P<mon1>{_MON})\.?\s+(?P<d1>\d{{1,2}})(?!\d){_ORD}(?:\s*[-–]\s*(?P<d2>\d{{1,2}})(?!\d){_ORD})?"
+               r",?\s*(?P<y1>20\d\d)?", re.I),
+]
+_BULLETS = re.compile(r"^[\s–—\-•*·>]+")
+
+
+def _iso(y, m, d) -> str:
+    import datetime as _dt
+    try:
+        return _dt.date(int(y), int(m), int(d)).isoformat()
+    except (TypeError, ValueError):
+        return ""
+
+
+def _year(v: Optional[str]) -> Optional[int]:
+    if not v:
+        return None
+    y = int(v)
+    return y + 2000 if y < 100 else y
+
+
+def normalise_date_text(text: str) -> str:
+    """Fix the letter O typed for a zero in dates at the start of a line ("1-6.O6")."""
+    return re.sub(r"(?<=[\d.])O(?=[\d.)])|(?<=[(\s])O(?=\d)", "0", text[:60]) + text[60:]
+
+
+def parse_entry_date(line: str, year: Optional[int]) -> Tuple[str, str, str]:
+    """Date at the start of an agenda entry: (raw text, start ISO, end ISO).
+    The ISO dates are empty when no year is known (no heading, none written)."""
+    text = normalise_date_text(_BULLETS.sub("", line))
+    for pat in _ENTRY_DATE_PATTERNS:
+        m = pat.match(text)
+        if not m:
+            continue
+        g = m.groupdict()
+        m1 = int(g["m1"]) if g.get("m1") and g["m1"].isdigit() else MONTHS.get((g.get("mon1") or "").lower().rstrip("."))
+        m2 = int(g["m2"]) if g.get("m2") and str(g["m2"]).isdigit() else MONTHS.get((g.get("mon2") or "").lower().rstrip("."))
+        d1, d2 = int(g["d1"]), int(g["d2"]) if g.get("d2") else None
+        m1 = m1 or m2
+        if not m1 or not (1 <= m1 <= 12) or (m2 and not 1 <= m2 <= 12):
+            continue
+        y1 = _year(g.get("y1")) or _year(g.get("y2")) or year
+        y2 = _year(g.get("y2")) or y1
+        if d2 is not None and y1 and y2 == y1 and (m2 or m1) < m1:
+            y2 = y1 + 1   # 01.10 - 28.02 runs into the next year
+        raw = m.group(0).strip(" (")
+        if not y1:
+            return raw, "", ""
+        start = _iso(y1, m1, d1)
+        end = _iso(y2, m2 or m1, d2) if d2 is not None else ""
+        if not start:
+            continue
+        return raw, start, (end if end and end != start else "")
+    return "", "", ""
+
+
+_HEADING = re.compile(rf"^(?:ann[ée]e|year|jahr|jaar|år|anno|año|ano)?\s*(?P<mon>{_MON})?\s*(?:/\s*{_MON})?\s*"
+                      r"(?P<year>20\d\d)?\s*:?\s*$", re.I)
+
+
+def heading_year(line: str) -> Tuple[bool, Optional[int]]:
+    """Is this line a month/year heading ("ANNÉE 2025", "JUNE 2023", "Mai / May")?
+    Returns (is_heading, year or None)."""
+    t = re.sub(r"^[\W_]+|[\W_]+$", "", line.strip())
+    if not t or len(t) > 40:
+        return False, None
+    m = _HEADING.match(t)
+    if not m or not (m.group("mon") or m.group("year")):
+        return False, None
+    return True, int(m.group("year")) if m.group("year") else None

@@ -44,7 +44,7 @@ from events import EventIndex, EventRef
 from linked_sites import (PLATFORM_HOSTS, Site, SiteRegistry, Via, collect_targets, crawl_linked,
                           filter_targets)
 from make_master import build_masters
-from seed_pdfs import PdfLink, extract_links as pdf_extract_links
+from seed_pdfs import PdfLink, entries_to_json, extract_entries
 from report import write_report
 
 log = logging.getLogger("site_actors")
@@ -199,6 +199,7 @@ def load_pages(cache: PageCache, registry: SiteRegistry,
             continue
         try:
             pages[key] = tag(parse_html(cp.body, cp.final_url, cp.depth, strip_regions), site, cp)
+            pages[key].requested_url = cp.url
         except Exception as exc:  # noqa: BLE001 - one bad page should not stop the run
             log.warning("Could not parse %s: %s", cp.final_url, exc)
     order = {"main": 0, "linked": 1}
@@ -248,24 +249,41 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     # Seed PDFs: read their links (and keep their text for analysis).
     seed_links: List[PdfLink] = []
+    seed_pdfs: Dict[str, dict] = {}     # pdf URI -> {"entries": [...], "line_entry": {page: [...]}}
     seed_file = out / "seed_links.json"
     if args.seed_pdf and not args.no_crawl:
         for src in args.seed_pdf:
             try:
-                links, text = pdf_extract_links(src)
+                entries, links, page_lines, line_entry = extract_entries(src)
             except Exception as exc:  # noqa: BLE001 - report and carry on with the others
                 log.error("Could not read seed PDF %s: %s", src, exc)
                 continue
             pdf_url = src if re.match(r"https?://", src) else Path(src).expanduser().resolve().as_uri()
             for ln in links:
                 ln.pdf = pdf_url
+            for e in entries:
+                e.pdf = pdf_url
             seed_links += links
+            seed_pdfs[pdf_url] = entries_to_json(entries, line_entry)
+            text = "\f".join("\n".join(lines) for lines in page_lines)
             cache.put(CachedPage(pdf_url, pdf_url, 200, "application/pdf", 0, time.time(), text,
                                  is_pdf=True, title=Path(urlparse(pdf_url).path).name or src, kind="seed"))
-        seed_file.write_text(json.dumps([ln.__dict__ for ln in seed_links], indent=1, ensure_ascii=False),
-                             encoding="utf-8")
+        seed_file.write_text(json.dumps({"links": [ln.__dict__ for ln in seed_links], "pdfs": seed_pdfs},
+                                        indent=1, ensure_ascii=False), encoding="utf-8")
     elif seed_file.exists():
-        seed_links = [PdfLink(**d) for d in json.loads(seed_file.read_text(encoding="utf-8"))]
+        data = json.loads(seed_file.read_text(encoding="utf-8"))
+        if isinstance(data, list):            # older runs: links only
+            data = {"links": data, "pdfs": {}}
+        seed_links = [PdfLink(**d) for d in data["links"]]
+        seed_pdfs = data.get("pdfs", {})
+
+    # One event per agenda entry, keyed by its first followable link.
+    skip_hosts = {registered_host(h) for h in args.follow_skip}
+    entry_keys: Dict[tuple, str] = {}
+    for pdf_url, d in seed_pdfs.items():
+        for e in d["entries"]:
+            good = [u for u in e["links"] if filter_targets({u: []}, skip_hosts)]
+            entry_keys[(pdf_url, e["index"])] = good[0] if good else f"{pdf_url}#entry-{e['index'] + 1}"
     seed_sites = [Site(f"pdf:{Path(urlparse(u).path).name or u}", "seed", [u], platform=True)
                   for u in dict.fromkeys(ln.pdf for ln in seed_links)]
 
@@ -280,7 +298,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         for ln in seed_links:
             if registered_host(urlparse(ln.url).netloc) not in hosts:
                 seed_targets[ln.url].append(Via(page=ln.pdf, event=ln.event, target=ln.url,
-                                                event_url=ln.url, date=ln.date_iso or ln.date_raw))
+                                                event_url=entry_keys.get((ln.pdf, ln.entry), ln.url),
+                                                date=ln.date_iso or ln.date_raw))
         for url, vias in filter_targets(seed_targets, skip).items():
             targets.setdefault(url, []).extend(vias)
         log.info("Following %d linked URLs on %d websites", len(targets),
@@ -314,15 +333,19 @@ def main(argv: Optional[List[str]] = None) -> int:
     for cp in cached.values():
         if not cp.is_pdf and cp.body and (cp.final_url in index.events or cp.url in index.events):
             index.add_event_page(cp)
-    real_seed = filter_targets({ln.url: [] for ln in seed_links},
-                               {registered_host(h) for h in args.follow_skip})
-    for ln in seed_links:
-        if ln.url in real_seed:     # not social media links ("Follow us on Instagram")
+    for pdf_url, d in seed_pdfs.items():
+        for e in d["entries"]:
+            iso = f"{e['start']} to {e['end']}" if e["start"] and e["end"] else e["start"]
+            index.add_pdf_link(entry_keys[(pdf_url, e["index"])], e["name"], e["date_raw"], iso, pdf_url)
+    real_seed = filter_targets({ln.url: [] for ln in seed_links}, skip_hosts)
+    for ln in seed_links:   # links outside any entry (or older runs without entries)
+        if ln.url in real_seed and (ln.pdf, ln.entry) not in entry_keys:
             index.add_pdf_link(ln.url, ln.event, ln.date_raw, ln.date_iso, ln.pdf)
     write_csv(out / "events.csv", index.rows(), ["event", "date", "event_link", "listed_on", "calendar_months"])
     log.info("Events found: %d", len(index.events))
     by_url = {p.url: p for p in pages}
     page_event_cache: Dict[str, List[EventRef]] = {}
+    other_pages_of: Dict[str, str] = {}
 
     def page_events(page) -> List[EventRef]:
         """Events a whole page belongs to ([] for listings, handled per paragraph)."""
@@ -340,27 +363,44 @@ def main(argv: Optional[List[str]] = None) -> int:
         else:
             site = registry.site_of(page.url)
             if site is not None and site.role == "linked":
-                vias = [v for v in site.via if v.target == page.url] or site.via
-                refs = [index.ref(v.event_url or v.target, v.event, v.date or v.month) for v in vias]
+                urls = {page.url, getattr(page, "requested_url", page.url)}
+                exact = [v for v in site.via if v.target in urls]
+                single = len({v.event_url or v.target for v in site.via}) == 1
+                vias = exact or (site.via if single else [])
+                if vias:
+                    refs = [index.ref(v.event_url or v.target, v.event, v.date or v.month) for v in vias]
+                else:
+                    # Other pages of a site several events link to belong to none of them
+                    # in particular; the linking events are listed separately.
+                    refs = [EventRef(f"(other pages of {site.key})", "", "")]
+                    other_pages_of[page.url] = site.via_events(30)
         uniq = list({(r.name, r.date, r.link): r for r in refs}.values())
         page_event_cache[page.url] = uniq
         return uniq
 
-    seed_event_keys = [k for k, ev in index.events.items() if ev.source.startswith(("file:", "http"))
-                       and any(ln.url == k for ln in seed_links)]
+    seed_event_keys = [k for k, ev in index.events.items() if any(ln.url == k for ln in seed_links)]
     block_event_cache: Dict[str, List[List[EventRef]]] = {}
 
     def block_events_for(page) -> List[List[EventRef]]:
-        """Events for each paragraph of a page. In a seed PDF, description lines
-        belong to the most recent entry named above them."""
+        """Events for each paragraph of a page. Each line of a seed PDF belongs to
+        the agenda entry it is part of; calendar cells to the events named in them."""
         if page.url not in block_event_cache:
             whole = page_events(page)
             out, last = [], []
+            line_entry = seed_pdfs.get(page.url, {}).get("line_entry") if page.kind == "seed" else None
+            seen_on_page: Counter = Counter()
             for b in page.blocks:
                 refs = whole
-                if not refs and page.kind == "calendar" and b.text:
+                if not refs and (page.kind == "calendar" or page.url in calendar_hosts) and b.text:
                     refs = index.named_in(b.text, index.events.keys())
-                elif not refs and page.kind == "seed" and b.text:
+                elif not refs and page.kind == "seed" and line_entry is not None:
+                    pno = b.region.rsplit(".", 1)[-1]
+                    k = seen_on_page[pno]
+                    seen_on_page[pno] += 1
+                    owners = line_entry.get(pno, [])
+                    idx = owners[k] if k < len(owners) else -1
+                    refs = [index.ref(entry_keys[(page.url, idx)])] if idx >= 0 else []
+                elif not refs and page.kind == "seed" and b.text:   # older runs without entries
                     named = index.named_in(b.text, seed_event_keys)
                     if named:
                         last = named
@@ -463,6 +503,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                         "event": " | ".join(e.name for e in evs),
                         "event_date": " | ".join(e.date for e in evs),
                         "event_link": " | ".join(e.link for e in evs),
+                        "site_linked_from_events": other_pages_of.get(page.url, ""),
                         "source_link": page.url, "page_title": page.title,
                         "site": page.site, "site_role": page.site_role,
                         "is_pdf": page.is_pdf, "pdf_found_on": page.referrer,
@@ -505,6 +546,9 @@ def main(argv: Optional[List[str]] = None) -> int:
                     "event": " | ".join(e.name for e in evs),
                     "event_date": " | ".join(e.date for e in evs),
                     "event_link": " | ".join(e.link for e in evs),
+                    "site_linked_from_events": other_pages_of.get(page.url, ""),
+                    "in_menu": block.region in ("nav", "header", "footer", "aside"),
+                    "named_in_event_title": any(m.key and m.key in canonical_key(e.name) for e in evs),
                     "_block": (page.url, bi),
                     "org_key": m.key,
                     "surface_form": m.surface,
@@ -678,6 +722,7 @@ def write_outputs(out: Path, mentions: List[dict], orgs: List[dict], page_rows: 
                   n_pages: int, args: argparse.Namespace) -> None:
     mention_fields = [
         "organisation", "surface_form", "org_type", "methods", "event", "event_date", "event_link",
+        "site_linked_from_events", "in_menu", "named_in_event_title",
         "site", "site_role", "via_event",
         "calendar_month", "url", "page_title", "page_date",
         "is_pdf", "embedded_in", "region", "boilerplate", "repeat_context", "context_themes", "context_theme_terms",

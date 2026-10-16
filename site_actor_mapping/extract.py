@@ -32,6 +32,8 @@ from urllib.parse import urljoin, urlparse
 
 from bs4 import BeautifulSoup, Comment, NavigableString, Tag
 
+from places import LANGUAGE_NAMES, PLACES
+
 log = logging.getLogger(__name__)
 
 
@@ -295,7 +297,9 @@ BLOCK_TAGS = {
     "figure", "figcaption", "table", "thead", "tbody", "tr", "td", "th", "form",
     "fieldset", "address", "details", "summary", "pre", "hr", "br", "caption",
 }
-DROP_TAGS = ["script", "style", "noscript", "svg", "template", "iframe", "canvas", "object"]
+DROP_TAGS = ["script", "style", "noscript", "svg", "template", "iframe", "canvas", "object",
+             # form controls: country pickers, field labels and buttons are not content
+             "select", "option", "datalist", "textarea", "input", "button"]
 REGION_TAGS = ("nav", "header", "footer", "aside")
 
 TITLE_SEPARATOR = re.compile(r"\s[-–—|]\s|:\s|\s/\s")
@@ -406,6 +410,10 @@ def tidy_surface(name: str) -> str:
 # --------------------------------------------------------------------------
 # Themes
 # --------------------------------------------------------------------------
+URL_LIKE = re.compile(r"(?:https?://|www\.)\S+|\b[\w.-]+\.(?:org|com|net|eu|info|de|fr|nl|be|at|it|es|"
+                      r"dk|se|uk|ch|pt|pl|io|noblogs\.org|blackblogs\.org)(?:/\S*)?", re.I)
+
+
 class ThemeSet:
     """Themes loaded from a plain-text file (see example_themes.txt)."""
 
@@ -456,10 +464,14 @@ class ThemeSet:
 
     def find(self, text: str) -> Dict[str, List[Tuple[int, int, str]]]:
         hits: Dict[str, List[Tuple[int, int, str]]] = {}
+        # Words inside web addresses ("…/anti-colonial-attack/", "mondialiantirazzisti.org")
+        # are not uses of a theme.
+        urls = [(m.start(), m.end()) for m in URL_LIKE.finditer(text)]
         for theme, pats in self.themes.items():
             found = []
             for p in pats:
-                found.extend((m.start(), m.end(), m.group(0)) for m in p.finditer(text))
+                found.extend((m.start(), m.end(), m.group(0)) for m in p.finditer(text)
+                             if not any(a <= m.start() < b for a, b in urls))
             # Overlapping terms ("green colonialism" / "colonialism") count once,
             # as the longest match.
             kept: List[Tuple[int, int, str]] = []
@@ -486,6 +498,8 @@ def parse_html(html: str, url: str, depth: int, strip_regions: bool) -> ParsedPa
         t.decompose()
     for c in soup.find_all(string=lambda s: isinstance(s, Comment)):
         c.extract()
+    for t in soup.select("form label, form legend"):
+        t.decompose()
     for t in soup.select('[id*="cookie" i], [class*="cookie" i], [id*="consent" i], '
                          '[class*="consent" i], [id*="cmplz" i], [class*="cmplz" i], '
                          '[id*="borlabs" i], [class*="borlabs" i], [id*="gdpr" i], [class*="gdpr" i]'):
@@ -1048,6 +1062,11 @@ class OrgExtractor:
             if "watchlist" not in m.methods:
                 if not self.plausible_name(m.surface) or self.is_stopped(m.key, m.surface):
                     continue
+                words = [canonical_key(w) for w in TOKEN_RE.findall(m.surface)]
+                if words and all(w in LANGUAGE_NAMES for w in words):
+                    continue   # a language menu: "Deutsch English Español Français Italiano"
+                if not m.methods & {"pattern", "appositive"} and m.key in PLACES:
+                    continue   # a bare place name: "Genève", "Hambach", "Suisse"
                 if "pattern" not in m.methods and not self._head_type(TOKEN_RE.findall(m.surface)):
                     if self.is_ordinary_words(m.surface):
                         continue
