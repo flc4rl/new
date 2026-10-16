@@ -45,6 +45,9 @@ PLATFORM_HOSTS = {
     "substack.com", "blogspot.com", "wordpress.com", "github.com", "gitlab.com",
     "mailchi.mp", "eepurl.com", "campaign-archive.com", "notion.site", "padlet.com",
     "canva.site", "carrd.co", "wixsite.com", "squarespace.com", "weebly.com", "jimdofree.com",
+    # link shorteners and link-in-bio pages: read the page they lead to, nothing more
+    "tr.ee", "bit.ly", "tinyurl.com", "t.ly", "ow.ly", "lnkd.in", "is.gd", "buff.ly",
+    "rebrand.ly", "shorturl.at", "cutt.ly", "linkin.bio", "beacons.ai", "bio.link",
 }
 
 
@@ -225,6 +228,10 @@ def collect_targets(cache: PageCache, main_hosts: Set[str], mode: str,
         for url, _text in links:
             if url not in common:
                 targets[url].append(Via(page=p.final_url, event=event, month=via.month, target=url))
+
+    # The same event is listed on several calendar views; keep each (page, event, month) once.
+    for url, vias in targets.items():
+        targets[url] = list({(v.page, v.event, v.month): v for v in vias}.values())
 
     skip = SKIP_HOSTS | extra_skip
     return {u: v for u, v in targets.items()

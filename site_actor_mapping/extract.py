@@ -123,7 +123,7 @@ DESCRIPTORS = sorted(
 )
 
 CONNECTORS = {
-    "of", "for", "the", "and", "&", "on", "in", "against", "to", "at", "with", "without",
+    "of", "for", "the", "and", "&", "on", "in", "against", "to", "with", "without",
     "de", "di", "del", "della", "dei", "degli", "delle", "da", "la", "le", "les", "des",
     "du", "el", "los", "las", "por", "para", "per", "e", "y", "et", "und", "für", "der",
     "die", "das", "dos", "das", "do", "contra", "contre", "gegen", "sans", "sin", "senza",
@@ -149,6 +149,10 @@ LEADING_STRIP = {
     "voir", "afficher", "catégories", "categories", "tags", "posted", "publié", "publiée",
     "photo", "photos", "merci", "thanks", "c’est", "c'est", "cette", "ce", "cet", "ces",
     "whilst", "earlier", "later", "highlighting", "construisons", "rejoignez", "venez",
+    "warum", "wieder", "welche", "welcher", "welches", "hinweise", "bitte", "dickes",
+    "breite", "vollständiges", "wie", "was", "wer", "wo", "wann",
+    "we", "it", "they", "he", "she", "i", "us", "them", "wir", "sie", "es", "er", "ihr",
+    "nous", "ils", "elles", "elle", "il", "noi", "loro", "nosotros", "ellos", "ellas",
     # activity words heading a title: "Visite de la Coopérative X", "Workshop with Y"
     "visite", "visit", "atelier", "rencontre", "soirée", "conférence", "projection", "débat",
     "workshop", "talk", "panel", "screening", "discussion", "presentation", "launch",
@@ -189,7 +193,7 @@ FILE_SHARING_HOSTS = {
 # Link text starting with these is an instruction, not a name ("Go to Instagram page",
 # "Je fais un don", "Read the call-out").
 CTA_WORDS = {
-    "sign", "go", "click", "clicking", "read", "find", "see", "view", "visit", "donate", "sign", "register",
+    "sign", "submit", "go", "click", "clicking", "read", "find", "see", "view", "visit", "donate", "sign", "register",
     "join", "follow", "download", "watch", "listen", "learn", "discover", "get", "buy", "book",
     "apply", "subscribe", "share", "check", "explore", "contact", "email", "write", "you", "we",
     "our", "your", "here", "more", "this", "je", "j", "nous", "vous", "voir", "afficher", "faire",
@@ -199,6 +203,8 @@ CTA_WORDS = {
     "ici", "vai", "leggi", "scopri", "guarda", "iscriviti", "unisciti", "sostieni", "dona",
     "clicca", "ver", "leer", "lee", "descubre", "únete", "apoya", "haz", "mehr", "hier", "jetzt",
     "lesen", "spenden", "mitmachen", "unterstütze", "unterstützen", "zum", "zur",
+    "direkt", "finanziell", "komm", "kommt", "mach", "macht", "spende", "melde", "meldet",
+    "werde", "hilf", "helft", "schau", "abonniere", "teile",
 }
 LINK_SKIP_DOMAINS = {
     "facebook.com", "instagram.com", "twitter.com", "x.com", "t.co", "tiktok.com", "linkedin.com",
@@ -220,7 +226,7 @@ def link_text_is_name(text: str, domain: str) -> bool:
     if not text or LINK_TEXT_JUNK.match(text) or not text[:1].isupper():
         return False
     words = [w for w in re.split(r"\s+", text) if w]
-    if len(words) > 7 or re.search(r"[!?]|:\s|\s[–—-]\s|\.\.\.|…", text):
+    if len(words) > 5 or re.search(r"[!?→←»]|:\s|\s[–—-]\s|\.\.\.|…", text):
         return False
     first = words[0].casefold().strip("’'\"“«")
     first = re.split(r"[’']", first)[0] if re.match(r"\w+[’']\w", first) else first
@@ -426,6 +432,11 @@ def parse_html(html: str, url: str, depth: int, strip_regions: bool) -> ParsedPa
         t.decompose()
     for c in soup.find_all(string=lambda s: isinstance(s, Comment)):
         c.extract()
+    for t in soup.select('[id*="cookie" i], [class*="cookie" i], [id*="consent" i], '
+                         '[class*="consent" i], [id*="cmplz" i], [class*="cmplz" i], '
+                         '[id*="borlabs" i], [class*="borlabs" i], [id*="gdpr" i], [class*="gdpr" i]'):
+        if t.name not in ("html", "body"):
+            t.decompose()
     if strip_regions:
         for t in soup(list(REGION_TAGS)):
             t.decompose()
@@ -667,6 +678,7 @@ class OrgExtractor:
         self._models: Dict[str, object] = {}
         self.common_words: Set[str] = set()
         self.mid_caps: Optional[Set[str]] = None   # None until prepare_corpus() runs
+        self.missing_models: Set[str] = set()
         self.label_votes: Dict[str, Counter] = defaultdict(Counter)
         desc = "|".join(re.escape(d).replace(r"\ ", r"[\s\-]+") for d in DESCRIPTORS)
         # "the feminist collective Mujeres Creando" / "the NGO called Sea-Watch"
@@ -688,8 +700,13 @@ class OrgExtractor:
         if name not in self._models:
             try:
                 import spacy
-                nlp = spacy.load(name, exclude=["parser", "lemmatizer", "tagger", "attribute_ruler",
-                                                "morphologizer", "senter", "textcat"])
+                # German keeps its tagger: with every noun capitalised, the part of
+                # speech is the only way to tell "Gemeinschaft" from a name.
+                keep_pos = name.startswith("de_")
+                exclude = ["parser", "lemmatizer", "senter", "textcat"]
+                if not keep_pos:
+                    exclude += ["tagger", "attribute_ruler", "morphologizer"]
+                nlp = spacy.load(name, exclude=exclude)
                 nlp.max_length = 2_000_000
                 log.info("Loaded spaCy model %s", name)
                 self._models[name] = nlp
@@ -711,8 +728,13 @@ class OrgExtractor:
                 if _installed(f"{base}_{size}"):
                     nlp = self._load(f"{base}_{size}")
                     break
-        if nlp is None:  # no model for this language: multilingual, then English
-            nlp = self._load("xx_ent_wiki_sm") if lang != "en" else None
+        if nlp is None and lang != "en":
+            # Never fall back to the English model on another language: it tags
+            # ordinary capitalised words (every German noun) as organisations.
+            nlp = self._load("xx_ent_wiki_sm") if _installed("xx_ent_wiki_sm") else None
+            if nlp is None:
+                self.missing_models.add(SPACY_MODELS.get(lang, f"a spaCy model for '{lang}'"))
+            return nlp
         return nlp or self._load("en_core_web_sm")
 
     @property
@@ -721,13 +743,21 @@ class OrgExtractor:
         return self.model_for("en")
 
     def pipe(self, texts: List[str], lang: str = "en") -> list:
-        nlp = self.model_for(lang)
-        if nlp is None:
-            return [None] * len(texts)
-        docs = list(nlp.pipe(texts, batch_size=64))
-        for doc in docs:  # every label a name receives anywhere on the site
-            for ent in doc.ents:
-                self.label_votes[canonical_key(tidy_surface(ent.text))][ent.label_] += 1
+        """NER docs for `texts`. In auto mode each paragraph long enough to tell gets
+        its own language (pages mix languages: translations, quotes, song sheets);
+        short ones take the page language `lang`."""
+        per_text = ([detect_language(t) if len(t.split()) >= 8 else lang for t in texts]
+                    if self.spacy_model.lower() == "auto" else [lang] * len(texts))
+        docs: list = [None] * len(texts)
+        for code in dict.fromkeys(per_text):
+            nlp = self.model_for(code)
+            if nlp is None:
+                continue
+            idx = [i for i, c in enumerate(per_text) if c == code]
+            for i, doc in zip(idx, nlp.pipe([texts[i] for i in idx], batch_size=64)):
+                docs[i] = doc
+                for ent in doc.ents:  # every label a name receives anywhere on the site
+                    self.label_votes[canonical_key(tidy_surface(ent.text))][ent.label_] += 1
         return docs
 
     # ------------------------------------------------------- corpus statistics
@@ -795,9 +825,13 @@ class OrgExtractor:
             return False
         if re.search(r"https?://|www\.|@|\.(com|org|net)\b", surface, re.I):
             return False
+        if len(re.findall(r"\d", surface)) >= 6:
+            return False   # IBANs, phone numbers, dates
         toks = surface.split()
         if len(toks) > 12:
             return False
+        if len(toks) >= 4 and surface.isupper():
+            return False   # "YOU CAN DELIVER A BIG WIN FOR YOUR CAMPAIGN": a shouted sentence
         if surface == surface.lower():
             return False
         key = canonical_key(surface)
@@ -909,9 +943,13 @@ class OrgExtractor:
                 cands.append((2, Mention(surface, "", {"pattern"}, head_typ, s, e)))
 
         if doc is not None:
+            german = doc.lang_ == "de" and doc.has_annotation("POS")
             for ent in doc.ents:
                 if ent.label_ not in ("ORG", "NORP_ORG"):
                     continue
+                if (german and len(ent) == 1 and ent[0].pos_ in {"NOUN", "ADJ", "VERB", "ADV", "PRON"}
+                        and not ent.text.isupper()):
+                    continue   # a common German noun ("Gemeinschaft", "Küche"), not a name
                 s, e = self._trim(text, ent.start_char, ent.end_char)
                 surface = text[s:e]
                 toks = [t.group(0) for t in TOKEN_RE.finditer(surface)]

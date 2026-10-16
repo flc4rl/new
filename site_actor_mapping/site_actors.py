@@ -372,6 +372,12 @@ def main(argv: Optional[List[str]] = None) -> int:
         })
 
     log.info("Page languages: %s", ", ".join(f"{k} {n}" for k, n in langs.most_common()))
+    if extractor.missing_models:
+        log.warning("NER was skipped for some text because these spaCy models are not installed "
+                    "(rule-based detection still ran): %s. Install with: %s",
+                    ", ".join(sorted(extractor.missing_models)),
+                    " && ".join(f"python -m spacy download {m}" for m in sorted(extractor.missing_models)
+                                if m.endswith("_sm")))
     # Site-wide vetting of names found only by NER / links / appositives.
     methods_by_key: Dict[str, Set[str]] = defaultdict(set)
     for r in mention_rows:
