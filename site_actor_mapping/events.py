@@ -99,15 +99,17 @@ class Event:
     date_text: str = ""              # date as written, when no ISO date is known
     months: Set[str] = field(default_factory=set)
     source: str = ""                 # calendar page / seed PDF where it was listed
+    link: str = ""                   # the link shown for the event (key may add a date)
 
     @property
     def date(self) -> str:
         if self.dates:
             lo, hi = min(self.dates), max(self.dates)
             return lo if lo == hi else f"{lo} to {hi}"
+        months = " / ".join(sorted(self.months))
         if self.date_text:
-            return self.date_text
-        return " / ".join(sorted(self.months))
+            return f"{months} ({self.date_text})" if months else self.date_text
+        return months
 
 
 @dataclass
@@ -185,8 +187,12 @@ class EventIndex:
                 ev.dates.add(t["datetime"][:10])
 
     # ---------------------------------------------------------- seed PDFs
-    def add_pdf_link(self, url: str, name: str, date_raw: str, date_iso: str, source: str) -> None:
-        ev = self.get_or_add(url)
+    def add_pdf_link(self, url: str, name: str, date_raw: str, date_iso: str, source: str,
+                     link: str = "") -> None:
+        """An agenda entry. `url` is its key; `link` the URL to show (several
+        editions of a recurring event share a link but are separate events)."""
+        ev = self.events.get(url) or self.events.setdefault(url, Event(key=url))
+        ev.link = ev.link or link
         ev.name = ev.name or name
         if date_iso:
             ev.dates.update(date_iso.split(" to "))
@@ -198,8 +204,10 @@ class EventIndex:
     def ref(self, key: str, fallback_name: str = "", fallback_date: str = "") -> EventRef:
         ev = self.events.get(normalise_url(key) or key)
         if ev is None:
+            ev = self.events.get(key)
+        if ev is None:
             return EventRef(fallback_name, fallback_date, key)
-        return EventRef(ev.name or fallback_name, ev.date or fallback_date, ev.key)
+        return EventRef(ev.name or fallback_name, ev.date or fallback_date, ev.link or ev.key)
 
     def named_in(self, text: str, candidates: Iterable[str]) -> List[EventRef]:
         """Events among `candidates` whose name appears in `text` (calendar cells,
@@ -209,11 +217,11 @@ class EventIndex:
         for key in candidates:
             ev = self.events.get(key)
             if ev and len(ev.name) >= 4 and ev.name.casefold() in low:
-                out.append(EventRef(ev.name, ev.date, ev.key))
+                out.append(EventRef(ev.name, ev.date, ev.link or ev.key))
         return out
 
     def rows(self) -> List[dict]:
-        return [{"event": ev.name, "date": ev.date, "event_link": ev.key, "listed_on": ev.source,
+        return [{"event": ev.name, "date": ev.date, "event_link": ev.link or ev.key, "listed_on": ev.source,
                  "calendar_months": "; ".join(sorted(ev.months))}
                 for ev in sorted(self.events.values(), key=lambda e: (e.date, e.name))]
 
@@ -232,20 +240,20 @@ def _walk_json(data):
 # ---------------------------------------------------------------- agenda entries
 _ORD = r"(?:st|nd|rd|th|er|e|ème|º|°)?"
 _MON = rf"(?:{_MONTH_RE})(?![^\W\d_])"
-_RANGE_SEP = r"(?:[-–—/]|au|à|to|till|til|until|bis|al|tot|t/m|–)"
+_RANGE_SEP = r"(?:->|→|[-–—/&]|au|à|to|till|til|until|bis|al|tot|t/m|et|and|und|en|og|och|y|e)"
 _ENTRY_DATE_PATTERNS = [
     # (05-09.07)  (24.5.-1.6.)  (14.-26.08.)  (18.8 - 24.8)  (01.10 - 28.02)  29.05-01.06.
-    re.compile(r"^\(?\s*(?P<d1>\d{1,2})(?!\d)\.?(?:(?P<m1>\d{1,2})(?!\d)\.?(?:(?P<y1>20\d\d|\d\d)(?!\d)\.?)?)?"
-               rf"\s*{_RANGE_SEP}\s*(?P<d2>\d{{1,2}})(?!\d)\.\s*(?P<m2>\d{{1,2}})(?!\d)\.?"
+    re.compile(r"^\(?\s*(?P<d1>\d{1,2})(?!\d)\.?(?:\s?(?P<m1>\d{1,2})(?!\d)\.?(?:(?P<y1>20\d\d|\d\d)(?!\d)\.?)?)?"
+               rf"\s*{_RANGE_SEP}\s*~?(?P<d2>\d{{1,2}})(?!\d)\.\s?(?P<m2>\d{{1,2}})(?!\d)\.?"
                r"(?:(?P<y2>20\d\d|\d\d)(?!\d))?\.?"),
     # (24.05)  20.06.2026
     re.compile(r"^\(?\s*(?P<d1>\d{1,2})(?!\d)\.(?P<m1>\d{1,2})(?!\d)\.?(?:(?P<y1>20\d\d|\d\d)(?!\d))?"),
     # 24 of may – 1st of june / 29 juillet au 1er août / 15 au 18 juillet / 1 Aug - 8 Aug 2025
-    re.compile(rf"^(?:du|from|vom|van|dal|del|de|från|fra)?\s*(?P<d1>\d{{1,2}})(?!\d){_ORD}\s*(?:of\s+|de\s+)?"
+    re.compile(rf"^(?:du|from|vom|van|dal|del|de|från|fra)?\s*(?P<d1>\d{{1,2}})(?!\d){_ORD}\.?\s*(?:of\s+|pf\s+|de\s+)?"
                rf"(?:(?P<mon1>{_MON})\.?\s*(?P<y1>20\d\d)?)?\s*{_RANGE_SEP}\s*"
-               rf"(?P<d2>\d{{1,2}})(?!\d){_ORD}\s*(?:of\s+|de\s+)?(?P<mon2>{_MON})\.?,?\s*(?P<y2>20\d\d)?", re.I),
+               rf"(?P<d2>\d{{1,2}})(?!\d){_ORD}[,.]*\s*(?:of\s+|pf\s+|de\s+)?(?P<mon2>{_MON})\.?,?\s*(?P<y2>20\d\d)?", re.I),
     # 30 juillet / 24th of may / 16th september 2025
-    re.compile(rf"^(?:le|on|am|op|il|el|den|d\.)?\s*(?P<d1>\d{{1,2}})(?!\d){_ORD}\.?\s*(?:of\s+|de\s+)?"
+    re.compile(rf"^(?:le|on|am|op|il|el|den|d\.)?\s*(?P<d1>\d{{1,2}})(?!\d){_ORD}\.?\s*(?:of\s+|pf\s+|de\s+)?"
                rf"(?P<mon1>{_MON})\.?,?\s*(?P<y1>20\d\d)?", re.I),
     # June 29-30, 2026 / May 24
     re.compile(rf"^(?P<mon1>{_MON})\.?\s+(?P<d1>\d{{1,2}})(?!\d){_ORD}(?:\s*[-–]\s*(?P<d2>\d{{1,2}})(?!\d){_ORD})?"
@@ -304,17 +312,40 @@ def parse_entry_date(line: str, year: Optional[int]) -> Tuple[str, str, str]:
     return "", "", ""
 
 
-_HEADING = re.compile(rf"^(?:ann[ée]e|year|jahr|jaar|år|anno|año|ano)?\s*(?P<mon>{_MON})?\s*(?:/\s*{_MON})?\s*"
-                      r"(?P<year>20\d\d)?\s*:?\s*$", re.I)
+_HEADING = re.compile(rf"^(?:(?:ann[ée]e|year|jahr|jaar|år|anno|año|ano)(?:\s*/\s*(?:year|ann[ée]e))?)?\s*"
+                      rf"(?P<mon>{_MON})?\s*(?:/\s*{_MON})?\s*(?P<year>20\d\d)?\s*:?\s*$", re.I)
+# Comment timestamps on blog pages: "10 MARS 2023 À 12 H 23 MIN", "12 March 2023 at 14:05".
+_TIMESTAMP = re.compile(rf"^\d{{1,2}}\s+{_MON}\s+(?P<year>20\d\d)\s+(?:à|at|um|om|alle|a las)\s+\d{{1,2}}\s*(?:h|:)\s*\d{{1,2}}",
+                        re.I)
+# Section banners: "|||||||| camps/actions 2025 ||||||||", "=== ONLINE AGENDAS ==="
+_BANNER = re.compile(r"^[|=#*~_-]{3,}|[|=#*~_-]{3,}$")
+
+
+def heading_info(line: str) -> Tuple[bool, Optional[int], Optional[int]]:
+    """Is this line a month/year heading ("ANNÉE 2025", "Année / Year 2022",
+    "JUNE 2023", "Mai / May")? Returns (is_heading, year, month)."""
+    raw = line.strip()
+    if not raw or len(raw) > 40 or raw.endswith((")", ".", ",", "-")) or "http" in raw or "/)" in raw:
+        return False, None, None
+    t = re.sub(r"^[\W_]+|[\W_]+$", "", raw)
+    m = _HEADING.match(t)
+    if not t or not m or not (m.group("mon") or m.group("year")):
+        return False, None, None
+    if not m.group("year") and not t[:1].isupper():
+        return False, None, None   # "juin." at the end of a wrapped sentence is not a heading
+    month = MONTHS.get(m.group("mon").lower()) if m.group("mon") else None
+    return True, int(m.group("year")) if m.group("year") else None, month
 
 
 def heading_year(line: str) -> Tuple[bool, Optional[int]]:
-    """Is this line a month/year heading ("ANNÉE 2025", "JUNE 2023", "Mai / May")?
-    Returns (is_heading, year or None)."""
-    t = re.sub(r"^[\W_]+|[\W_]+$", "", line.strip())
-    if not t or len(t) > 40:
-        return False, None
-    m = _HEADING.match(t)
-    if not m or not (m.group("mon") or m.group("year")):
-        return False, None
-    return True, int(m.group("year")) if m.group("year") else None
+    is_heading, year, _ = heading_info(line)
+    return is_heading, year
+
+
+def comment_timestamp_year(line: str) -> Optional[int]:
+    m = _TIMESTAMP.match(line.strip())
+    return int(m.group("year")) if m else None
+
+
+def is_banner(line: str) -> bool:
+    return bool(_BANNER.search(line.strip()))

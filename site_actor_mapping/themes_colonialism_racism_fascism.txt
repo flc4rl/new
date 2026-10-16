@@ -1,5 +1,7 @@
 # Standing themes: colonialism, racism, fascism and their variations, in
-# English, Italian, Spanish, French, German, Portuguese, Dutch, Danish and Swedish.
+# English, Italian, Spanish, French, German, Portuguese, Dutch, Danish, Swedish,
+# Norwegian, Polish, Czech, Slovak, Slovenian, Croatian/Serbian, Greek, Romanian,
+# Finnish, Catalan, Basque, Ukrainian/Russian, Lithuanian and Hungarian.
 #
 # Deliberately broader than frame_analysis/taxonomy.py: activist websites use
 # the adjectives ("colonial violence", "racist borders") analytically, so
@@ -85,6 +87,39 @@ globala syd
 globala södern
 klimagæld
 klimatskuld
+# --- Norwegian / Polish / Czech / Slovak / Slovenian / Croatian / Romanian / Finnish /
+#     Catalan / Basque / Lithuanian / Hungarian (most "kolonial-" forms are covered above)
+det globale sør
+*imperializm*
+*imperializem*
+*imperijaliz*
+*kolonijal*
+*dekolonizac*
+*dekolonijal*
+*gyarmat*
+*neokolon*
+globalne południe
+globální jih
+globálny juh
+globalni jug
+sudul global
+globaali etelä
+sud global
+hego globala
+globalusis pietūs
+globális dél
+# --- Greek / Ukrainian / Russian
+*αποικιοκρατ*
+*αποικιακ*
+*ιμπεριαλισ*
+*αποαποικιοπ*
+παγκόσμιος νότος
+*колоніал*
+*колониал*
+*імперіал*
+*империал*
+*деколоніз*
+*деколониз*
 
 [racism]
 # --- any language: stems, also inside compounds
@@ -139,6 +174,30 @@ främlingsfientlighet
 etnisk profilering
 vit överhöghet
 hvid overherredømme
+# --- Norwegian / Polish / Czech / Slovak / Slovenian / Croatian / Romanian / Finnish /
+#     Catalan / Basque / Lithuanian / Hungarian (rasisme, rasism, rasismus, rasismi: *rasis*)
+*rasiz*
+*rasszis*
+*rasszizm*
+*arrazakeri*
+*arrazist*
+*ksenofob*
+*ksenofóbi*
+*antysemit*
+*antisemitism*
+fremmedfiendtlig*
+muukalaisviha*
+idegengyűlölet
+# --- Greek / Ukrainian / Russian
+*ρατσισ*
+*ρατσιστ*
+*ξενοφοβ*
+*αντισημιτ*
+*расизм*
+*расист*
+*ксенофоб*
+*антисеміт*
+*антисемит*
 
 [fascism]
 # --- any language: stems, also inside compounds (Technofascism, ecofascism ...)
@@ -188,6 +247,45 @@ yttersta högern
 högerradikal*
 auktoritarism
 autoritarisme
+# --- Norwegian / Polish / Czech / Slovak / Slovenian / Croatian / Romanian / Finnish /
+#     Catalan / Basque / Lithuanian / Hungarian
+høyreekstrem*
+ytre høyre
+*faszyz*
+*faszyst*
+*fašis*
+*fašiz*
+*fašist*
+*fasis*
+*fasiz*
+*feixis*
+*faxis*
+*faxist*
+skrajna prawica
+skrajnej prawicy
+krajn* pravic*
+skrajna desnica
+skrajne desnice
+krajnja desnica
+ekstremna desnica
+krajnje desnice
+extrema dreaptă
+extremei drepte
+äärioikeisto*
+extrema dreta
+ultradreta
+eskuin muturra*
+kraštutin* dešin*
+szélsőjobb*
+# --- Greek / Ukrainian / Russian
+*φασισ*
+*φασιστ*
+*ακροδεξι*
+*ναζι*
+*фашиз*
+*фашист*
+*ультраправ*
+*нацист*
 # --- Dutch
 extreemrechts
 extreem-rechts

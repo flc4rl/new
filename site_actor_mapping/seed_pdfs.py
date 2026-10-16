@@ -22,11 +22,17 @@ from typing import Dict, List, Optional, Tuple
 import requests
 
 from crawler import normalise_url
-from events import heading_year, normalise_date_text, parse_entry_date
+from events import (MONTHS, comment_timestamp_year, find_date, heading_info, is_banner,
+                    normalise_date_text, parse_entry_date)
 
 log = logging.getLogger(__name__)
 
-URL_IN_TEXT = re.compile(r"(?:https?://|www\.)[^\s<>\"')\]]+", re.I)
+# A URL stops where another one starts ("lesresitantes.fr/https://www.helloasso.com/...").
+URL_IN_TEXT = re.compile(r"(?:https?://|www\.)(?:(?!https?://)[^\s<>\"')\]])+", re.I)
+# Domains written without http/www: "radicalbookfairleipzig.org", "framaforms.org/inscription-..."
+BARE_URL = re.compile(r"(?<![@\w./:-])(?:[a-z0-9-]+\.)+(?:org|net|com|eu|de|fr|nl|be|at|it|es|dk|se|uk|info|ch|"
+                      r"pt|pl|cz|no|online|events|blog|io)(?:/(?:(?!https?://)[^\s<>\"')\]])*)?(?![\w@])", re.I)
+MONTH_NAMES = {v: k for k, v in MONTHS.items() if len(k) > 3 and k.isascii()}
 VALID_HOST = re.compile(r"^(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+[a-z]{2,}$", re.I)
 # Links that are part of the PDF's own page furniture, never events.
 JUNK_LINK = re.compile(r"^https?://(?:www\.)?(?:wordpress\.com|wp\.me|gravatar\.com|riseup\.net|pad\.riseup\.net)/?$",
@@ -37,7 +43,7 @@ URLISH = re.compile(r"(?:https?://|www\.)|\b[\w-]+\.(?:org|com|net|eu|de|fr|nl|b
 def _title_like(line: str) -> bool:
     """A short heading-like line that could be an entry's title ("NoMinesLand - Anti-extractivist Camp")."""
     t = line.strip()
-    return (4 <= len(t) < 80 and t[:1].isupper() and not URLISH.search(t)
+    return (4 <= len(t) < 80 and (t[:1].isupper() or not t[:1].isalnum()) and not URLISH.search(t) and ":" not in t
             and not t.endswith((")", "-", ",", "(")) and not parse_entry_date(t, None)[0])
 
 
@@ -66,10 +72,13 @@ class Entry:
     year_known: bool = False
     name: str = ""
     links: List[str] = field(default_factory=list)
+    month: str = ""   # "2025-07" for entries with no exact date (from the month heading)
 
     @property
     def date_iso(self) -> str:
-        return f"{self.start} to {self.end}" if self.start and self.end else self.start
+        if self.start:
+            return f"{self.start} to {self.end}" if self.end else self.start
+        return self.month
 
 
 def load_pdf_bytes(source: str, timeout: float = 30.0) -> bytes:
@@ -78,6 +87,13 @@ def load_pdf_bytes(source: str, timeout: float = 30.0) -> bytes:
         resp.raise_for_status()
         return resp.content
     return Path(source).expanduser().read_bytes()
+
+
+def _has_name_text(lines: List[str], date_raw: str) -> bool:
+    """Would these lines still give the entry a name (text besides its date and links)?"""
+    text = normalise_date_text(" ".join(lines)).replace(date_raw, " ", 1)
+    text = BARE_URL.sub(" ", URL_IN_TEXT.sub(" ", text))
+    return len(re.sub(r"[\W\d_]+", "", text)) >= 4
 
 
 def _clean_url(raw: str) -> Optional[str]:
@@ -95,13 +111,24 @@ def _clean_url(raw: str) -> Optional[str]:
 
 def _entry_name(entry: Entry) -> str:
     text = normalise_date_text(re.sub(r"^[\s–—\-•*·>]+", "", " ".join(entry.lines)))
-    if entry.date_raw:
-        text = text.replace(entry.date_raw, " ", 1)
+    opened = text.startswith("(")
+    before = ""
+    if entry.date_raw and entry.date_raw in text:
+        idx = text.index(entry.date_raw)
+        before, text = text[:idx], text[idx + len(entry.date_raw):]   # a title line may precede the date
+        if opened and ")" in text[:40]:          # "(13.01 onwards) ...", "(09.09-???) ..."
+            text = text[text.index(")") + 1:]
+    # Leftover date words before the title's colon: "until ? : March to Gaza",
+    # "au 1/2 octobre : Rassemblement ...", "à fin septembre : Ecotopia ..."
+    lead = re.match(r"^[\s,.;-]*([^:]{0,30}?)\s*:\s*(?=\S)", text)
+    if lead and (not lead.group(1) or not lead.group(1)[:1].isupper()):
+        text = text[lead.end():]
+    text = f"{before.strip()} {text}" if before.strip(" ([") else text
     first_url = URL_IN_TEXT.search(text)
     if first_url and first_url.start() > 8:       # the name ends where the first link starts
         text = text[:first_url.start()]
     text = re.sub(r"\(\s*(?:https?://|www\.)[^)]*\)", " ", text)   # "(https://...)" duplicates
-    text = URL_IN_TEXT.sub(" ", text)
+    text = BARE_URL.sub(" ", URL_IN_TEXT.sub(" ", text))
     text = re.sub(r"^[\s()\[\]:\-–—,.;/>]+", "", text)
     text = re.sub(r"\s+", " ", text).strip(" :-–—,;/>(")
     if len(text) > 160:
@@ -120,6 +147,7 @@ def extract_entries(source: str) -> Tuple[List[Entry], List[PdfLink], List[List[
     page_lines: List[List[str]] = []
     line_entry: Dict[int, List[int]] = {}
     year: Optional[int] = None
+    month: Optional[int] = None
     current: Optional[Entry] = None
 
     with pdfplumber.open(io.BytesIO(data)) as pdf:
@@ -130,16 +158,45 @@ def extract_entries(source: str) -> Tuple[List[Entry], List[PdfLink], List[List[
             owners: List[int] = []
             headings: List[bool] = []
             for i, (_, _, text) in enumerate(raw_lines):
-                is_heading, hy = heading_year(text)
+                ts_year = comment_timestamp_year(text)
+                if is_banner(text) or ts_year:
+                    # Section banners ("|||| ONLINE AGENDAs ||||") and blog-comment
+                    # timestamps end the current entry; a timestamp also gives the year.
+                    if ts_year:
+                        year = ts_year
+                    month, current = None, None
+                    owners.append(-1)
+                    headings.append(True)
+                    continue
+                is_heading, hy, hm = heading_info(text)
                 if is_heading:
                     if hy:
                         year = hy
+                    month = hm
                     current = None
                     owners.append(-1)
                     headings.append(True)
                     continue
                 headings.append(False)
                 raw, start, end = parse_entry_date(text, year)
+                undated = None
+                if not raw:
+                    bullet = re.match(r"^\s*[–—]\s+(?P<when>[^:]{3,80}?)\s*:\s*\S", text)
+                    if bullet:
+                        # "– Début juillet jusqu’à fin septembre : Ecotopia bike tour ..."
+                        undated = bullet.group("when")
+                    elif current is None and month and (URL_IN_TEXT.search(text) or BARE_URL.search(text)):
+                        # a link under a month heading, outside any dated entry
+                        undated = f"{MONTH_NAMES.get(month, month)} {year or ''}".strip()
+                if undated is not None:
+                    d_raw, d_iso = find_date(undated, year)
+                    new = Entry(source, len(entries), pno, [text], undated, d_iso.split(" to ")[0] if d_iso else "",
+                                d_iso.split(" to ")[1] if " to " in d_iso else "", year_known=bool(d_iso),
+                                month=f"{year}-{month:02d}" if year and month else "")
+                    entries.append(new)
+                    current = new
+                    owners.append(current.index)
+                    continue
                 if raw:
                     new = Entry(source, len(entries), pno, [text], raw, start, end, year_known=bool(start))
                     # "Title line" then "date line" (entries pasted from other calendars,
@@ -153,7 +210,7 @@ def extract_entries(source: str) -> Tuple[List[Entry], List[PdfLink], List[List[
                             new.lines.insert(0, prev)
                             owners[-1] = new.index
                         elif current is not None and owners[-1] == current.index and len(current.lines) >= 2 \
-                                and any(URL_IN_TEXT.search(x) for x in current.lines[:-1]):
+                                and _has_name_text(current.lines[:-1], current.date_raw):
                             current.lines.pop()
                             new.lines.insert(0, prev)
                             owners[-1] = new.index
@@ -190,6 +247,11 @@ def extract_entries(source: str) -> Tuple[List[Entry], List[PdfLink], List[List[
 
             # 2. URLs written out in the text (re-joined when a line wrap broke them)
             for k, (top, bottom, text) in enumerate(raw_lines):
+                masked = URL_IN_TEXT.sub(lambda m: " " * len(m.group(0)), text)
+                for m in BARE_URL.finditer(masked):
+                    url = _clean_url(m.group(0))
+                    if url and not any(url.split("://", 1)[-1][:30] in a for a in annotated):
+                        links.append(PdfLink(source, pno, url, "", text, "", "", "", owners[k]))
                 for m in URL_IN_TEXT.finditer(text):
                     raw = m.group(0)
                     rest = text[m.end():]

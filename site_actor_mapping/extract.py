@@ -140,6 +140,51 @@ COMPOUND_HEADS: Dict[str, str] = {
     **{w: "cooperative" for w in ("genossenschaft", "kooperativ", "kooperativet", "coöperatie")},
 }
 
+# Central/Eastern/Northern European languages (pl, cs, sk, sl, hr/sr, el, ro, fi, nb,
+# ca, eu, uk/ru, lt, hu). Added to ORG_HEADS below.
+MORE_ORG_HEADS: Dict[str, List[str]] = {
+    "collective": ["kolektyw", "kolektiv", "kolektivu", "colectivul", "kollektiivi", "col·lectiu",
+                   "collectiu", "kolektiboa", "колектив", "коллектив", "kolektyvas", "kollektíva",
+                   "συλλογικότητα", "συλλογικοτητα"],
+    "network / coalition": ["sieć", "koalicja", "sojusz", "porozumienie", "síť", "koalice", "aliance",
+                            "mreža", "koalicija", "savez", "zveza", "rețea", "rețeaua", "coaliția",
+                            "alianța", "verkosto", "koalitio", "liitto", "nettverk", "koalisjon",
+                            "allianse", "xarxa", "coalició", "sarea", "koordinadora", "мережа", "сеть",
+                            "коаліція", "коалиция", "tinklas", "hálózat", "koalíció", "szövetség",
+                            "δίκτυο", "συμμαχία", "συντονισμός"],
+    "association / union": ["stowarzyszenie", "związek", "spolek", "sdružení", "združenie", "društvo",
+                            "udruga", "udruženje", "asociația", "asociatia", "sindicat", "sindicatul",
+                            "yhdistys", "ammattiliitto", "forening", "fagforening", "associació",
+                            "elkartea", "sindikatua", "асоціація", "ассоциация", "профспілка",
+                            "профсоюз", "asociacija", "profsąjunga", "egyesület", "szakszervezet",
+                            "σωματείο", "ένωση", "συνδικάτο", "odbory", "sindikat"],
+    "foundation / trust": ["fundacja", "nadace", "nadácia", "fundacija", "zaklada", "fundația",
+                           "fundatia", "säätiö", "stiftelse", "fundació", "fundazioa", "фонд",
+                           "fondas", "alapítvány", "ίδρυμα"],
+    "movement / campaign": ["ruch", "inicjatywa", "kampania", "hnutí", "hnutie", "iniciativa", "kampaň",
+                            "gibanje", "pokret", "inicijativa", "kampanja", "mișcarea", "miscarea",
+                            "inițiativa", "campania", "liike", "aloite", "bevegelse", "aksjon",
+                            "kampanje", "moviment", "campanya", "mugimendua", "рух", "движение",
+                            "ініціатива", "инициатива", "кампанія", "кампания", "judėjimas",
+                            "iniciatyva", "kampanija", "mozgalom", "kezdeményezés", "kampány",
+                            "κίνημα", "κίνηση", "πρωτοβουλία", "καμπάνια", "fronta", "frontul", "rintama",
+                            "фронт", "frontas", "μέτωπο"],
+    "committee / council / assembly": ["komitet", "výbor", "odbor", "comitetul", "toimikunta", "komité",
+                                       "comitè", "batzordea", "комітет", "комитет", "komitetas",
+                                       "bizottság", "επιτροπή", "συνέλευση", "asanblada", "assemblea"],
+    "cooperative": ["spółdzielnia", "družstvo", "zadruga", "cooperativa", "osuuskunta", "kooperativ",
+                    "кооператив", "szövetkezet", "συνεταιρισμός"],
+    "party": ["partia", "strana", "stranka", "partid", "partidul", "puolue", "parti", "partit",
+              "alderdia", "партія", "партия", "partija", "párt", "κόμμα"],
+    "organisation (generic)": ["organizacja", "grupa", "organizace", "skupina", "organizacija",
+                               "organizația", "grup", "grupul", "järjestö", "ryhmä", "organisasjon",
+                               "gruppe", "organització", "grup", "taldea", "erakundea", "організація",
+                               "организация", "група", "группа", "organizacija", "grupė",
+                               "szervezet", "csoport", "οργάνωση", "ομάδα"],
+}
+for _typ, _words in MORE_ORG_HEADS.items():
+    ORG_HEADS.setdefault(_typ, []).extend(w for w in _words if w not in ORG_HEADS.get(_typ, []))
+
 # Heads that only signal an organisation as the *last* word of a name
 # ("Amnesty International", "Human Rights Watch", "Médecins Sans Frontières").
 TRAILING_HEADS: Dict[str, List[str]] = {
@@ -172,8 +217,17 @@ CONNECTORS = {
     "i", "il", "lo", "gli", "l", "d", "von", "van", "zu", "zum", "zur", "em", "no", "na",
     "het", "voor", "en", "tegen", "met", "op", "uit", "der", "den", "ter", "te",
     "og", "och", "mod", "mot", "af", "av", "til", "till", "på", "med", "det", "for", "för",
+    # pl / cs / sl / hr / ro / fi / ca / eu / hu / lt / el / uk / ru
+    "w", "z", "za", "dla", "przeciw", "przeciwko", "v", "proti", "pro", "na", "od", "protiv", "u",
+    "în", "pentru", "împotriva", "și", "si", "ja", "per", "contra", "amb", "dels", "eta", "és",
+    "ir", "prieš", "και", "για", "κατά", "της", "του", "των", "τον", "την", "та", "і", "и", "в",
+    "проти", "против", "для", "з", "с",
 }
-CONJUNCTIONS = {"and", "&", "e", "y", "et", "und", "en", "og", "och"}
+CONJUNCTIONS = {"and", "&", "e", "y", "et", "und", "en", "og", "och", "și", "si", "ja",
+                "és", "ir", "και", "та", "і", "и", "eta"}
+# "and" words that are something else in other languages (Italian article "i", English "in",
+# Romance preposition "a"): conjunctions only on paragraphs detected as these languages.
+CONJUNCTIONS_BY_LANG = {"pl": {"i"}, "hr": {"i"}, "sr": {"i"}, "sl": {"in"}, "cs": {"a"}, "sk": {"a"}}
 LEADING_STRIP = {
     "the", "a", "an", "our", "their", "this", "these", "that", "those", "its", "his", "her",
     "my", "your", "all", "every", "with", "and", "in", "on", "at", "by", "from", "for", "of",
@@ -193,6 +247,7 @@ LEADING_STRIP = {
     "photo", "photos", "merci", "thanks", "c’est", "c'est", "cette", "ce", "cet", "ces",
     "whilst", "earlier", "later", "highlighting", "construisons", "rejoignez", "venez",
     "het", "een", "onze", "ons", "jouw", "jullie", "deze", "dit", "die", "wij", "zij",
+    "η", "ο", "το", "οι", "τα", "την", "τον", "της", "του", "των",
     "waarom", "hoe", "wat", "wie", "waar", "wanneer", "lees", "bekijk", "meer",
     "vores", "vor", "vår", "våra", "vårt", "denne", "denna", "dette", "detta", "disse", "dessa",
     "hvorfor", "varför", "hvordan", "hur", "hvad", "vad", "hvor", "var", "når", "när", "vi",
@@ -255,6 +310,11 @@ CTA_WORDS = {
     "werde", "hilf", "helft", "schau", "abonniere", "teile",
     "doneer", "steun", "lees", "bekijk", "word", "sluit", "meld", "schrijf", "kom", "doe",
     "ontdek", "volg", "deel", "download", "klik", "hier",
+    "dołącz", "wesprzyj", "przeczytaj", "zapisz", "přidej", "podpoř", "přečti", "registrujte",
+    "pridruži", "podpri", "preberi", "pridruži", "podrži", "pročitaj", "alătură", "susține",
+    "citește", "liity", "tue", "lue", "bli", "støtt", "les", "uneix", "llegeix", "dona", "batu",
+    "irakurri", "приєднуйся", "підтримай", "читай", "csatlakozz", "támogasd", "olvasd",
+    "prisijunk", "paremk", "skaityk", "ελάτε", "στηρίξτε", "διαβάστε",
     "doner", "donér", "donera", "støt", "stöd", "stött", "læs", "läs", "tilmeld", "anmäl",
     "bliv", "bli", "følg", "följ", "del", "dela", "klik", "klicka", "kom", "kontakt",
     "skriv", "meld", "mere", "mer", "her", "här", "se", "køb", "köp", "hent", "ladda",
@@ -303,6 +363,11 @@ DROP_TAGS = ["script", "style", "noscript", "svg", "template", "iframe", "canvas
 REGION_TAGS = ("nav", "header", "footer", "aside")
 
 TITLE_SEPARATOR = re.compile(r"\s[-–—|]\s|:\s|\s/\s")
+# Prepositions of place right before a name: "in Lingen", "à Bure", "bei Rügen", "near Brunsbüttel".
+LOCATIVE_BEFORE = re.compile(
+    r"(?<!\w)(?:in|at|near|around|outside|from|to|à|au|aux|en|près\s+de|près\s+d['’]|vers|sur|"
+    r"nach|bei|im|am|aus|nahe|vor|bij|te|nabij|naar|i|på|vid|nära|ved|nær|a|cerca\s+de|"
+    r"vicino\s+a|presso|em|perto\s+de)\s+(?:the\s+|der\s+|den\s+|la\s+|le\s+|l['’])?$", re.I)
 PERSON_APPOS = re.compile(r"(?<!\w)(?:of|de|du|des|di|del|della|dei|von|vom|do|da|member|membre|"
                           r"membro|miembro|mitglied|militante?s?|activist[ae]?s?|attivist[ae]|"
                           r"founder|fondat\w*|fundador\w*|co-?founder|organi[sz]er|organisatri\w*|"
@@ -393,7 +458,7 @@ def canonical_key(name: str) -> str:
     toks = [t[:-1] if len(t) > 3 and t.endswith("s") and not t.endswith(("ss", "us", "is"))
             and t not in _KEEP_S else t for t in n.split()]
     while toks and toks[0] in {"the", "il", "lo", "la", "le", "gli", "l", "el", "los", "las",
-                               "les", "der", "die", "das", "o", "a", "os", "as"}:
+                               "les", "der", "die", "das", "o", "a", "os", "as", "η", "ο", "το", "οι", "τα"}:
         toks = toks[1:]
     return " ".join(toks)
 
@@ -456,7 +521,9 @@ class ThemeSet:
         infix = term.startswith("*")      # *fascis* also matches inside compounds
         prefix = term.endswith("*")
         body = term.strip("*")
-        parts = [re.escape(p) for p in re.split(r"[\s-]+", body)]
+        # each word may end in * too: "krajn* pravic*", "kraštutin* dešin*"
+        parts = [re.escape(p[:-1]) + r"\w*" if p.endswith("*") else re.escape(p)
+                 for p in re.split(r"[\s-]+", body)]
         pat = r"[\s\-]+".join(parts)
         return re.compile((r"(?<![\w-])[\w-]*" if infix else r"(?<!\w)") + pat
                           + (r"\w*" if prefix else r"(?!\w)"),
@@ -699,7 +766,11 @@ SPACY_MODELS = {
     "de": "de_core_news_sm", "es": "es_core_news_sm", "pt": "pt_core_news_sm",
     "nl": "nl_core_news_sm", "ca": "ca_core_news_sm", "pl": "pl_core_news_sm",
     "da": "da_core_news_sm", "sv": "sv_core_news_sm", "nb": "nb_core_news_sm",
-    "no": "nb_core_news_sm",
+    "no": "nb_core_news_sm", "el": "el_core_news_sm", "fi": "fi_core_news_sm",
+    "ro": "ro_core_news_sm", "lt": "lt_core_news_sm", "hr": "hr_core_news_sm",
+    "sr": "hr_core_news_sm", "sl": "sl_core_news_sm", "uk": "uk_core_news_sm",
+    "ru": "ru_core_news_sm", "mk": "mk_core_news_sm",
+    # cs, sk, hu, eu have no spaCy pipeline: the multilingual xx_ent_wiki_sm is used if installed
 }
 ORG_LABELS = {"ORG"}
 # Labels that, when given to the same name more often than ORG, show it is not one.
@@ -715,6 +786,21 @@ _LANG_HINTS = {
     "nl": {"de", "het", "een", "en", "van", "is", "dat", "niet", "voor", "met", "zijn", "wij"},
     "da": {"og", "at", "det", "er", "af", "ikke", "til", "på", "med", "jeg", "vi", "har", "som", "mod"},
     "sv": {"och", "att", "det", "är", "av", "inte", "till", "på", "med", "jag", "vi", "har", "som", "mot"},
+    "nb": {"og", "ikke", "det", "er", "av", "til", "på", "med", "jeg", "vi", "har", "som", "mot", "være", "ble"},
+    "pl": {"i", "w", "na", "się", "nie", "jest", "z", "do", "że", "to", "przeciwko", "dla", "oraz", "jak"},
+    "cs": {"a", "v", "na", "se", "je", "že", "to", "s", "z", "do", "proti", "pro", "jsou", "také"},
+    "sk": {"a", "v", "na", "sa", "je", "že", "to", "s", "z", "do", "proti", "pre", "sú", "aj"},
+    "sl": {"in", "v", "na", "je", "da", "se", "za", "z", "proti", "ki", "so", "tudi", "pri", "od"},
+    "hr": {"i", "u", "na", "je", "da", "se", "za", "s", "protiv", "koji", "su", "od", "iz", "kao"},
+    "ro": {"și", "în", "de", "la", "cu", "pe", "nu", "este", "care", "pentru", "împotriva", "sunt", "din"},
+    "fi": {"ja", "on", "ei", "että", "se", "kanssa", "ovat", "myös", "tai", "kuin", "joka", "vastaan"},
+    "ca": {"i", "el", "la", "els", "les", "que", "amb", "per", "contra", "és", "una", "dels", "també"},
+    "eu": {"eta", "da", "ez", "bat", "dira", "baina", "ere", "bere", "aurka", "dute", "zen"},
+    "hu": {"és", "a", "az", "hogy", "nem", "egy", "is", "van", "ellen", "meg", "volt", "mint"},
+    "lt": {"ir", "yra", "kad", "su", "prieš", "kaip", "bet", "jie", "taip", "nuo", "iki"},
+    "el": {"και", "το", "η", "ο", "να", "του", "της", "με", "για", "στο", "στην", "κατά", "τα", "οι"},
+    "uk": {"і", "та", "в", "у", "на", "що", "не", "з", "до", "проти", "це", "як", "для", "від"},
+    "ru": {"и", "в", "на", "что", "не", "с", "по", "против", "это", "как", "для", "от", "из"},
 }
 
 
@@ -752,6 +838,7 @@ class OrgExtractor:
         self.mid_caps: Optional[Set[str]] = None   # None until prepare_corpus() runs
         self.missing_models: Set[str] = set()
         self.label_votes: Dict[str, Counter] = defaultdict(Counter)
+        self.locative: Dict[str, List[int]] = defaultdict(lambda: [0, 0])   # key -> [after "in/à/bei…", total]
         desc = "|".join(re.escape(d).replace(r"\ ", r"[\s\-]+") for d in DESCRIPTORS)
         # "the feminist collective Mujeres Creando" / "the NGO called Sea-Watch"
         self.pre_appos = re.compile(
@@ -871,6 +958,9 @@ class OrgExtractor:
         reject those that spaCy more often labels as a place, person, law, event..."""
         if set(methods) - {"ner"}:
             return True   # a rule, a link or a descriptor also supports it
+        after_loc, total = self.locative.get(key, (0, 0))
+        if total >= 2 and after_loc / total >= 0.6:
+            return False  # mostly written "in X", "à X", "bei X": a place
         votes = self.label_votes.get(key)
         if not votes:
             return True
@@ -907,12 +997,12 @@ class OrgExtractor:
         if surface == surface.lower():
             return False
         key = canonical_key(surface)
-        if key in MONTHS or key in LEADING_STRIP or key in GENERIC or key in HEAD_TO_TYPE:
+        if key in _PLAIN_STOP_KEYS:
             return False
         return True
 
     # --------------------------------------------------------------- patterns
-    def _spans(self, text: str) -> List[Tuple[int, int, List[str]]]:
+    def _spans(self, text: str, lang: str = "") -> List[Tuple[int, int, List[str]]]:
         """Maximal runs of capitalised tokens, allowing lowercase connectors inside."""
         toks = list(TOKEN_RE.finditer(text))
         spans = []
@@ -936,7 +1026,7 @@ class OrgExtractor:
                 else:
                     break
             span_toks = toks[i:last_cap + 1]
-            for part in _split_conjoined(span_toks):
+            for part in _split_conjoined(span_toks, CONJUNCTIONS | CONJUNCTIONS_BY_LANG.get(lang, set())):
                 spans.append((part[0].start(), part[-1].end(), [t.group(0) for t in part]))
             i = last_cap + 1
         return spans
@@ -992,7 +1082,9 @@ class OrgExtractor:
             for m in pat.finditer(text):
                 cands.append((0, Mention(m.group(0), ckey, {"watchlist"}, "", m.start(), m.end())))
 
-        for s, e, _ in self._spans(text):
+        lang = doc.lang_ if doc is not None and doc.lang_ != "xx" else (
+            detect_language(text) if len(text.split()) >= 8 else "")
+        for s, e, _ in self._spans(text, lang):
             s, e = self._trim(text, s, e)
             surface = text[s:e]
             toks = [t.group(0) for t in TOKEN_RE.finditer(surface)]
@@ -1030,6 +1122,10 @@ class OrgExtractor:
                 s, e = self._trim(text, ent.start_char, ent.end_char)
                 surface = text[s:e]
                 toks = [t.group(0) for t in TOKEN_RE.finditer(surface)]
+                stats = self.locative[canonical_key(tidy_surface(surface))]
+                stats[1] += 1
+                if LOCATIVE_BEFORE.search(text[max(0, s - 25):s]):
+                    stats[0] += 1
                 cands.append((3, Mention(surface, "", {"ner"}, self._head_type(toks) or "", s, e)))
 
         if self.use_links:
@@ -1092,7 +1188,11 @@ class OrgExtractor:
 
 
 ARTICLES = {"the", "die", "der", "das", "la", "le", "les", "l", "il", "lo", "gli", "el", "los",
-            "las", "de", "het", "den", "det", "o", "a", "os", "as"}
+            "las", "de", "het", "den", "det", "o", "a", "os", "as", "η", "ο", "το", "οι", "τα", "την",
+            "τον", "της", "του"}
+
+
+_PLAIN_STOP_KEYS = None   # filled below, once canonical_key exists
 
 
 def _is_head_word(word: str) -> bool:
@@ -1101,14 +1201,14 @@ def _is_head_word(word: str) -> bool:
                                        for h in COMPOUND_HEADS)
 
 
-def _split_conjoined(toks: list) -> List[list]:
+def _split_conjoined(toks: list, conjunctions: Set[str] = CONJUNCTIONS) -> List[list]:
     """Split "Migrant Rights Coalition and the Rete Antirazzista" into two names.
 
     Only splits when the part before the conjunction already ends in an
     organisational head noun, so "Centre for Gender and Development" stays whole.
     """
     for k, t in enumerate(toks):
-        if t.group(0).casefold() in CONJUNCTIONS and 0 < k < len(toks) - 1:
+        if t.group(0).casefold() in conjunctions and 0 < k < len(toks) - 1:
             left = toks[:k]
             last = left[-1].group(0).casefold()
             right = toks[k + 1:]
@@ -1122,7 +1222,7 @@ def _split_conjoined(toks: list) -> List[list]:
                              and any(_is_head_word(t.group(0).casefold()) for t in right))
             if (_is_head_word(last) or (last in TRAILING_TO_TYPE and len(left) >= 2) or right_head
                     or article_split):
-                return [left] + (_split_conjoined(right) if right else [])
+                return [left] + (_split_conjoined(right, conjunctions) if right else [])
     return [toks]
 
 
@@ -1194,3 +1294,8 @@ def acronym_pairs(text: str) -> List[Tuple[str, str]]:
 
 def block_hash(text: str) -> str:
     return hashlib.sha1(canonical_key(text).encode("utf-8")).hexdigest()[:16]
+
+
+# Accent-free forms of month names, function words, generic words and lone
+# organisational words ("Université", "Association"), which are never names on their own.
+_PLAIN_STOP_KEYS = {canonical_key(w) for w in (MONTHS | LEADING_STRIP | GENERIC | set(HEAD_TO_TYPE))}

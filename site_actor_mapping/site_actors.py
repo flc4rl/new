@@ -280,10 +280,15 @@ def main(argv: Optional[List[str]] = None) -> int:
     # One event per agenda entry, keyed by its first followable link.
     skip_hosts = {registered_host(h) for h in args.follow_skip}
     entry_keys: Dict[tuple, str] = {}
+    entry_links: Dict[tuple, str] = {}
     for pdf_url, d in seed_pdfs.items():
         for e in d["entries"]:
             good = [u for u in e["links"] if filter_targets({u: []}, skip_hosts)]
-            entry_keys[(pdf_url, e["index"])] = good[0] if good else f"{pdf_url}#entry-{e['index'] + 1}"
+            link = good[0] if good else ""
+            when = e["start"] or e.get("month") or f"entry-{e['index'] + 1}"
+            # Key = link + date: editions of a recurring event share a link.
+            entry_keys[(pdf_url, e["index"])] = f"{link or pdf_url}#{when}"
+            entry_links[(pdf_url, e["index"])] = link
     seed_sites = [Site(f"pdf:{Path(urlparse(u).path).name or u}", "seed", [u], platform=True)
                   for u in dict.fromkeys(ln.pdf for ln in seed_links)]
 
@@ -296,6 +301,10 @@ def main(argv: Optional[List[str]] = None) -> int:
                    if hosts and args.follow_links != "none" else {})
         seed_targets: Dict[str, List[Via]] = defaultdict(list)
         for ln in seed_links:
+            # Links outside any agenda entry (introductions, "other calendars" lists)
+            # are not events and are not followed.
+            if seed_pdfs.get(ln.pdf) and ln.entry < 0:
+                continue
             if registered_host(urlparse(ln.url).netloc) not in hosts:
                 seed_targets[ln.url].append(Via(page=ln.pdf, event=ln.event, target=ln.url,
                                                 event_url=entry_keys.get((ln.pdf, ln.entry), ln.url),
@@ -336,10 +345,13 @@ def main(argv: Optional[List[str]] = None) -> int:
     for pdf_url, d in seed_pdfs.items():
         for e in d["entries"]:
             iso = f"{e['start']} to {e['end']}" if e["start"] and e["end"] else e["start"]
-            index.add_pdf_link(entry_keys[(pdf_url, e["index"])], e["name"], e["date_raw"], iso, pdf_url)
+            index.add_pdf_link(entry_keys[(pdf_url, e["index"])], e["name"], e["date_raw"], iso, pdf_url,
+                               link=entry_links[(pdf_url, e["index"])])
+            if not iso and e.get("month"):
+                index.events[entry_keys[(pdf_url, e["index"])]].months.add(e["month"])
     real_seed = filter_targets({ln.url: [] for ln in seed_links}, skip_hosts)
-    for ln in seed_links:   # links outside any entry (or older runs without entries)
-        if ln.url in real_seed and (ln.pdf, ln.entry) not in entry_keys:
+    for ln in seed_links:   # older runs without entries
+        if ln.url in real_seed and not seed_pdfs.get(ln.pdf):
             index.add_pdf_link(ln.url, ln.event, ln.date_raw, ln.date_iso, ln.pdf)
     write_csv(out / "events.csv", index.rows(), ["event", "date", "event_link", "listed_on", "calendar_months"])
     log.info("Events found: %d", len(index.events))

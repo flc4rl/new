@@ -11,14 +11,19 @@ counted.
 
 ```bash
 pip install -r requirements.txt
-python -m spacy download en_core_web_sm
-python -m spacy download fr_core_news_sm     # plus any other language you will meet:
-python -m spacy download de_core_news_sm
-python -m spacy download nl_core_news_sm
-python -m spacy download da_core_news_sm
-python -m spacy download sv_core_news_sm
-# it_core_news_sm, es_core_news_sm, pt_core_news_sm, nb_core_news_sm
+for m in en_core_web_sm fr_core_news_sm de_core_news_sm nl_core_news_sm it_core_news_sm \
+         es_core_news_sm pt_core_news_sm ca_core_news_sm da_core_news_sm sv_core_news_sm \
+         nb_core_news_sm fi_core_news_sm pl_core_news_sm sl_core_news_sm hr_core_news_sm \
+         ro_core_news_sm el_core_news_sm lt_core_news_sm uk_core_news_sm ru_core_news_sm \
+         xx_ent_wiki_sm; do python -m spacy download $m; done
 ```
+
+Languages covered (theme terms, organisation words, language detection, spaCy
+NER): English, French, German, Dutch, Italian, Spanish, Portuguese, Catalan,
+Danish, Swedish, Norwegian, Finnish, Polish, Slovenian, Croatian/Serbian,
+Romanian, Greek, Lithuanian, Ukrainian and Russian. Czech, Slovak, Hungarian
+and Basque have theme terms and organisation words but no spaCy pipeline; NER
+for them uses the multilingual `xx_ent_wiki_sm`.
 
 Each page's language is read from the page (or guessed from its words) and
 the matching spaCy model is used, so a French page is never read with the
