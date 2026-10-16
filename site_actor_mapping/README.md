@@ -105,7 +105,7 @@ main handle for judging precision:
 | Method | What it catches | Example |
 |---|---|---|
 | `watchlist` | Names and aliases you supplied | "MSF" → Médecins Sans Frontières |
-| `pattern` | Capitalised names containing an organisational head noun, in English, Italian, Spanish, French, German and Portuguese | "Rete Antirazzista Milano", "Migrant Rights Coalition", "Abolitionist Futures collective" |
+| `pattern` | Capitalised names containing an organisational head noun, in English, Italian, Spanish, French, German, Portuguese, Dutch, Danish and Swedish, also at the end of compound words ("Klimakollektivet", "Klimabündnis") | "Rete Antirazzista Milano", "Migrant Rights Coalition", "Abolitionist Futures collective" |
 | `appositive` | Names introduced or followed by a descriptor | "the feminist collective **Mujeres Creando**", "**Sea-Watch**, a German NGO", "l'associazione **Naga**" |
 | `ner` | spaCy named-entity recognition (`ORG`) | names without a tell-tale noun, e.g. "Abolitionist Futures" |
 | `link` | Text or logo alt text of links to other websites | partner logo strips, "supported by" lists |
