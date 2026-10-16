@@ -314,8 +314,14 @@ class ThemeSet:
             found = []
             for p in pats:
                 found.extend((m.start(), m.end(), m.group(0)) for m in p.finditer(text))
-            if found:
-                hits[theme] = sorted(found)
+            # Overlapping terms ("green colonialism" / "colonialism") count once,
+            # as the longest match.
+            kept: List[Tuple[int, int, str]] = []
+            for s, e, t in sorted(found, key=lambda h: (h[0], -(h[1] - h[0]))):
+                if not kept or s >= kept[-1][1]:
+                    kept.append((s, e, t))
+            if kept:
+                hits[theme] = kept
         return hits
 
 

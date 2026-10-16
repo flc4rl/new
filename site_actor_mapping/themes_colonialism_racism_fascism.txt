@@ -1,0 +1,75 @@
+# Standing themes: colonialism, racism, fascism and their variations.
+# Deliberately broader than frame_analysis/taxonomy.py: activist websites use
+# the adjectives ("colonial violence", "racist borders") analytically, so
+# they are included here. Remove them if you want the stricter definition.
+
+[colonialism]
+colonial*
+coloniz*
+colonis*
+decolon*
+anticolonial*
+anti-colonial*
+neocolonial*
+neo-colonial*
+postcolonial*
+post-colonial*
+settler colonial*
+settler state*
+climate colonialism
+green colonialism
+carbon colonialism
+imperialis*
+anti-imperialis*
+empire
+empires
+extractivis*
+neo-extractivis*
+land back
+indigenous sovereignty
+global south
+reparation*
+climate debt
+
+[racism]
+racism
+racist*
+anti-racis*
+antiracis*
+raciali*
+racial justice
+racial capitalism
+racial violence
+white supremac*
+white privilege
+environmental racism
+climate apartheid
+xenophob*
+islamophob*
+antisemit*
+anti-semit*
+afrophob*
+anti-blackness
+hostile environment
+racial profiling
+
+[fascism]
+fascis*
+antifascis*
+anti-fascis*
+antifa
+ecofascis*
+eco-fascis*
+neo-fascis*
+neofascis*
+nazi*
+neo-nazi*
+neonazi*
+far right
+far-right
+extreme right
+radical right
+alt-right
+white nationalis*
+ethnonationalis*
+authoritarianis*

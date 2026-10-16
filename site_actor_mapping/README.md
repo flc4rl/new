@@ -69,6 +69,8 @@ python site_actors.py https://example.org -o results/example_org --no-crawl \
   a raw regular expression. The shipped themes are only illustrative:
   replace them with the themes of your study, and add translations when the
   site is multilingual.
+- **Colonialism / racism / fascism** (`themes_colonialism_racism_fascism.txt`):
+  a ready-made theme file for that standing focus.
 - **Watchlist** (optional, `example_watchlist.txt`): organisations you
   already know of, as `Canonical Name | alias | alias`. These are always
   caught, merged under one name, and rated high confidence.
