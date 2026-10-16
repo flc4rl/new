@@ -55,10 +55,18 @@ estrattivis*
 extractivis*
 extrativis*
 extractivism*
-riparazion*
-reparaci*
-réparation*
-reparações
+# Reparations: in these languages the word also means "repair", so only the
+# political phrases count.
+riparazioni storiche
+riparazioni coloniali
+reparación histórica
+reparaciones históricas
+reparaciones coloniales
+réparations historiques
+réparations coloniales
+réparation historique
+reparações históricas
+reparações coloniais
 sud globale
 sur global
 sud global
