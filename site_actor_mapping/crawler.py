@@ -21,7 +21,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, Iterator, List, Optional, Set, Tuple
 from urllib import robotparser
-from urllib.parse import parse_qs, urldefrag, urljoin, urlparse, urlunparse
+from urllib.parse import parse_qs, quote, urldefrag, urljoin, urlparse, urlunparse
 
 import requests
 from bs4 import BeautifulSoup, UnicodeDammit
@@ -394,7 +394,11 @@ class Crawler:
             return []
         if self.cfg.calendar_url_pattern and not re.search(self.cfg.calendar_url_pattern, page.final_url):
             return []
-        index_url = page.final_url + ("&" if "?" in page.final_url else "?") + "calendar_index=1"
+        # The index remembers a sweep for this exact range/method, so a narrow test
+        # run is not mistaken for a full sweep when the output folder is reused.
+        scope = f"{self.cfg.calendar_from or ''}_{self.cfg.calendar_to or ''}_{self.cfg.calendar_click or ''}"
+        index_url = (page.final_url + ("&" if "?" in page.final_url else "?")
+                     + "calendar_index=" + quote(scope, safe=""))
         if not self.cfg.refresh:
             index = self.cache.get(index_url)
             if index is not None:

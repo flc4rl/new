@@ -138,7 +138,10 @@ def sweep_mec(session: requests.Session, cfg: MecConfig, wait: Callable[[], None
 
     done = 0
     for direction, stop_after in ((-1, empty_stop), (1, 3)):
-        year, month = (cfg.year, cfg.month) if direction < 0 else _shift(cfg.year, cfg.month, 1)
+        if direction < 0:  # backwards from the shown month, or from `end` if that is earlier
+            year, month = min((cfg.year, cfg.month), end) if end else (cfg.year, cfg.month)
+        else:
+            year, month = _shift(cfg.year, cfg.month, 1)
         empty = failures = 0
         while done < max_months:
             if direction < 0 and start and (year, month) < start:
