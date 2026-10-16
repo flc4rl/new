@@ -22,11 +22,12 @@ from __future__ import annotations
 
 import hashlib
 import logging
+from collections import Counter, defaultdict
 import re
 import unicodedata
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List, Optional, Sequence, Set, Tuple
+from typing import Dict, Iterable, List, Optional, Sequence, Set, Tuple
 from urllib.parse import urljoin, urlparse
 
 from bs4 import BeautifulSoup, Comment, NavigableString, Tag
@@ -74,8 +75,9 @@ ORG_HEADS: Dict[str, List[str]] = {
     ],
     "committee / council / assembly": [
         "committee", "comitato", "comité", "comite", "komitee", "council", "consiglio",
-        "consejo", "conseil", "assembly", "assemblea", "asamblea", "assemblée",
+        "consejo", "conseil",
         "commission", "commissione", "comisión", "board", "caucus", "tribunal",
+        "assemblea", "asamblea", "assemblée",
     ],
     "research / education / culture": [
         "institute", "istituto", "instituto", "institut", "centre", "center", "centro",
@@ -84,7 +86,7 @@ ORG_HEADS: Dict[str, List[str]] = {
         "university", "università", "universidad", "université", "universität",
         "school", "scuola", "escuela", "école", "college", "museum", "museo", "musée",
         "library", "biblioteca", "archive", "archives", "archivio", "archivo",
-        "think-tank", "press", "radio",
+        "think-tank", "radio",
     ],
     "cooperative": ["cooperative", "co-op", "coop", "cooperativa", "coopérative", "genossenschaft"],
     "party": ["party", "partito", "partido", "parti", "partei"],
@@ -142,6 +144,15 @@ LEADING_STRIP = {
     "statement", "press", "photo", "video", "via", "per", "por", "para", "pour", "für",
     "together", "insieme", "including", "like", "thanks", "grazie", "according", "secondo",
     "members", "member", "activists", "join", "unisciti", "partecipa", "contro", "against",
+    # navigation, captions and sentence openers that get capitalised
+    "suivant", "précédent", "precedent", "next", "previous", "prev", "crédit", "credit",
+    "voir", "afficher", "catégories", "categories", "tags", "posted", "publié", "publiée",
+    "photo", "photos", "merci", "thanks", "c’est", "c'est", "cette", "ce", "cet", "ces",
+    "whilst", "earlier", "later", "highlighting", "construisons", "rejoignez", "venez",
+    # activity words heading a title: "Visite de la Coopérative X", "Workshop with Y"
+    "visite", "visit", "atelier", "rencontre", "soirée", "conférence", "projection", "débat",
+    "workshop", "talk", "panel", "screening", "discussion", "presentation", "launch",
+    "incontro", "laboratorio", "presentazione", "taller", "charla", "encuentro", "vortrag",
 }
 # A name made only of heads + these words is too generic to keep.
 GENERIC = {
@@ -153,6 +164,8 @@ GENERIC = {
     "workshop", "workshops", "session", "sessions", "programme", "program", "call-out",
     "callout", "statement", "report", "agenda", "schedule", "timetable", "camp", "day",
     "week", "plenary", "panel", "talk", "talks", "training", "briefing", "appendix",
+    "morning", "closing", "opening", "evening", "weekly", "monthly", "assembly", "assemblies",
+    "press", "release", "media", "team", "guide", "handbook", "toolkit", "policy", "values",
 }
 MONTHS = {
     "january", "february", "march", "april", "may", "june", "july", "august", "september",
@@ -162,7 +175,7 @@ MONTHS = {
 LINK_TEXT_JUNK = re.compile(
     r"^(here|click|read|more|link|website|site|homepage|home|this|download|pdf|"
     r"facebook|twitter|x|instagram|youtube|linkedin|tiktok|telegram|mastodon|bluesky|"
-    r"share|tweet|email|e-mail|contact|donate|subscribe|login|log in|sign up|next|"
+    r"share|tweet|email|e-mail|contact|donate|don|faire un don|dona|spenden|subscribe|login|log in|sign up|next|"
     r"previous|back|top|menu|search|privacy|cookie|cookies|imprint|impressum|"
     r"source|via|en|it|es|fr|de|pt)\b",
     re.I,
@@ -173,6 +186,52 @@ FILE_SHARING_HOSTS = {
     "onedrive.live.com", "1drv.ms", "box.com", "wetransfer.com", "issuu.com", "scribd.com",
     "cloud.disroot.org", "nextcloud.com", "framadrive.org", "pad.riseup.net", "cryptpad.fr",
 }
+# Link text starting with these is an instruction, not a name ("Go to Instagram page",
+# "Je fais un don", "Read the call-out").
+CTA_WORDS = {
+    "sign", "go", "click", "clicking", "read", "find", "see", "view", "visit", "donate", "sign", "register",
+    "join", "follow", "download", "watch", "listen", "learn", "discover", "get", "buy", "book",
+    "apply", "subscribe", "share", "check", "explore", "contact", "email", "write", "you", "we",
+    "our", "your", "here", "more", "this", "je", "j", "nous", "vous", "voir", "afficher", "faire",
+    "faites", "lire", "lisez", "découvrir", "découvrez", "rejoindre", "rejoignez", "soutenir",
+    "soutenez", "cliquez", "cliquer", "inscrivez", "inscris", "télécharger", "téléchargez",
+    "partager", "accéder", "accédez", "consulter", "consultez", "toutes", "tous", "tout", "plus",
+    "ici", "vai", "leggi", "scopri", "guarda", "iscriviti", "unisciti", "sostieni", "dona",
+    "clicca", "ver", "leer", "lee", "descubre", "únete", "apoya", "haz", "mehr", "hier", "jetzt",
+    "lesen", "spenden", "mitmachen", "unterstütze", "unterstützen", "zum", "zur",
+}
+LINK_SKIP_DOMAINS = {
+    "facebook.com", "instagram.com", "twitter.com", "x.com", "t.co", "tiktok.com", "linkedin.com",
+    "youtube.com", "youtu.be", "vimeo.com", "flickr.com", "t.me", "telegram.me", "wa.me",
+    "whatsapp.com", "bsky.app", "threads.net", "mastodon.social", "mastodon.scot", "spotify.com",
+    "soundcloud.com", "wordpress.org", "wordpress.com", "w3w.co", "what3words.com",
+    "maps.google.com", "goo.gl", "openstreetmap.org", "paypal.com", "paypal.me", "addtoany.com",
+}
+
+
+def link_text_is_name(text: str, domain: str) -> bool:
+    """Is this link text plausibly an organisation's name (not an instruction,
+    sentence, article title or social-media button)?"""
+    domain = domain.lower().removeprefix("www.")
+    if any(domain == d or domain.endswith("." + d) for d in LINK_SKIP_DOMAINS):
+        return False
+    if re.match(r"(?:don|dons|donate|donation|donations|give|soutenir|spenden|dona)\.", domain):
+        return False
+    if not text or LINK_TEXT_JUNK.match(text) or not text[:1].isupper():
+        return False
+    words = [w for w in re.split(r"\s+", text) if w]
+    if len(words) > 7 or re.search(r"[!?]|:\s|\s[–—-]\s|\.\.\.|…", text):
+        return False
+    first = words[0].casefold().strip("’'\"“«")
+    first = re.split(r"[’']", first)[0] if re.match(r"\w+[’']\w", first) else first
+    if first in CTA_WORDS or words[-1].casefold().strip(".!") in {"here", "ici", "qui", "aquí", "hier"}:
+        return False
+    content = [w for w in words[1:] if w.casefold() not in CONNECTORS]
+    if len(words) >= 3 and content and sum(not w[:1].isupper() for w in content) / len(content) > 0.5:
+        return False   # mostly lower case: a sentence or a description
+    return True
+
+
 BLOCK_TAGS = {
     "p", "div", "li", "ul", "ol", "dl", "dd", "dt", "h1", "h2", "h3", "h4", "h5", "h6",
     "section", "article", "main", "header", "footer", "nav", "aside", "blockquote",
@@ -182,6 +241,11 @@ BLOCK_TAGS = {
 DROP_TAGS = ["script", "style", "noscript", "svg", "template", "iframe", "canvas", "object"]
 REGION_TAGS = ("nav", "header", "footer", "aside")
 
+TITLE_SEPARATOR = re.compile(r"\s[-–—|]\s|:\s|\s/\s")
+PERSON_APPOS = re.compile(r"(?<!\w)(?:of|de|du|des|di|del|della|dei|von|vom|do|da|member|membre|"
+                          r"membro|miembro|mitglied|militante?s?|activist[ae]?s?|attivist[ae]|"
+                          r"founder|fondat\w*|fundador\w*|co-?founder|organi[sz]er|organisatri\w*|"
+                          r"spokes\w*|porte-parole|portavoce|coordinat\w*)(?!\w)", re.I)
 INDEFINITE_BEFORE = re.compile(r"(?<!\w)(?:an?|un[oa]?|une|ein(?:e|en)?|um[a]?|another|any|every|each)\s+$", re.I)
 # Lowercase words too common after a place/name to signal an organisation by themselves.
 WEAK_TRAILING = {"group", "groups", "project", "space", "service", "services", "office", "press",
@@ -222,6 +286,7 @@ class ParsedPage:
     label: str = ""           # calendar month (YYYY-MM) or click number
     site: str = ""            # site key from the registry (host, or platform page)
     site_role: str = ""       # "main" or "linked"
+    lang: str = ""            # declared page language (<html lang>), if any
     via_event: str = ""       # for linked sites: event(s) whose link led there
 
 
@@ -254,13 +319,18 @@ def split_sentences(text: str) -> List[Tuple[int, int]]:
     return [(s, e) for s, e in spans if e > s]
 
 
+_KEEP_S = {"news", "always", "towards", "perhaps", "texas", "paris", "athens", "wales",
+           "lens", "mars", "kings", "james", "nicholas", "thomas", "lucas", "marcus"}
+
+
 def canonical_key(name: str) -> str:
     n = unicodedata.normalize("NFKD", name)
     n = "".join(c for c in n if not unicodedata.combining(c)).casefold()
     n = n.replace("&", " and ").replace("’", "'")
     n = re.sub(r"'s\b", "", n)
     n = re.sub(r"[^\w\s-]", " ", n)
-    toks = n.split()
+    toks = [t[:-1] if len(t) > 3 and t.endswith("s") and not t.endswith(("ss", "us", "is"))
+            and t not in _KEEP_S else t for t in n.split()]
     while toks and toks[0] in {"the", "il", "lo", "la", "le", "gli", "l", "el", "los", "las",
                                "les", "der", "die", "das", "o", "a", "os", "as"}:
         toks = toks[1:]
@@ -270,6 +340,7 @@ def canonical_key(name: str) -> str:
 def tidy_surface(name: str) -> str:
     name = clean_ws(name).strip(" \t\"'“”‘’«»()[]{}:;,.-–—|/")
     name = re.sub(r"\s*[\[(][^\])]*$", "", name)          # unclosed "[DE" / "(UK"
+    name = re.sub(r"^[^\w\"“«(]+|[^\w.)\"”»]+$", "", name).strip()  # emoji, bullets, "!"
     name = re.sub(r"^(?:the|The|THE)\s+", "", name)
     name = re.sub(r"[’']s$", "", name)
     return name
@@ -347,6 +418,10 @@ def parse_html(html: str, url: str, depth: int, strip_regions: bool) -> ParsedPa
     soup = BeautifulSoup(html, "lxml")
     title = page_title(soup)
     date = page_date(soup)
+    lang = (soup.html.get("lang") if soup.html else "") or ""
+    if not lang:
+        loc = soup.select_one('meta[property="og:locale"]')
+        lang = loc.get("content", "") if loc else ""
     for t in soup(DROP_TAGS):
         t.decompose()
     for c in soup.find_all(string=lambda s: isinstance(s, Comment)):
@@ -364,7 +439,7 @@ def parse_html(html: str, url: str, depth: int, strip_regions: bool) -> ParsedPa
     blocks: List[Block] = []
     _walk(root, blocks, "main", base_url, own_host)
     return ParsedPage(url=url, title=title, date=date, depth=depth,
-                      blocks=[b for b in blocks if b.text or b.links])
+                      blocks=[b for b in blocks if b.text or b.links], lang=lang)
 
 
 def _region_of(tag: Tag, inherited: str) -> str:
@@ -540,24 +615,59 @@ def load_stoplist(path: Optional[Path]) -> Tuple[Set[str], List[re.Pattern]]:
     return exact, pats
 
 
+SPACY_MODELS = {
+    "en": "en_core_web_sm", "fr": "fr_core_news_sm", "it": "it_core_news_sm",
+    "de": "de_core_news_sm", "es": "es_core_news_sm", "pt": "pt_core_news_sm",
+    "nl": "nl_core_news_sm", "ca": "ca_core_news_sm", "pl": "pl_core_news_sm",
+}
+ORG_LABELS = {"ORG"}
+# Labels that, when given to the same name more often than ORG, show it is not one.
+NON_ORG_LABELS = {"PERSON", "PER", "GPE", "LOC", "FAC", "EVENT", "LAW", "PRODUCT",
+                  "WORK_OF_ART", "LANGUAGE"}   # MISC is too broad to count against a name
+_LANG_HINTS = {
+    "en": {"the", "and", "of", "to", "is", "with", "for", "this", "that", "we", "are"},
+    "fr": {"le", "la", "les", "et", "des", "est", "une", "pour", "dans", "nous", "avec", "sur"},
+    "it": {"il", "la", "che", "di", "e", "per", "una", "sono", "con", "della", "non", "gli"},
+    "es": {"el", "la", "que", "de", "y", "los", "las", "una", "para", "con", "por", "es"},
+    "de": {"der", "die", "und", "das", "ist", "nicht", "mit", "ein", "eine", "für", "wir", "auf"},
+    "pt": {"o", "a", "que", "de", "e", "os", "uma", "para", "com", "não", "por", "são"},
+    "nl": {"de", "het", "een", "en", "van", "is", "dat", "niet", "voor", "met", "zijn", "wij"},
+}
+
+
+def _installed(model: str) -> bool:
+    import importlib.util
+    return importlib.util.find_spec(model) is not None
+
+
+def detect_language(text: str, declared: str = "") -> str:
+    """Two-letter language code: the page's declared language, else a guess from
+    function words."""
+    declared = (declared or "").lower().replace("_", "-").split("-")[0]
+    if re.fullmatch(r"[a-z]{2}", declared):
+        return declared
+    words = re.findall(r"[^\W\d_]+", text.lower())[:3000]
+    if not words:
+        return "en"
+    scores = {lang: sum(w in hints for w in words) for lang, hints in _LANG_HINTS.items()}
+    return max(scores, key=scores.get)
+
+
 class OrgExtractor:
     def __init__(self, watchlist: Watchlist, stoplist: Tuple[Set[str], List[re.Pattern]],
-                 spacy_model: Optional[str], use_links: bool = True):
+                 spacy_model: Optional[str], use_links: bool = True, ner_size: str = "sm"):
+        """spacy_model: a model name used for every page, "auto" (one model per page
+        language, see SPACY_MODELS), or "none". ner_size: sm / md / lg models in
+        auto mode; md and lg are more precise but miss more unusual group names."""
         self.watchlist = watchlist
         self.stop_exact, self.stop_pats = stoplist
         self.use_links = use_links
-        self.nlp = None
-        if spacy_model and spacy_model.lower() != "none":
-            try:
-                import spacy
-                self.nlp = spacy.load(spacy_model, exclude=["parser", "lemmatizer", "tagger",
-                                                            "attribute_ruler", "morphologizer",
-                                                            "senter", "textcat"])
-                self.nlp.max_length = 2_000_000
-                log.info("Loaded spaCy model %s", spacy_model)
-            except (ImportError, OSError) as exc:
-                log.warning("spaCy model %r unavailable (%s); continuing without NER. "
-                            "Install with: python -m spacy download %s", spacy_model, exc, spacy_model)
+        self.spacy_model = (spacy_model or "none").strip()
+        self.ner_size = ner_size
+        self._models: Dict[str, object] = {}
+        self.common_words: Set[str] = set()
+        self.mid_caps: Optional[Set[str]] = None   # None until prepare_corpus() runs
+        self.label_votes: Dict[str, Counter] = defaultdict(Counter)
         desc = "|".join(re.escape(d).replace(r"\ ", r"[\s\-]+") for d in DESCRIPTORS)
         # "the feminist collective Mujeres Creando" / "the NGO called Sea-Watch"
         self.pre_appos = re.compile(
@@ -572,6 +682,104 @@ class OrgExtractor:
             rf"(?:[\w’'\-]+\s+){{0,4}}?({desc})(?!\w)",
             re.I,
         )
+
+    # ------------------------------------------------------------------- NER
+    def _load(self, name: str):
+        if name not in self._models:
+            try:
+                import spacy
+                nlp = spacy.load(name, exclude=["parser", "lemmatizer", "tagger", "attribute_ruler",
+                                                "morphologizer", "senter", "textcat"])
+                nlp.max_length = 2_000_000
+                log.info("Loaded spaCy model %s", name)
+                self._models[name] = nlp
+            except (ImportError, OSError) as exc:
+                log.warning("spaCy model %r unavailable (%s). Install with: python -m spacy "
+                            "download %s", name, exc, name)
+                self._models[name] = None
+        return self._models[name]
+
+    def model_for(self, lang: str = "en"):
+        if self.spacy_model.lower() == "none":
+            return None
+        if self.spacy_model.lower() != "auto":
+            return self._load(self.spacy_model)
+        nlp = None
+        if lang in SPACY_MODELS:   # the requested size if installed, else the small model
+            base = SPACY_MODELS[lang][:-3]
+            for size in dict.fromkeys((self.ner_size, "sm")):
+                if _installed(f"{base}_{size}"):
+                    nlp = self._load(f"{base}_{size}")
+                    break
+        if nlp is None:  # no model for this language: multilingual, then English
+            nlp = self._load("xx_ent_wiki_sm") if lang != "en" else None
+        return nlp or self._load("en_core_web_sm")
+
+    @property
+    def nlp(self):
+        """English (or the fixed) model; kept for callers that do not pass a language."""
+        return self.model_for("en")
+
+    def pipe(self, texts: List[str], lang: str = "en") -> list:
+        nlp = self.model_for(lang)
+        if nlp is None:
+            return [None] * len(texts)
+        docs = list(nlp.pipe(texts, batch_size=64))
+        for doc in docs:  # every label a name receives anywhere on the site
+            for ent in doc.ents:
+                self.label_votes[canonical_key(tidy_surface(ent.text))][ent.label_] += 1
+        return docs
+
+    # ------------------------------------------------------- corpus statistics
+    def prepare_corpus(self, texts: Iterable[str]) -> None:
+        """Learn which words this site writes in lower case. A name made only of
+        such words ("Climate Justice", "Hydrogen", "Approach") is ordinary
+        language unless a rule with an organisational noun supports it."""
+        lower: Counter = Counter()
+        upper: Counter = Counter()
+        for text in texts:
+            for s, e in split_sentences(text):
+                for i, m in enumerate(TOKEN_RE.finditer(text, s, e)):
+                    w = m.group(0)
+                    if i == 0 or w.isupper():
+                        continue  # sentence-initial and ALL-CAPS words say nothing about case
+                    (upper if w[:1].isupper() else lower)[w.casefold()] += 1
+        self.common_words = {w for w, n in lower.items() if n >= 2 and n >= 0.5 * upper.get(w, 0)}
+        self.mid_caps = set(upper)
+
+    def capitalised_in_running_text(self, surface: str) -> bool:
+        """Does the name have a word the site capitalises mid-sentence (a proper
+        noun), or an acronym / camelCase / digit? Words capitalised only at the
+        start of headings and lines ("Réveil", "Accessible") are not names."""
+        words = [w for w in TOKEN_RE.findall(surface) if w.casefold() not in CONNECTORS]
+        return any(w.casefold() in self.mid_caps or re.search(r"\d|[a-z][A-Z]", w)
+                   or (w.isupper() and len(w) <= 5) for w in words)
+
+    def is_ordinary_words(self, surface: str) -> bool:
+        words = [w.casefold().strip("’'") for w in TOKEN_RE.findall(surface)]
+        content = [w for w in words if w not in CONNECTORS]
+        if not content:
+            return True
+        if re.fullmatch(r"(?:[A-Z][a-z]?\d*){1,4}", surface) and re.search(r"\d", surface):
+            return True   # chemical formulae: CO2, CH4, H2O
+        return all(w in self.common_words or w in LEADING_STRIP or w in GENERIC for w in content)
+
+    def vet(self, key: str, methods: Iterable[str]) -> bool:
+        """Site-wide check for names found only by NER, links or appositives:
+        reject those that spaCy more often labels as a place, person, law, event..."""
+        if set(methods) - {"ner"}:
+            return True   # a rule, a link or a descriptor also supports it
+        votes = self.label_votes.get(key)
+        if not votes:
+            return True
+        org = sum(n for lab, n in votes.items() if lab in ORG_LABELS)
+        place = sum(n for lab, n in votes.items() if lab in {"GPE", "LOC", "FAC"})
+        other = sum(n for lab, n in votes.items() if lab in NON_ORG_LABELS)
+        # Small models often call coined names people ("Alternatiba" as PER), so
+        # person labels count for less than place labels.
+        if place >= 2 * org and place >= 3:
+            return False
+        return not (other >= 3 * org and org < 3)
 
     # ---------------------------------------------------------------- filters
     def is_stopped(self, key: str, surface: str) -> bool:
@@ -611,7 +819,7 @@ class OrgExtractor:
             last_cap = i
             while j + 1 < len(toks):
                 gap = text[toks[j].end():toks[j + 1].start()]
-                if not re.fullmatch(r"\s{1,3}|\s?-\s?|[’']\s?", gap):
+                if not re.fullmatch(r"\s{1,3}|-|[’']\s?", gap):
                     break
                 nxt = toks[j + 1].group(0)
                 if _is_cap(nxt):
@@ -682,6 +890,8 @@ class OrgExtractor:
             after = text[e:e + 90]
             pre = self.pre_appos.search(before)
             post = self.post_appos.match(after)
+            if post and PERSON_APPOS.search(post.group(0)):
+                post = None   # "Claire, une militante de l'association X": a person, not an org
             head_typ = self._head_type(toks)
             if not head_typ and not pre and not post:
                 # "the Abolitionist Futures collective": lowercase head right after the name
@@ -710,7 +920,7 @@ class OrgExtractor:
         if self.use_links:
             for ln in links:
                 t = tidy_surface(ln.text)
-                if not t or LINK_TEXT_JUNK.match(t) or len(t.split()) > 10 or not t[:1].isupper():
+                if not link_text_is_name(t, ln.domain):
                     continue
                 idx = text.find(ln.text) if ln.text else -1
                 s, e = (idx, idx + len(ln.text)) if idx >= 0 else (-1, -1)
@@ -722,13 +932,27 @@ class OrgExtractor:
         # lower-ranked candidates contribute their method label to the winner.
         accepted: List[Mention] = []
         for _, m in sorted(cands, key=lambda pm: (pm[0], -(pm[1].end - pm[1].start))):
+            cut = TITLE_SEPARATOR.search(m.surface)
+            if cut and "watchlist" not in m.methods:   # "INEOS - Press Release" -> "INEOS"
+                if m.start >= 0:
+                    m.end = m.start + cut.start()
+                m.surface = m.surface[:cut.start()]
             m.surface = tidy_surface(m.surface)
+            first = m.surface.split(" ", 1)[0].casefold() if m.surface else ""
+            if first in CTA_WORDS and "watchlist" not in m.methods:
+                continue   # "Sign Up Now", "Join the ...": an instruction
             if not m.key:
                 m.key = canonical_key(m.surface)
             m.key = self.watchlist.canonical.get(m.key, m.key)
             if "watchlist" not in m.methods:
                 if not self.plausible_name(m.surface) or self.is_stopped(m.key, m.surface):
                     continue
+                if "pattern" not in m.methods and not self._head_type(TOKEN_RE.findall(m.surface)):
+                    if self.is_ordinary_words(m.surface):
+                        continue
+                    if (m.methods == {"ner"} and self.mid_caps is not None
+                            and not self.capitalised_in_running_text(m.surface)):
+                        continue
             hit = None
             if m.start >= 0:
                 for a in accepted:
@@ -757,10 +981,11 @@ def _split_conjoined(toks: list) -> List[list]:
         if t.group(0).casefold() in CONJUNCTIONS and 0 < k < len(toks) - 1:
             left = toks[:k]
             last = left[-1].group(0).casefold()
-            if last in HEAD_TO_TYPE or (last in TRAILING_TO_TYPE and len(left) >= 2):
-                right = toks[k + 1:]
-                while right and right[0].group(0).casefold() in CONNECTORS:
-                    right = right[1:]
+            right = toks[k + 1:]
+            while right and right[0].group(0).casefold() in CONNECTORS:
+                right = right[1:]
+            right_head = bool(right) and right[0].group(0).casefold() in HEAD_TO_TYPE
+            if last in HEAD_TO_TYPE or (last in TRAILING_TO_TYPE and len(left) >= 2) or right_head:
                 return [left] + (_split_conjoined(right) if right else [])
     return [toks]
 

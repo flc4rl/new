@@ -36,7 +36,7 @@ from urllib.parse import urlparse
 
 from crawler import CrawlConfig, Crawler, PageCache, normalise_url, registered_host
 from extract import (
-    OrgExtractor, ParsedPage, ThemeSet, Watchlist, acronym_pairs, block_hash,
+    OrgExtractor, ParsedPage, detect_language, ThemeSet, Watchlist, acronym_pairs, block_hash,
     canonical_key, load_stoplist, parse_html, parse_pdf_text, split_sentences,
 )
 from linked_sites import PLATFORM_HOSTS, Site, SiteRegistry, collect_targets, crawl_linked
@@ -109,8 +109,13 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     g.add_argument("--watchlist", type=Path, help="Known organisations: 'Name | alias | alias' per line")
     g.add_argument("--stoplist", type=Path, default=HERE / "default_stoplist.txt",
                    help="Names to ignore (one per line, 're:' prefix for regex)")
-    g.add_argument("--spacy-model", default="en_core_web_sm",
-                   help="spaCy NER model, e.g. it_core_news_sm, xx_ent_wiki_sm, or 'none'")
+    g.add_argument("--spacy-model", default="auto",
+                   help="'auto' picks a spaCy model per page language (en/fr/it/de/es/pt/nl...); "
+                        "or name one model for all pages, e.g. fr_core_news_sm; or 'none'")
+    g.add_argument("--ner-size", choices=["sm", "md", "lg"], default="sm",
+                   help="spaCy model size in auto mode: md/lg are more precise (fewer places and "
+                        "people mistaken for groups) but miss more unusual group names; install "
+                        "them first, e.g. python -m spacy download en_core_web_md")
     g.add_argument("--no-links", action="store_true",
                    help="Do not treat outbound-link text / logo alt text as organisation names")
     g.add_argument("--strip-regions", action="store_true",
@@ -253,7 +258,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     if unknown:
         log.warning("Unknown --focus-themes ignored: %s", ", ".join(sorted(unknown)))
     extractor = OrgExtractor(Watchlist.load(args.watchlist), load_stoplist(args.stoplist),
-                             args.spacy_model, use_links=not args.no_links)
+                             args.spacy_model, use_links=not args.no_links, ner_size=args.ner_size)
 
     # Paragraphs repeated across many pages (menus, footers, partner strips).
     # Counted per site, so one linked site's footer is judged against that site only.
@@ -263,6 +268,10 @@ def main(argv: Optional[List[str]] = None) -> int:
         block_pages.update({(p.site, block_hash(b.text)) for b in p.blocks if b.text})
     boilerplate = {k for k, n in block_pages.items()
                    if n > max(3, args.boilerplate_share * site_pages[k[0]])}
+
+    # Which words this corpus writes in lower case (used to reject ordinary words as names).
+    extractor.prepare_corpus(b.text for p in pages for b in p.blocks if b.text)
+    langs: Counter = Counter()
 
     # Acronym definitions across the whole site.
     acronyms: Dict[str, str] = {}
@@ -285,8 +294,9 @@ def main(argv: Optional[List[str]] = None) -> int:
         if pi % 50 == 0:
             log.info("  %d/%d pages", pi, len(pages))
         texts = [b.text for b in page.blocks]
-        docs = (list(extractor.nlp.pipe(texts, batch_size=64)) if extractor.nlp is not None
-                else [None] * len(texts))
+        lang = detect_language(" ".join(texts[:200]), page.lang)
+        langs[lang] += 1
+        docs = extractor.pipe(texts, lang)
         block_hits = [themes.find(t) for t in texts]
         page_hits: Dict[str, int] = Counter()
         for bh in block_hits:
@@ -360,6 +370,18 @@ def main(argv: Optional[List[str]] = None) -> int:
             "org_mentions": n_mentions,
             **{f"theme:{t}": page_hits.get(t, 0) for t in themes.names},
         })
+
+    log.info("Page languages: %s", ", ".join(f"{k} {n}" for k, n in langs.most_common()))
+    # Site-wide vetting of names found only by NER / links / appositives.
+    methods_by_key: Dict[str, Set[str]] = defaultdict(set)
+    for r in mention_rows:
+        methods_by_key[r["org_key"]].update(r["methods"].split("+"))
+    rejected = {k for k, ms in methods_by_key.items() if not extractor.vet(k, ms)}
+    if rejected:
+        log.info("Dropped %d names spaCy mostly labels as places, people, laws etc.", len(rejected))
+    mention_rows = [r for r in mention_rows if r["org_key"] not in rejected]
+    for r in mention_rows:
+        r["co_mentioned_keys"] = [k for k in r["co_mentioned_keys"] if k not in rejected]
 
     orgs = aggregate(mention_rows, extractor, acr_display, themes.names, args.min_mentions)
     display = {o["org_key"]: o["organisation"] for o in orgs}

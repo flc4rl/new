@@ -11,13 +11,23 @@ counted.
 
 ```bash
 pip install -r requirements.txt
-python -m spacy download en_core_web_sm      # or a model for the site's language
+python -m spacy download en_core_web_sm
+python -m spacy download fr_core_news_sm     # plus any other language you will meet:
+# it_core_news_sm, de_core_news_sm, es_core_news_sm, pt_core_news_sm, nl_core_news_sm
 ```
 
-For non-English sites, use the matching spaCy model, e.g. `it_core_news_sm`,
-`es_core_news_sm`, `fr_core_news_sm`, `de_core_news_sm`, or the multilingual
-`xx_ent_wiki_sm`, and pass it with `--spacy-model`. The tool still works
-without spaCy (`--spacy-model none`), relying on the rule-based methods below.
+Each page's language is read from the page (or guessed from its words) and
+the matching spaCy model is used, so a French page is never read with the
+English model. A language without an installed model falls back to
+`xx_ent_wiki_sm` if installed, else English. `--spacy-model fr_core_news_sm`
+forces one model for every page; `--spacy-model none` turns NER off and relies
+on the rule-based methods below.
+
+`--ner-size md` uses the medium models (`en_core_web_md`, `fr_core_news_md`, …;
+download them first). Tested on two real sites, they removed about two thirds
+of the remaining false names (places, people, ordinary words) but also lost
+some unusual real group names (e.g. regional "Camp Climat …" groups), so the
+small models stay the default for recall.
 
 ## Run
 
@@ -99,6 +109,20 @@ main handle for judging precision:
 Acronyms defined in the text, e.g. "Independent Workers Union of Great
 Britain (IWGB)", are merged with their long form. Names are normalised for
 case, accents, a leading article and possessives before merging.
+
+Names found only by NER, by link text or by a descriptor are checked against
+the whole site before they are kept:
+
+- a name made only of words the site also writes in lower case ("Climate
+  Justice", "Hydrogen", "Approach") is ordinary language, not a name;
+- a NER-only name must be capitalised somewhere in running text, not only at
+  the start of headings and lines ("Réveil", "Accessible");
+- a NER-only name that spaCy labels as a place far more often than as an
+  organisation (a town) is dropped;
+- link text must look like a name: not an instruction ("Go to Instagram
+  page", "Je fais un don"), a sentence, or an article title, and not a link
+  to social media or site infrastructure;
+- names are cut at title separators ("INEOS - Press Release" → INEOS).
 
 `confidence` is a rough guide: **high** = watchlist, appositive, or found by
 two or more methods; **medium** = pattern or link alone, or NER on 3+ pages;
