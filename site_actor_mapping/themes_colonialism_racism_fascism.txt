@@ -2,6 +2,10 @@
 # Deliberately broader than frame_analysis/taxonomy.py: activist websites use
 # the adjectives ("colonial violence", "racist borders") analytically, so
 # they are included here. Remove them if you want the stricter definition.
+#
+# Each theme lists English terms first, then Italian, Spanish, French, German
+# and Portuguese. Prefix terms (*) already cover many cognates, e.g.
+# "colonial*" matches colonialismo / colonialisme / colonialista.
 
 [colonialism]
 colonial*
@@ -30,6 +34,47 @@ indigenous sovereignty
 global south
 reparation*
 climate debt
+# IT / ES / FR / DE / PT
+coloni*zzazion*
+decoloni*
+colonizaci*
+colonisation*
+colonização
+descoloni*
+décoloni*
+anticoloniali*
+neocoloniali*
+postcoloniali*
+imperialism*
+imperialis*
+impérialis*
+impero
+imperio
+império
+estrattivis*
+extractivis*
+extrativis*
+extractivism*
+riparazion*
+reparaci*
+réparation*
+reparações
+sud globale
+sur global
+sud global
+sul global
+debito climatico
+deuda climática
+dette climatique
+Kolonial*
+Kolonis*
+Dekoloni*
+Imperialis*
+Extraktivis*
+Reparation*
+Klimaschuld*
+globale Süden
+globalen Süden
 
 [racism]
 racism
@@ -52,6 +97,36 @@ afrophob*
 anti-blackness
 hostile environment
 racial profiling
+# IT / ES / FR / DE / PT
+razzis*
+antirazzis*
+anti-razzis*
+razzializ*
+suprematis*
+xenofob*
+islamofob*
+antisemitis*
+racis*
+antirracis*
+racializ*
+supremacis*
+racisme
+raciste*
+antiracis*
+racialis*
+suprémacis*
+xénophob*
+islamophob*
+antisémit*
+Rassismus
+rassistisch*
+Antirassis*
+Rassifizier*
+Fremdenfeindlich*
+Islamfeindlich*
+racismo
+racista*
+antirracista*
 
 [fascism]
 fascis*
@@ -73,3 +148,30 @@ alt-right
 white nationalis*
 ethnonationalis*
 authoritarianis*
+# IT / ES / FR / DE / PT
+fascis*
+antifascis*
+neofascis*
+ecofascis*
+estrema destra
+ultradestra
+autoritarism*
+fascism*
+antifascism*
+ultraderecha
+extrema derecha
+extrema direita
+ultradireita
+autoritarismo
+fascisme
+antifascisme
+extrême droite
+extrême-droite
+autoritarisme
+Faschis*
+Antifaschis*
+Ökofaschis*
+Neonazi*
+Rechtsextrem*
+Rechtsradikal*
+Autoritarismus
