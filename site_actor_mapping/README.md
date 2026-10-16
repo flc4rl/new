@@ -115,6 +115,54 @@ excludes them, and the report hides organisations that only appear there by
 default. Identical passages seen on several pages count once
 (`repeat_context`).
 
+## Calendars and linked websites
+
+Many movement sites embed an events calendar that shows one month and loads
+the others only when a visitor clicks "previous" or "next". The crawler
+detects **Modern Events Calendar** (the common WordPress plugin, `mec-*`
+classes) automatically and loads every month by sending the same request the
+calendar's own JavaScript sends on a click: backwards until 12 empty months in
+a row, forwards until 3. Each month becomes a page in the results
+(`calendar_month` column) and its event links are crawled.
+
+```bash
+python site_actors.py https://www.themovementhub.org/events/ \
+  --themes themes_colonialism_racism_fascism.txt \
+  --follow-links events -o results/movementhub
+```
+
+`--follow-links events` then follows each event's outside links: links in the
+calendar itself (some events link straight to the organisers' site) and in
+the main content of each on-site event page (its "more info" link). Each
+linked website is crawled lightly and analysed like the main site. Every
+mention records its `site`, whether that is the `main` or a `linked` site,
+and the event that led there (`via_event`); `sites.csv` lists every site with
+the events, months and pages that linked to it.
+
+- Social media, video, maps, video-call and payment links are never followed.
+- Platforms hosting many organisations (Action Network, Eventbrite, Linktree,
+  Google Forms, petitions, crowdfunders, blog platforms …) are read one page
+  only: the linked event page, never the rest of the platform. Add others
+  with `--follow-single-page HOST`, or exclude hosts with `--follow-skip HOST`.
+- `--follow-links all` follows outside links from the main content of every
+  page, not only from events.
+- The same outside URL appearing on a large share of pages (a sponsor, a
+  standing campaign link) is treated as site furniture and not followed.
+
+| Option | Purpose |
+|---|---|
+| `--calendar-from` / `--calendar-to` | Limit the months loaded, as `YYYY-MM` |
+| `--calendar-click CSS` | Other calendar plugins: CSS selector of the "previous month" button, clicked in headless Chromium (needs `playwright`) |
+| `--calendar-clicks` | How many clicks for `--calendar-click` (default 24) |
+| `--calendar-url REGEX` | Only treat matching pages as calendars |
+| `--no-calendar` | Do not load other months |
+| `--follow-links` | `none` (default), `events` or `all` |
+| `--follow-max-sites` | At most this many linked websites (default 60, most-linked first) |
+| `--follow-max-pages` / `--follow-max-depth` | Limits per linked website (default 25 pages, 1 click from the linked page) |
+
+When the calendar's own request fails (the log says so), use the click
+fallback, e.g. `--calendar-click ".mec-previous-month"`.
+
 ## PDFs
 
 PDFs found on a crawled page are read by default, however they are placed:
@@ -150,6 +198,9 @@ so you can see what was missed.
   weighted edge list for Gephi or similar.
 - `pages.csv` — one row per page: title, date, depth, word count, number of
   organisation mentions and hits per theme.
+- `sites.csv` — the main site and every linked website: status, pages
+  analysed, start URLs, and the events, calendar months and pages that linked
+  to it.
 - `pdfs.csv` — every PDF found: URL, the page it was on, title, date, page
   and word counts, and whether it could be read.
 - `summary.json` — theme coverage (pages, share of pages, top matched terms),

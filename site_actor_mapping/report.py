@@ -12,21 +12,30 @@ MAX_CONTEXTS_PER_ORG = 300
 
 
 def write_report(path: Path, orgs: List[dict], mentions: List[dict], themes, theme_pages,
-                 n_pages: int, start_urls: List[str]) -> None:
+                 n_pages: int, start_urls: List[str], sites: List[str] = ()) -> None:
     ctx: Dict[str, List[dict]] = defaultdict(list)
+    org_sites: Dict[str, set] = defaultdict(set)
+    org_roles: Dict[str, set] = defaultdict(set)
     for r in mentions:
+        org_sites[r["org_key"]].add(r.get("site", ""))
+        org_roles[r["org_key"]].add(r.get("site_role", ""))
         if r["repeat_context"] or len(ctx[r["org_key"]]) >= MAX_CONTEXTS_PER_ORG:
             continue
         ctx[r["org_key"]].append({
             "s": r["surface_form"], "c": r["context"], "u": r["url"], "t": r["page_title"],
             "d": r["page_date"], "m": r["methods"], "b": r["boilerplate"], "g": r["region"], "e": r.get("embedded_in", ""),
+            "st": r.get("site", ""), "sr": r.get("site_role", ""), "ve": r.get("via_event", ""),
+            "cm": r.get("calendar_month", ""),
             "th": r["paragraph_themes"], "tt": r["context_theme_terms"], "co": r["co_mentioned"],
         })
     data = {
         "orgs": [{k: o[k] for k in ("organisation", "org_key", "org_type", "confidence",
                                     "distinct_mentions", "substantive_mentions", "pages",
                                     "boilerplate_only", "methods", "variants", "acronyms",
-                                    "themes", "linked_domains")} for o in orgs],
+                                    "themes", "linked_domains")}
+                 | {"sites": sorted(org_sites[o["org_key"]]), "roles": sorted(org_roles[o["org_key"]])}
+                 for o in orgs],
+        "siteList": list(sites),
         "ctx": ctx,
         "themes": [{"name": t, "pages": theme_pages.get(t, 0)} for t in themes.names],
         "nPages": n_pages,
@@ -79,6 +88,8 @@ table{border-collapse:collapse;font-size:13px}td,th{padding:3px 10px 3px 0;text-
   <div class="filters">
    <input type="search" id="q" placeholder="Filter by name, variant or domain">
    <label>Theme <select id="theme"><option value="">any</option></select></label>
+   <label>Site <select id="site"><option value="">all</option><option value="@main">main site</option>
+     <option value="@linked">linked sites</option></select></label>
    <label>Type <select id="type"><option value="">any</option></select></label>
    <label>Confidence <select id="conf"><option value="">any</option><option>high</option>
      <option>medium</option><option>low</option></select></label>
@@ -101,6 +112,10 @@ $("#stats").textContent = `${D.orgs.length} organisations across ${D.nPages} pag
 for (const t of D.themes) $("#theme").insertAdjacentHTML("beforeend", `<option>${esc(t.name)}</option>`);
 for (const t of [...new Set(D.orgs.map(o => o.org_type).filter(Boolean))].sort())
   $("#type").insertAdjacentHTML("beforeend", `<option>${esc(t)}</option>`);
+if (D.siteList.length > 1) for (const s of D.siteList) $("#site").insertAdjacentHTML("beforeend", `<option>${esc(s)}</option>`);
+else $("#site").closest("label").style.display = "none";
+const siteOk = (o, s) => !s || (s === "@main" ? o.roles.includes("main") : s === "@linked" ? o.roles.includes("linked") : o.sites.includes(s));
+const ctxSiteOk = (c, s) => !s || (s === "@main" ? c.sr === "main" : s === "@linked" ? c.sr === "linked" : c.st === s);
 $("#themes").innerHTML = D.themes.length ? "<b>Themes</b><table><tr><th>theme</th><th>pages</th><th>share</th></tr>" +
   D.themes.map(t => `<tr><td>${esc(t.name)}</td><td>${t.pages}</td><td>${(100*t.pages/D.nPages).toFixed(1)}%</td></tr>`).join("") + "</table>" : "";
 const themeCount = (o, t) => { const m = (o.themes||"").match(new RegExp("(?:^|; )" + reEsc(t) + " \\((\\d+)\\)")); return m ? +m[1] : 0; };
@@ -108,9 +123,9 @@ const themedTotal = o => (o.themes||"").split("; ").filter(Boolean).reduce((a, x
 let selected = null;
 function render() {
   const q = $("#q").value.toLowerCase(), th = $("#theme").value, ty = $("#type").value,
-        cf = $("#conf").value, mn = +$("#min").value || 1, nobp = $("#nobp").checked, so = $("#sort").value;
+        cf = $("#conf").value, si = $("#site").value, mn = +$("#min").value || 1, nobp = $("#nobp").checked, so = $("#sort").value;
   let rows = D.orgs.filter(o => (!q || (o.organisation + " " + o.variants + " " + o.linked_domains + " " + o.acronyms).toLowerCase().includes(q))
-    && (!th || themeCount(o, th) > 0) && (!ty || o.org_type === ty) && (!cf || o.confidence === cf)
+    && siteOk(o, si) && (!th || themeCount(o, th) > 0) && (!ty || o.org_type === ty) && (!cf || o.confidence === cf)
     && o.distinct_mentions >= mn && !(nobp && o.boilerplate_only));
   const key = {m: o => -o.substantive_mentions - o.distinct_mentions/1e4, p: o => -o.pages,
                th: o => th ? -themeCount(o, th) : -themedTotal(o), a: o => o.organisation.toLowerCase()}[so];
@@ -118,18 +133,24 @@ function render() {
   $("#list").innerHTML = rows.map(o => `<div class="org${o.org_key===selected?" sel":""}" data-k="${esc(o.org_key)}">
     <span class="n">${o.substantive_mentions}/${o.distinct_mentions}</span><b>${esc(o.organisation)}</b>
     <div class="meta">${esc(o.org_type||"type unknown")} · <span class="conf-${o.confidence}">${o.confidence}</span>
-    · ${o.pages} page${o.pages==1?"":"s"}${o.acronyms?" · "+esc(o.acronyms):""}</div></div>`).join("")
+    · ${o.pages} page${o.pages==1?"":"s"}${o.sites.length>1?" · "+o.sites.length+" sites":""}${o.acronyms?" · "+esc(o.acronyms):""}</div></div>`).join("")
     || '<div class="empty">No organisations match these filters.</div>';
 }
 function show(k) {
   selected = k; render();
   const o = D.orgs.find(x => x.org_key === k), cs = D.ctx[k] || [], th = $("#theme").value;
-  const list = th ? cs.filter(c => c.th.includes(th)) : cs;
+  const si = $("#site").value;
+  const list = cs.filter(c => (!th || c.th.includes(th)) && ctxSiteOk(c, si));
   const hl = c => {
+    // Name first; theme terms are then marked only in text outside the name's mark.
     let s = esc(c.c);
-    const terms = (c.tt||"").split("; ").filter(Boolean).sort((a,b) => b.length - a.length);
-    if (terms.length) s = s.replace(new RegExp("(" + terms.map(t => reEsc(esc(t))).join("|") + ")", "gi"), '<mark class="t">$1</mark>');
     if (c.s) s = s.replace(new RegExp(reEsc(esc(c.s)), "g"), "<mark>$&</mark>");
+    const terms = (c.tt||"").split("; ").filter(Boolean).sort((a,b) => b.length - a.length);
+    if (terms.length) {
+      const re = new RegExp("(" + terms.map(t => reEsc(esc(t))).join("|") + ")", "gi");
+      s = s.split(/(<mark>.*?<\/mark>)/).map(part => part.startsWith("<mark>") ? part
+            : part.replace(re, '<mark class="t">$1</mark>')).join("");
+    }
     return s;
   };
   $("#detail").innerHTML = `<h2>${esc(o.organisation)}</h2>
@@ -140,13 +161,14 @@ function show(k) {
    ${list.map(c => `<div class="ctx"><p>${hl(c)}</p><div class="meta">
      <a href="${esc(c.u)}" target="_blank" rel="noopener">${esc(c.t || c.u)}</a>${c.d?" · "+esc(c.d):""}
      · ${esc(c.m)}${c.g!=="main"?" · "+esc(c.g):""}${c.b?" · boilerplate":""}
+     ${D.siteList.length>1?`<br>Site: ${esc(c.st)}${c.sr==="linked"?" (linked)":""}`:""}${c.ve?" · via event: "+esc(c.ve):""}${c.cm?" · calendar "+esc(c.cm):""}
      ${c.e?`<br>PDF found on <a href="${esc(c.e)}" target="_blank" rel="noopener">${esc(c.e)}</a>`:""}
      ${c.th?"<br>Paragraph themes: "+esc(c.th):""}${c.co?"<br>Also mentioned: "+esc(c.co):""}</div></div>`).join("")
      || '<div class="empty">No contexts for this theme filter.</div>'}`;
   $("#detail").scrollTop = 0;
 }
 $("#list").addEventListener("click", e => { const el = e.target.closest(".org"); if (el) show(el.dataset.k); });
-for (const id of ["#q","#theme","#type","#conf","#min","#nobp","#sort"]) $(id).addEventListener("input", () => selected ? show(selected) : render());
+for (const id of ["#q","#theme","#site","#type","#conf","#min","#nobp","#sort"]) $(id).addEventListener("input", () => selected ? show(selected) : render());
 render();
 </script></body></html>
 """

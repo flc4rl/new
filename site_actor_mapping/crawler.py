@@ -60,6 +60,12 @@ class CrawlConfig:
     use_sitemap: bool = False
     render_js: bool = False
     refresh: bool = False
+    calendar: bool = True                  # sweep embedded calendars that are detected
+    calendar_from: Optional[str] = None    # YYYY-MM; default: until 12 empty months
+    calendar_to: Optional[str] = None      # YYYY-MM; default: until 3 empty months
+    calendar_click: Optional[str] = None   # CSS selector of a "previous month" button
+    calendar_clicks: int = 24
+    calendar_url_pattern: Optional[str] = None  # only sweep calendars on matching URLs
 
 
 @dataclass
@@ -75,6 +81,8 @@ class CachedPage:
     referrer: str = ""   # for PDFs: the page that linked or embedded it
     title: str = ""      # for PDFs: document metadata title
     date: str = ""       # for PDFs: document metadata creation date
+    kind: str = ""       # "calendar" for a synthetic page holding one loaded calendar month
+    label: str = ""      # for calendar pages: YYYY-MM or click number
 
 
 def normalise_url(url: str) -> str:
@@ -148,6 +156,7 @@ class Crawler:
         self._last_fetch = 0.0
         self._browser = None
         self._playwright = None
+        self._swept: Set[str] = set()
 
     # ------------------------------------------------------------------ scope
     def in_scope(self, url: str) -> bool:
@@ -352,18 +361,10 @@ class Crawler:
 
                 if page.is_pdf or not page.body:
                     continue
-                links, pdfs = extract_links(page.body, page.final_url)
-                # PDFs on a page are part of that page, so they are read even at max depth.
-                for link in pdfs:
-                    if link not in seen and self.pdf_in_scope(link):
-                        seen.add(link)
-                        queue.appendleft((link, depth + 1, page.final_url, True))
-                if depth >= self.cfg.max_depth:
-                    continue
-                for link in links:
-                    if link not in seen and self.in_scope(link):
-                        seen.add(link)
-                        queue.append((link, depth + 1, "", False))
+                for cal in self.calendar_pages(page):
+                    fetched += 1
+                    self._enqueue_links(cal, depth, queue, seen)
+                self._enqueue_links(page, depth, queue, seen)
         finally:
             if self._browser is not None:
                 self._browser.close()
@@ -371,6 +372,72 @@ class Crawler:
         log.info("Crawl finished: %d pages fetched or reused from cache, %d queued URLs not visited",
                  fetched, len(queue))
         return fetched
+
+    def _enqueue_links(self, page: CachedPage, depth: int, queue: deque, seen: Set[str]) -> None:
+        links, pdfs = extract_links(page.body, page.final_url)
+        # PDFs on a page are part of that page, so they are read even at max depth.
+        for link in pdfs:
+            if link not in seen and self.pdf_in_scope(link):
+                seen.add(link)
+                queue.appendleft((link, depth + 1, page.final_url, True))
+        if depth >= self.cfg.max_depth:
+            return
+        for link in links:
+            if link not in seen and self.in_scope(link):
+                seen.add(link)
+                queue.append((link, depth + 1, "", False))
+
+    # --------------------------------------------------------------- calendar
+    def calendar_pages(self, page: CachedPage) -> List[CachedPage]:
+        """Load every month of a calendar embedded in `page` (once per page)."""
+        if not self.cfg.calendar or page.kind or page.final_url in self._swept:
+            return []
+        if self.cfg.calendar_url_pattern and not re.search(self.cfg.calendar_url_pattern, page.final_url):
+            return []
+        index_url = page.final_url + ("&" if "?" in page.final_url else "?") + "calendar_index=1"
+        if not self.cfg.refresh:
+            index = self.cache.get(index_url)
+            if index is not None:
+                self._swept.add(page.final_url)
+                return [p for u in json.loads(index.body or "[]") if (p := self.cache.get(u))]
+
+        from calendar_sweep import detect_mec, parse_month, sweep_by_clicking, sweep_mec
+        sweeps = []
+        if self.cfg.calendar_click:
+            if re.search(r"mec-|calendar|fc-|tribe-events", page.body, re.I) or self.cfg.calendar_url_pattern:
+                sweeps.append(("click", sweep_by_clicking(page.final_url, self.cfg.calendar_click,
+                                                          self.cfg.calendar_clicks, self.cfg.user_agent,
+                                                          self.cfg.timeout)))
+        else:
+            for mec in detect_mec(page.body, page.final_url):
+                log.info("Calendar found on %s (Modern Events Calendar); loading all months", page.final_url)
+                sweeps.append(("month", sweep_mec(self.session, mec, self._wait, self.cfg.timeout,
+                                                  parse_month(self.cfg.calendar_from),
+                                                  parse_month(self.cfg.calendar_to))))
+        if not sweeps:
+            return []
+        self._swept.add(page.final_url)
+        out: List[CachedPage] = []
+        sep = "&" if "?" in page.final_url else "?"
+        for kind, months in sweeps:
+            try:
+                for label, html, n_events in months:
+                    url = f"{page.final_url}{sep}calendar_{kind}={label}"
+                    cal = CachedPage(url, url, 200, "text/html", page.depth, time.time(),
+                                     f"<html><body><main>{html}</main></body></html>",
+                                     referrer=page.final_url, kind="calendar", label=label)
+                    self.cache.put(cal)
+                    out.append(cal)
+                    log.info("  calendar %s %s: %d events", kind, label, n_events)
+            except ImportError:
+                log.warning("--calendar-click needs playwright: pip install playwright && "
+                            "playwright install chromium")
+        if out:  # an index is only saved for a sweep that worked, so failures are retried
+            self.cache.put(CachedPage(index_url, index_url, 200, "application/json", page.depth,
+                                      time.time(), json.dumps([c.url for c in out]),
+                                      kind="calendar-index"))
+        log.info("Calendar on %s: %d months/views loaded", page.final_url, len(out))
+        return out
 
 
 PDF_HINT = re.compile(r"\.pdf(?:$|[?#&])", re.I)
@@ -428,6 +495,14 @@ def extract_links(html: str, base_url: str) -> Tuple[List[str], List[str]]:
                 pdfs.append(n)
                 return True
         return False
+
+    # Paginated archives (<link rel="next">), e.g. /events/page/2/
+    for link in soup.find_all("link", href=True):
+        rel = " ".join(link.get("rel") or []).lower()
+        if "next" in rel or "prev" in rel:
+            n = normalise_url(urljoin(base_url, link["href"]))
+            if n:
+                pages.append(n)
 
     for tag in soup.find_all(True):
         for attr, val in tag.attrs.items():

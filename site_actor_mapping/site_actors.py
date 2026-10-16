@@ -39,6 +39,7 @@ from extract import (
     OrgExtractor, ParsedPage, ThemeSet, Watchlist, acronym_pairs, block_hash,
     canonical_key, load_stoplist, parse_html, parse_pdf_text, split_sentences,
 )
+from linked_sites import PLATFORM_HOSTS, Site, SiteRegistry, collect_targets, crawl_linked
 from report import write_report
 
 log = logging.getLogger("site_actors")
@@ -75,6 +76,33 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     g.add_argument("--refresh", action="store_true", help="Refetch pages already in the cache")
     g.add_argument("--no-crawl", action="store_true", help="Only analyse pages already cached")
 
+    g = ap.add_argument_group("calendars")
+    g.add_argument("--no-calendar", action="store_true",
+                   help="Do not load the other months of embedded calendars")
+    g.add_argument("--calendar-from", metavar="YYYY-MM",
+                   help="Earliest calendar month (default: go back until 12 empty months in a row)")
+    g.add_argument("--calendar-to", metavar="YYYY-MM",
+                   help="Latest calendar month (default: go forward until 3 empty months in a row)")
+    g.add_argument("--calendar-click", metavar="CSS",
+                   help="For calendars not detected automatically: CSS selector of the 'previous "
+                        "month' button to click in headless Chromium (needs playwright)")
+    g.add_argument("--calendar-clicks", type=int, default=24, help="Clicks for --calendar-click")
+    g.add_argument("--calendar-url", metavar="REGEX",
+                   help="Only treat pages whose URL matches as calendars, e.g. '/events/?$'")
+
+    g = ap.add_argument_group("linked websites")
+    g.add_argument("--follow-links", choices=["none", "events", "all"], default="none",
+                   help="Also crawl websites linked from calendar events ('events') or from any "
+                        "page's main content ('all'), and analyse them too")
+    g.add_argument("--follow-max-sites", type=int, default=60, help="At most this many linked sites")
+    g.add_argument("--follow-max-pages", type=int, default=25, help="Pages per linked site")
+    g.add_argument("--follow-max-depth", type=int, default=1,
+                   help="Clicks from the linked page within each linked site")
+    g.add_argument("--follow-skip", action="append", default=[], metavar="HOST",
+                   help="Never follow links to this host (repeatable)")
+    g.add_argument("--follow-single-page", action="append", default=[], metavar="HOST",
+                   help="Read only the linked page on this host, never crawl it (repeatable)")
+
     g = ap.add_argument_group("extraction")
     g.add_argument("--themes", type=Path, default=HERE / "example_themes.txt",
                    help="Theme file ([theme] headers followed by terms)")
@@ -102,47 +130,62 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
 
 
 # --------------------------------------------------------------------------
-def load_pages(cache: PageCache, hosts: Set[str], include_subdomains: bool,
+def load_pages(cache: PageCache, registry: SiteRegistry,
                strip_regions: bool) -> Tuple[List[ParsedPage], List[dict]]:
-    """Parse cached pages of this site, plus PDFs found on them (wherever hosted).
+    """Parse cached pages that belong to a registered site, plus PDFs found on
+    them (wherever hosted), tagging each with its site.
 
     Also returns an inventory of every PDF seen, including those that could
     not be read, so gaps in coverage are visible.
     """
-    def ours(url: str) -> bool:
-        host = registered_host(urlparse(url).netloc)
-        return host in hosts or (include_subdomains and any(host.endswith("." + h) for h in hosts))
-
     pages: Dict[str, ParsedPage] = {}
     pdf_rows: List[dict] = []
+
+    def tag(page: ParsedPage, site, cp) -> ParsedPage:
+        page.site, page.site_role = site.key, site.role
+        page.via_event = site.via_events(url=cp.url) if site.role == "linked" else ""
+        page.kind, page.label = cp.kind, cp.label
+        if cp.kind == "calendar":
+            page.title = f"Calendar {cp.label}"
+        return page
+
     for cp in cache:
+        if cp.kind == "calendar-index":
+            continue
         if cp.is_pdf:
-            if not (ours(cp.url) or (cp.referrer and ours(cp.referrer))):
+            site = (registry.site_of(cp.url) or registry.site_of(cp.final_url)
+                    or (registry.site_of(cp.referrer) if cp.referrer else None))
+            if site is None:
                 continue
             n_pages = cp.body.count("\f") + 1 if cp.body else 0
             words = len(cp.body.split())
             status = ("http error" if cp.status >= 400 else
                       "no text layer (scanned?)" if not words else "read")
-            pdf_rows.append({"pdf_url": cp.url, "embedded_in": cp.referrer, "title": cp.title,
-                             "date": cp.date, "pages": n_pages, "words": words,
+            pdf_rows.append({"pdf_url": cp.url, "embedded_in": cp.referrer, "site": site.key,
+                             "title": cp.title, "date": cp.date, "pages": n_pages, "words": words,
                              "status": f"{status} ({cp.status})" if cp.status >= 400 else status})
             if status != "read" or cp.url in pages:
                 continue
             try:
-                pages[cp.url] = parse_pdf_text(cp.body, cp.url, cp.depth, cp.title, cp.date, cp.referrer)
+                pages[cp.url] = tag(parse_pdf_text(cp.body, cp.url, cp.depth, cp.title, cp.date,
+                                                   cp.referrer), site, cp)
             except Exception as exc:  # noqa: BLE001 - one bad file should not stop the run
                 log.warning("Could not parse PDF %s: %s", cp.url, exc)
             continue
-        if cp.status >= 400 or not cp.body or not ours(cp.final_url):
+        if cp.status >= 400 or not cp.body:
+            continue
+        site = registry.site_of(cp.url) or registry.site_of(cp.final_url)
+        if site is None:
             continue
         key = cp.final_url
         if key in pages:          # redirects: several requested URLs, one final page
             continue
         try:
-            pages[key] = parse_html(cp.body, cp.final_url, cp.depth, strip_regions)
+            pages[key] = tag(parse_html(cp.body, cp.final_url, cp.depth, strip_regions), site, cp)
         except Exception as exc:  # noqa: BLE001 - one bad page should not stop the run
             log.warning("Could not parse %s: %s", cp.final_url, exc)
-    return sorted(pages.values(), key=lambda p: (p.depth, p.url)), pdf_rows
+    order = {"main": 0, "linked": 1}
+    return sorted(pages.values(), key=lambda p: (order.get(p.site_role, 2), p.site, p.depth, p.url)), pdf_rows
 
 
 def window(sents, idx: int, n: int, text: str) -> str:
@@ -164,19 +207,40 @@ def main(argv: Optional[List[str]] = None) -> int:
     cache = PageCache(out / "cache")
     start_urls = [normalise_url(u if "://" in u else "https://" + u) for u in args.start_urls]
 
+    base_cfg = CrawlConfig(
+        start_urls=start_urls, max_pages=args.max_pages, max_depth=args.max_depth,
+        delay=args.delay, timeout=args.timeout, user_agent=args.user_agent,
+        respect_robots=not args.ignore_robots, include_subdomains=args.include_subdomains,
+        include_patterns=args.include, exclude_patterns=args.exclude,
+        include_pdfs=not args.no_pdfs, pdfs_from_other_hosts=not args.pdfs_same_site_only,
+        max_pdf_mb=args.max_pdf_mb, use_sitemap=args.use_sitemap,
+        render_js=args.render_js, refresh=args.refresh,
+        calendar=not args.no_calendar, calendar_from=args.calendar_from,
+        calendar_to=args.calendar_to, calendar_click=args.calendar_click,
+        calendar_clicks=args.calendar_clicks, calendar_url_pattern=args.calendar_url,
+    )
     if not args.no_crawl:
-        Crawler(CrawlConfig(
-            start_urls=start_urls, max_pages=args.max_pages, max_depth=args.max_depth,
-            delay=args.delay, timeout=args.timeout, user_agent=args.user_agent,
-            respect_robots=not args.ignore_robots, include_subdomains=args.include_subdomains,
-            include_patterns=args.include, exclude_patterns=args.exclude,
-            include_pdfs=not args.no_pdfs, pdfs_from_other_hosts=not args.pdfs_same_site_only,
-            max_pdf_mb=args.max_pdf_mb, use_sitemap=args.use_sitemap,
-            render_js=args.render_js, refresh=args.refresh,
-        ), cache).crawl()
+        Crawler(base_cfg, cache).crawl()
 
     hosts = {registered_host(urlparse(u).netloc) for u in start_urls}
-    pages, pdf_rows = load_pages(cache, hosts, args.include_subdomains, args.strip_regions)
+    main_sites = [Site(h, "main", [u for u in start_urls if registered_host(urlparse(u).netloc) == h])
+                  for h in sorted(hosts)]
+    registry = SiteRegistry(main_sites, args.include_subdomains)
+    if args.no_crawl:
+        registry = SiteRegistry.load(out / "sites.json", args.include_subdomains) or registry
+    elif args.follow_links != "none":
+        targets = collect_targets(cache, hosts, args.follow_links,
+                                  {registered_host(h) for h in args.follow_skip})
+        log.info("Following %d linked URLs on %d websites", len(targets),
+                 len({registered_host(urlparse(u).netloc) for u in targets}))
+        linked = crawl_linked(targets, cache, base_cfg, args.follow_max_sites,
+                              args.follow_max_pages, args.follow_max_depth,
+                              PLATFORM_HOSTS | {registered_host(h) for h in args.follow_single_page})
+        registry = SiteRegistry(main_sites + linked, args.include_subdomains)
+    if not args.no_crawl:
+        registry.save(out / "sites.json")
+
+    pages, pdf_rows = load_pages(cache, registry, args.strip_regions)
     if not pages:
         log.error("No pages to analyse in %s", cache.root)
         return 1
@@ -192,11 +256,13 @@ def main(argv: Optional[List[str]] = None) -> int:
                              args.spacy_model, use_links=not args.no_links)
 
     # Paragraphs repeated across many pages (menus, footers, partner strips).
+    # Counted per site, so one linked site's footer is judged against that site only.
     block_pages: Counter = Counter()
+    site_pages: Counter = Counter(p.site for p in pages)
     for p in pages:
-        block_pages.update({block_hash(b.text) for b in p.blocks if b.text})
-    bp_threshold = max(3, args.boilerplate_share * len(pages))
-    boilerplate = {h for h, n in block_pages.items() if n > bp_threshold}
+        block_pages.update({(p.site, block_hash(b.text)) for b in p.blocks if b.text})
+    boilerplate = {k for k, n in block_pages.items()
+                   if n > max(3, args.boilerplate_share * site_pages[k[0]])}
 
     # Acronym definitions across the whole site.
     acronyms: Dict[str, str] = {}
@@ -238,7 +304,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                 continue
             for m in mentions:
                 m.key = acronyms.get(m.key, m.key)
-            is_bp = block_hash(block.text) in boilerplate if block.text else True
+            is_bp = (page.site, block_hash(block.text)) in boilerplate if block.text else True
             sents = split_sentences(block.text) if block.text else []
             keys_here = sorted({m.key for m in mentions})
             for m in mentions:
@@ -265,6 +331,10 @@ def main(argv: Optional[List[str]] = None) -> int:
                     "methods": "+".join(sorted(m.methods)),
                     "org_type": m.org_type,
                     "link_domain": m.link_domain,
+                    "site": page.site,
+                    "site_role": page.site_role,
+                    "via_event": page.via_event,
+                    "calendar_month": page.label if page.kind == "calendar" else "",
                     "url": page.url,
                     "page_title": page.title,
                     "page_date": page.date,
@@ -283,6 +353,8 @@ def main(argv: Optional[List[str]] = None) -> int:
                     "co_mentioned_keys": [k for k in keys_here if k != m.key],
                 })
         page_rows.append({
+            "site": page.site, "site_role": page.site_role, "via_event": page.via_event,
+            "kind": page.kind or ("pdf" if page.is_pdf else "page"), "calendar_month": page.label,
             "url": page.url, "title": page.title, "date": page.date, "depth": page.depth,
             "is_pdf": page.is_pdf, "embedded_in": page.referrer, "words": sum(len(b.text.split()) for b in page.blocks),
             "org_mentions": n_mentions,
@@ -298,8 +370,17 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     write_outputs(out, kept, orgs, page_rows, themes, theme_terms, theme_pages, len(pages), args)
     write_csv(out / "pdfs.csv", pdf_rows,
-              ["pdf_url", "embedded_in", "title", "date", "pages", "words", "status"])
-    write_report(out / "report.html", orgs, kept, themes, theme_pages, len(pages), start_urls)
+              ["pdf_url", "embedded_in", "site", "title", "date", "pages", "words", "status"])
+    analysed = Counter(p.site for p in pages)
+    write_csv(out / "sites.csv", [{
+        "site": st.key, "role": st.role, "status": st.status or ("crawled" if st.role == "main" else ""),
+        "pages_analysed": analysed.get(st.key, 0), "single_page_platform": st.platform,
+        "start_urls": " ".join(st.start_urls[:10]), "via_events": st.via_events(50),
+        "via_months": "; ".join(sorted({v.month for v in st.via if v.month})),
+        "via_pages": " ".join(sorted({v.page for v in st.via})[:20]),
+    } for st in registry.sites])
+    write_report(out / "report.html", orgs, kept, themes, theme_pages, len(pages), start_urls,
+                 [st.key for st in registry.sites if analysed.get(st.key)])
     log.info("Done: %d organisations, %d mentions, %d pages -> %s",
              len(orgs), len(kept), len(pages), out)
     return 0
@@ -327,6 +408,7 @@ def aggregate(rows: List[dict], extractor: OrgExtractor, acr_display: Dict[str, 
             for part in filter(None, r["paragraph_themes"].split("; ")):
                 theme_counts[part.rsplit(" (", 1)[0]] += 1
         pages = {r["url"] for r in rs}
+        sites = Counter(r["site"] for r in distinct)
         orgs.append({
             "organisation": name,
             "org_key": key,
@@ -336,6 +418,9 @@ def aggregate(rows: List[dict], extractor: OrgExtractor, acr_display: Dict[str, 
             "substantive_mentions": len(substantive),
             "total_mentions": len(rs),
             "pages": len(pages),
+            "sites": len(sites),
+            "on_main_site": any(r["site_role"] == "main" for r in rs),
+            "site_list": "; ".join(f"{k} ({n})" for k, n in sites.most_common(10)),
             "boilerplate_only": not substantive,
             "methods": "; ".join(f"{m} ({n})" for m, n in methods.most_common()),
             "variants": "; ".join(f"{f} ({n})" for f, n in forms.most_common(8)),
@@ -382,7 +467,8 @@ def write_outputs(out: Path, mentions: List[dict], orgs: List[dict], page_rows: 
                   themes: ThemeSet, theme_terms: Dict[str, Counter], theme_pages: Counter,
                   n_pages: int, args: argparse.Namespace) -> None:
     mention_fields = [
-        "organisation", "surface_form", "org_type", "methods", "url", "page_title", "page_date",
+        "organisation", "surface_form", "org_type", "methods", "site", "site_role", "via_event",
+        "calendar_month", "url", "page_title", "page_date",
         "is_pdf", "embedded_in", "region", "boilerplate", "repeat_context", "context_themes", "context_theme_terms",
         "paragraph_themes", "page_themes", "sentence", "context", "paragraph", "co_mentioned",
         "link_domain", "org_key",

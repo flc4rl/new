@@ -218,6 +218,11 @@ class ParsedPage:
     blocks: List[Block]
     is_pdf: bool = False
     referrer: str = ""        # for PDFs: the page that linked or embedded it
+    kind: str = ""            # "calendar" for a loaded calendar month
+    label: str = ""           # calendar month (YYYY-MM) or click number
+    site: str = ""            # site key from the registry (host, or platform page)
+    site_role: str = ""       # "main" or "linked"
+    via_event: str = ""       # for linked sites: event(s) whose link led there
 
 
 @dataclass
@@ -264,6 +269,7 @@ def canonical_key(name: str) -> str:
 
 def tidy_surface(name: str) -> str:
     name = clean_ws(name).strip(" \t\"'“”‘’«»()[]{}:;,.-–—|/")
+    name = re.sub(r"\s*[\[(][^\])]*$", "", name)          # unclosed "[DE" / "(UK"
     name = re.sub(r"^(?:the|The|THE)\s+", "", name)
     name = re.sub(r"[’']s$", "", name)
     return name
