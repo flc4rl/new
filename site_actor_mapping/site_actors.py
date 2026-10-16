@@ -31,7 +31,7 @@ import re
 import sys
 from collections import Counter, defaultdict
 from pathlib import Path
-from typing import Dict, List, Optional, Set
+from typing import Dict, List, Optional, Set, Tuple
 from urllib.parse import urlparse
 
 from crawler import CrawlConfig, Crawler, PageCache, normalise_url, registered_host
@@ -63,7 +63,12 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
                    help="Only crawl URLs matching this regex (repeatable)")
     g.add_argument("--exclude", action="append", default=[], metavar="REGEX",
                    help="Skip URLs matching this regex (repeatable), e.g. '/tag/' '/shop/'")
-    g.add_argument("--include-pdfs", action="store_true", help="Also crawl linked PDFs (needs pypdf)")
+    g.add_argument("--no-pdfs", action="store_true",
+                   help="Skip PDFs (by default linked and embedded PDFs are read, wherever hosted)")
+    g.add_argument("--pdfs-same-site-only", action="store_true",
+                   help="Only read PDFs hosted on the site itself, not on Drive, CDNs etc.")
+    g.add_argument("--max-pdf-mb", type=float, default=50.0, help="Skip PDFs larger than this")
+    g.add_argument("--include-pdfs", action="store_true", help=argparse.SUPPRESS)  # now the default
     g.add_argument("--use-sitemap", action="store_true", help="Seed the crawl from sitemap.xml")
     g.add_argument("--render-js", action="store_true",
                    help="Render pages in headless Chromium (needs playwright) for JS-heavy sites")
@@ -98,25 +103,46 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
 
 # --------------------------------------------------------------------------
 def load_pages(cache: PageCache, hosts: Set[str], include_subdomains: bool,
-               strip_regions: bool) -> List[ParsedPage]:
+               strip_regions: bool) -> Tuple[List[ParsedPage], List[dict]]:
+    """Parse cached pages of this site, plus PDFs found on them (wherever hosted).
+
+    Also returns an inventory of every PDF seen, including those that could
+    not be read, so gaps in coverage are visible.
+    """
+    def ours(url: str) -> bool:
+        host = registered_host(urlparse(url).netloc)
+        return host in hosts or (include_subdomains and any(host.endswith("." + h) for h in hosts))
+
     pages: Dict[str, ParsedPage] = {}
+    pdf_rows: List[dict] = []
     for cp in cache:
-        if cp.status >= 400 or not cp.body:
+        if cp.is_pdf:
+            if not (ours(cp.url) or (cp.referrer and ours(cp.referrer))):
+                continue
+            n_pages = cp.body.count("\f") + 1 if cp.body else 0
+            words = len(cp.body.split())
+            status = ("http error" if cp.status >= 400 else
+                      "no text layer (scanned?)" if not words else "read")
+            pdf_rows.append({"pdf_url": cp.url, "embedded_in": cp.referrer, "title": cp.title,
+                             "date": cp.date, "pages": n_pages, "words": words,
+                             "status": f"{status} ({cp.status})" if cp.status >= 400 else status})
+            if status != "read" or cp.url in pages:
+                continue
+            try:
+                pages[cp.url] = parse_pdf_text(cp.body, cp.url, cp.depth, cp.title, cp.date, cp.referrer)
+            except Exception as exc:  # noqa: BLE001 - one bad file should not stop the run
+                log.warning("Could not parse PDF %s: %s", cp.url, exc)
             continue
-        host = registered_host(urlparse(cp.final_url).netloc)
-        if not (host in hosts or (include_subdomains and any(host.endswith("." + h) for h in hosts))):
+        if cp.status >= 400 or not cp.body or not ours(cp.final_url):
             continue
         key = cp.final_url
         if key in pages:          # redirects: several requested URLs, one final page
             continue
         try:
-            if cp.is_pdf:
-                pages[key] = parse_pdf_text(cp.body, cp.final_url, cp.depth)
-            else:
-                pages[key] = parse_html(cp.body, cp.final_url, cp.depth, strip_regions)
+            pages[key] = parse_html(cp.body, cp.final_url, cp.depth, strip_regions)
         except Exception as exc:  # noqa: BLE001 - one bad page should not stop the run
             log.warning("Could not parse %s: %s", cp.final_url, exc)
-    return sorted(pages.values(), key=lambda p: (p.depth, p.url))
+    return sorted(pages.values(), key=lambda p: (p.depth, p.url)), pdf_rows
 
 
 def window(sents, idx: int, n: int, text: str) -> str:
@@ -144,16 +170,18 @@ def main(argv: Optional[List[str]] = None) -> int:
             delay=args.delay, timeout=args.timeout, user_agent=args.user_agent,
             respect_robots=not args.ignore_robots, include_subdomains=args.include_subdomains,
             include_patterns=args.include, exclude_patterns=args.exclude,
-            include_pdfs=args.include_pdfs, use_sitemap=args.use_sitemap,
+            include_pdfs=not args.no_pdfs, pdfs_from_other_hosts=not args.pdfs_same_site_only,
+            max_pdf_mb=args.max_pdf_mb, use_sitemap=args.use_sitemap,
             render_js=args.render_js, refresh=args.refresh,
         ), cache).crawl()
 
     hosts = {registered_host(urlparse(u).netloc) for u in start_urls}
-    pages = load_pages(cache, hosts, args.include_subdomains, args.strip_regions)
+    pages, pdf_rows = load_pages(cache, hosts, args.include_subdomains, args.strip_regions)
     if not pages:
         log.error("No pages to analyse in %s", cache.root)
         return 1
-    log.info("Analysing %d pages", len(pages))
+    log.info("Analysing %d pages, including %d PDFs (%d PDFs found in total)",
+             len(pages), sum(p.is_pdf for p in pages), len(pdf_rows))
 
     themes = ThemeSet.load(args.themes if args.themes and args.themes.exists() else None)
     focus = {t.strip() for t in args.focus_themes.split(",") if t.strip()} or set(themes.names)
@@ -241,6 +269,8 @@ def main(argv: Optional[List[str]] = None) -> int:
                     "page_title": page.title,
                     "page_date": page.date,
                     "region": block.region,
+                    "is_pdf": page.is_pdf,
+                    "embedded_in": page.referrer,
                     "boilerplate": is_bp,
                     "repeat_context": duplicate,
                     "sentence": sentence,
@@ -254,7 +284,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                 })
         page_rows.append({
             "url": page.url, "title": page.title, "date": page.date, "depth": page.depth,
-            "is_pdf": page.is_pdf, "words": sum(len(b.text.split()) for b in page.blocks),
+            "is_pdf": page.is_pdf, "embedded_in": page.referrer, "words": sum(len(b.text.split()) for b in page.blocks),
             "org_mentions": n_mentions,
             **{f"theme:{t}": page_hits.get(t, 0) for t in themes.names},
         })
@@ -267,6 +297,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     kept = [r for r in mention_rows if r["organisation"]]
 
     write_outputs(out, kept, orgs, page_rows, themes, theme_terms, theme_pages, len(pages), args)
+    write_csv(out / "pdfs.csv", pdf_rows,
+              ["pdf_url", "embedded_in", "title", "date", "pages", "words", "status"])
     write_report(out / "report.html", orgs, kept, themes, theme_pages, len(pages), start_urls)
     log.info("Done: %d organisations, %d mentions, %d pages -> %s",
              len(orgs), len(kept), len(pages), out)
@@ -351,7 +383,7 @@ def write_outputs(out: Path, mentions: List[dict], orgs: List[dict], page_rows: 
                   n_pages: int, args: argparse.Namespace) -> None:
     mention_fields = [
         "organisation", "surface_form", "org_type", "methods", "url", "page_title", "page_date",
-        "region", "boilerplate", "repeat_context", "context_themes", "context_theme_terms",
+        "is_pdf", "embedded_in", "region", "boilerplate", "repeat_context", "context_themes", "context_theme_terms",
         "paragraph_themes", "page_themes", "sentence", "context", "paragraph", "co_mentioned",
         "link_domain", "org_key",
     ]

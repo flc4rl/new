@@ -21,7 +21,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, Iterator, List, Optional, Set, Tuple
 from urllib import robotparser
-from urllib.parse import urldefrag, urljoin, urlparse, urlunparse
+from urllib.parse import parse_qs, urldefrag, urljoin, urlparse, urlunparse
 
 import requests
 from bs4 import BeautifulSoup, UnicodeDammit
@@ -54,7 +54,9 @@ class CrawlConfig:
     include_subdomains: bool = False
     include_patterns: List[str] = field(default_factory=list)
     exclude_patterns: List[str] = field(default_factory=list)
-    include_pdfs: bool = False
+    include_pdfs: bool = True
+    pdfs_from_other_hosts: bool = True   # embedded via Drive, a CDN, a partner's site ...
+    max_pdf_mb: float = 50.0
     use_sitemap: bool = False
     render_js: bool = False
     refresh: bool = False
@@ -68,8 +70,11 @@ class CachedPage:
     content_type: str
     depth: int
     fetched_at: float
-    body: str            # HTML, or extracted text for PDFs
+    body: str            # HTML, or extracted text for PDFs (pages separated by \f)
     is_pdf: bool = False
+    referrer: str = ""   # for PDFs: the page that linked or embedded it
+    title: str = ""      # for PDFs: document metadata title
+    date: str = ""       # for PDFs: document metadata creation date
 
 
 def normalise_url(url: str) -> str:
@@ -164,6 +169,17 @@ class Crawler:
             return False
         return True
 
+    def pdf_in_scope(self, url: str) -> bool:
+        """PDFs found on an in-scope page are read even when hosted elsewhere, but
+        never crawled onwards; --include patterns apply to pages, not to PDFs."""
+        if not self.cfg.include_pdfs or any(r.search(url) for r in self.exclude_re):
+            return False
+        if self.cfg.pdfs_from_other_hosts:
+            return True
+        host = registered_host(urlparse(url).netloc)
+        return host in self.hosts or (self.cfg.include_subdomains
+                                      and any(host.endswith("." + h) for h in self.hosts))
+
     def allowed(self, url: str) -> bool:
         if not self.cfg.respect_robots:
             return True
@@ -202,10 +218,11 @@ class Crawler:
         finally:
             page.close()
 
-    def fetch(self, url: str, depth: int) -> Optional[CachedPage]:
+    def fetch(self, url: str, depth: int, referrer: str = "",
+              expect_pdf: bool = False) -> Optional[CachedPage]:
         self._wait()
         try:
-            resp = self.session.get(url, timeout=self.cfg.timeout, allow_redirects=True)
+            resp = self.session.get(url, timeout=self.cfg.timeout, allow_redirects=True, stream=True)
         except requests.RequestException as exc:
             log.warning("Fetch failed %s: %s", url, exc)
             return None
@@ -213,14 +230,24 @@ class Crawler:
         final_url = normalise_url(resp.url) or url
         if resp.status_code >= 400:
             log.info("HTTP %s for %s", resp.status_code, url)
-            return CachedPage(url, final_url, resp.status_code, ctype, depth, time.time(), "")
+            resp.close()
+            return CachedPage(url, final_url, resp.status_code, ctype, depth, time.time(), "",
+                              is_pdf=expect_pdf, referrer=referrer)
 
-        if "pdf" in ctype or url.lower().endswith(".pdf"):
-            if not self.cfg.include_pdfs:
+        looks_pdf = "pdf" in ctype or urlparse(final_url).path.lower().endswith(".pdf")
+        if looks_pdf or expect_pdf:
+            data = self._read_capped(resp)
+            if data is None or not data.lstrip()[:5].startswith(b"%PDF"):
+                if expect_pdf and data is not None:
+                    log.info("Not a PDF after all (%s): %s", ctype or "no type", url)
                 return None
+            text, title, date = pdf_to_text(data)
+            if not text.strip():
+                log.warning("PDF has no extractable text (scanned image?): %s", url)
             return CachedPage(url, final_url, resp.status_code, ctype, depth, time.time(),
-                              pdf_to_text(resp.content), is_pdf=True)
+                              text, is_pdf=True, referrer=referrer, title=title, date=date)
         if "html" not in ctype and "xml" not in ctype:
+            resp.close()
             return None
 
         if "charset=" in ctype:
@@ -234,6 +261,23 @@ class Crawler:
             except Exception as exc:  # noqa: BLE001 - playwright raises many types
                 log.warning("JS render failed for %s (%s); using raw HTML", url, exc)
         return CachedPage(url, final_url, resp.status_code, ctype, depth, time.time(), body)
+
+    def _read_capped(self, resp: requests.Response) -> Optional[bytes]:
+        cap = int(self.cfg.max_pdf_mb * 1024 * 1024)
+        chunks, size = [], 0
+        try:
+            for chunk in resp.iter_content(64 * 1024):
+                size += len(chunk)
+                if size > cap:
+                    log.warning("PDF larger than %.0f MB skipped: %s", self.cfg.max_pdf_mb, resp.url)
+                    return None
+                chunks.append(chunk)
+        except requests.RequestException as exc:
+            log.warning("Download failed %s: %s", resp.url, exc)
+            return None
+        finally:
+            resp.close()
+        return b"".join(chunks)
 
     # ------------------------------------------------------------------ seeds
     def sitemap_urls(self) -> List[str]:
@@ -274,30 +318,30 @@ class Crawler:
 
     # ------------------------------------------------------------------ crawl
     def crawl(self) -> int:
-        queue: deque = deque()
+        queue: deque = deque()   # (url, depth, referrer, is_pdf)
         seen: Set[str] = set()
         for u in self.cfg.start_urls:
             n = normalise_url(u)
             if n:
-                queue.append((n, 0))
+                queue.append((n, 0, "", False))
                 seen.add(n)
         if self.cfg.use_sitemap:
             for u in self.sitemap_urls():
                 n = normalise_url(u)
                 if n and n not in seen and self.in_scope(n):
-                    queue.append((n, 1))
+                    queue.append((n, 1, "", False))
                     seen.add(n)
 
         fetched = 0
         try:
             while queue and fetched < self.cfg.max_pages:
-                url, depth = queue.popleft()
+                url, depth, referrer, is_pdf = queue.popleft()
                 page = None if self.cfg.refresh else self.cache.get(url)
                 if page is None:
                     if not self.allowed(url):
                         log.info("robots.txt disallows %s", url)
                         continue
-                    page = self.fetch(url, depth)
+                    page = self.fetch(url, depth, referrer, expect_pdf=is_pdf)
                     if page is None:
                         continue
                     self.cache.put(page)
@@ -306,12 +350,20 @@ class Crawler:
                     continue
                 fetched += 1
 
-                if page.is_pdf or not page.body or depth >= self.cfg.max_depth:
+                if page.is_pdf or not page.body:
                     continue
-                for link in extract_links(page.body, page.final_url):
+                links, pdfs = extract_links(page.body, page.final_url)
+                # PDFs on a page are part of that page, so they are read even at max depth.
+                for link in pdfs:
+                    if link not in seen and self.pdf_in_scope(link):
+                        seen.add(link)
+                        queue.appendleft((link, depth + 1, page.final_url, True))
+                if depth >= self.cfg.max_depth:
+                    continue
+                for link in links:
                     if link not in seen and self.in_scope(link):
                         seen.add(link)
-                        queue.append((link, depth + 1))
+                        queue.append((link, depth + 1, "", False))
         finally:
             if self._browser is not None:
                 self._browser.close()
@@ -321,32 +373,105 @@ class Crawler:
         return fetched
 
 
-def extract_links(html: str, base_url: str) -> List[str]:
+PDF_HINT = re.compile(r"\.pdf(?:$|[?#&])", re.I)
+FILE_HOSTS = ("drive.google.com", "docs.google.com")
+
+
+def unwrap_pdf_url(url: str) -> Optional[str]:
+    """Turn viewer / preview URLs into the URL of the PDF itself, or None."""
+    p = urlparse(url)
+    host = p.netloc.lower()
+    qs = parse_qs(p.query)
+    # Google Drive: /file/d/<id>/view|preview, open?id=<id>, uc?id=<id>
+    if host == "drive.google.com":
+        m = re.search(r"/file/d/([\w-]{10,})", p.path)
+        fid = m.group(1) if m else (qs.get("id") or [None])[0]
+        return f"https://drive.google.com/uc?export=download&id={fid}" if fid else None
+    # Google Docs viewer and pdf.js-style viewers: ?url=... / ?file=... / ?pdf=...
+    for key in ("url", "file", "pdf", "src", "document"):
+        for v in qs.get(key, []):
+            if PDF_HINT.search(v) or v.lower().endswith(".pdf"):
+                return urljoin(url, v)
+    # Google Docs / Slides shared as documents: fetch their PDF export.
+    if host == "docs.google.com":
+        m = re.match(r"/(document|presentation)/d/([\w-]{10,})", p.path)
+        if m:
+            kind, did = m.groups()
+            return f"https://docs.google.com/{kind}/d/{did}/export?format=pdf"
+        return None
+    if PDF_HINT.search(p.path) or p.path.lower().endswith(".pdf"):
+        return url
+    return None
+
+
+def extract_links(html: str, base_url: str) -> Tuple[List[str], List[str]]:
+    """Return (page links, PDF URLs).
+
+    PDFs are picked up from ordinary links, from embedded viewers (<iframe>,
+    <embed>, <object>), from any attribute holding a .pdf URL (data-* attributes
+    used by WordPress PDF plugins), and from Google Drive / Docs / pdf.js
+    viewer URLs, which are unwrapped to the file itself.
+    """
     soup = BeautifulSoup(html, "lxml")
     base_tag = soup.find("base", href=True)
     if base_tag:
         base_url = urljoin(base_url, base_tag["href"])
-    out = []
-    for a in soup.find_all("a", href=True):
-        href = a["href"].strip()
-        if href.startswith(("mailto:", "tel:", "javascript:", "#")):
-            continue
-        n = normalise_url(urljoin(base_url, href))
-        if n:
-            out.append(n)
-    return out
+    pages: List[str] = []
+    pdfs: List[str] = []
+
+    def add_pdf(raw: str) -> bool:
+        full = urljoin(base_url, raw.strip())
+        target = unwrap_pdf_url(full)
+        if target:
+            n = normalise_url(target)
+            if n:
+                pdfs.append(n)
+                return True
+        return False
+
+    for tag in soup.find_all(True):
+        for attr, val in tag.attrs.items():
+            if not isinstance(val, str) or not val.strip():
+                continue
+            v = val.strip()
+            if v.startswith(("mailto:", "tel:", "javascript:", "#", "data:")):
+                continue
+            is_src = attr in ("href", "src", "data") or attr.startswith("data-")
+            if is_src and (PDF_HINT.search(v) or any(h in v for h in FILE_HOSTS)
+                           or tag.name in ("iframe", "embed", "object")):
+                if add_pdf(v):
+                    continue
+            if tag.name == "a" and attr == "href":
+                n = normalise_url(urljoin(base_url, v))
+                if n:
+                    pages.append(n)
+    return pages, pdfs
 
 
-def pdf_to_text(data: bytes) -> str:
+def pdf_to_text(data: bytes) -> Tuple[str, str, str]:
+    """Text of a PDF with pages separated by form feeds, plus metadata title and date."""
     try:
-        from pypdf import PdfReader  # optional dependency
+        from pypdf import PdfReader
     except ImportError:
         log.warning("pypdf not installed; PDF skipped (pip install pypdf)")
-        return ""
+        return "", "", ""
     import io
     try:
         reader = PdfReader(io.BytesIO(data))
-        return "\n\n".join((pg.extract_text() or "") for pg in reader.pages)
+        pages = []
+        for pg in reader.pages:
+            try:
+                pages.append(pg.extract_text() or "")
+            except Exception:  # noqa: BLE001 - one broken page should not lose the rest
+                pages.append("")
+        meta = reader.metadata or {}
+        title = str(meta.get("/Title") or "").strip()
+        if title.lower() in ("untitled", "untitled document", "microsoft word", "document"):
+            title = ""
+        raw_date = str(meta.get("/CreationDate") or "")
+        m = re.match(r"D?:?(\d{4})(\d{2})?(\d{2})?", raw_date)
+        date = "-".join(x for x in m.groups() if x) if m else ""
+        return "\f".join(pages), title, date
     except Exception as exc:  # noqa: BLE001 - pypdf raises many types
         log.warning("PDF parse failed: %s", exc)
-        return ""
+        return "", "", ""

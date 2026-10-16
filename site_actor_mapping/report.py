@@ -19,7 +19,7 @@ def write_report(path: Path, orgs: List[dict], mentions: List[dict], themes, the
             continue
         ctx[r["org_key"]].append({
             "s": r["surface_form"], "c": r["context"], "u": r["url"], "t": r["page_title"],
-            "d": r["page_date"], "m": r["methods"], "b": r["boilerplate"], "g": r["region"],
+            "d": r["page_date"], "m": r["methods"], "b": r["boilerplate"], "g": r["region"], "e": r.get("embedded_in", ""),
             "th": r["paragraph_themes"], "tt": r["context_theme_terms"], "co": r["co_mentioned"],
         })
     data = {
@@ -140,6 +140,7 @@ function show(k) {
    ${list.map(c => `<div class="ctx"><p>${hl(c)}</p><div class="meta">
      <a href="${esc(c.u)}" target="_blank" rel="noopener">${esc(c.t || c.u)}</a>${c.d?" · "+esc(c.d):""}
      · ${esc(c.m)}${c.g!=="main"?" · "+esc(c.g):""}${c.b?" · boilerplate":""}
+     ${c.e?`<br>PDF found on <a href="${esc(c.e)}" target="_blank" rel="noopener">${esc(c.e)}</a>`:""}
      ${c.th?"<br>Paragraph themes: "+esc(c.th):""}${c.co?"<br>Also mentioned: "+esc(c.co):""}</div></div>`).join("")
      || '<div class="empty">No contexts for this theme filter.</div>'}`;
   $("#detail").scrollTop = 0;

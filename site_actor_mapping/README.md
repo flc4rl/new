@@ -29,7 +29,11 @@ python site_actors.py https://example.org \
   --max-pages 300 --delay 1
 ```
 
-Then open `results/example_org/report.html` in a browser.
+Then open `results/example_org/report.html` in a browser. `--output-dir` is
+resolved against the folder you run the command from, so running it inside
+`site_actor_mapping/` puts results in `site_actor_mapping/results/` (ignored
+by git, so cached pages are never committed by accident). An absolute path
+such as `~/Documents/climate_camp` works too.
 
 Every fetched page is cached in `<output-dir>/cache/`, so an interrupted
 crawl resumes where it stopped, and you can re-run the analysis with revised
@@ -48,7 +52,9 @@ python site_actors.py https://example.org -o results/example_org --no-crawl \
 | `--delay` | Seconds between requests (default 1; be polite to small sites) |
 | `--include REGEX` / `--exclude REGEX` | Restrict the crawl, e.g. `--include /news/` or `--exclude '/tag/|/shop/'` (repeatable) |
 | `--use-sitemap` | Seed from `sitemap.xml`; finds pages not linked from menus |
-| `--include-pdfs` | Also read linked PDFs (needs `pypdf`) |
+| `--no-pdfs` | Skip PDFs (by default they are read; see below) |
+| `--pdfs-same-site-only` | Only read PDFs hosted on the site itself |
+| `--max-pdf-mb` | Skip PDFs larger than this (default 50) |
 | `--render-js` | Render pages in headless Chromium for sites that build content with JavaScript (needs `playwright`) |
 | `--include-subdomains` | Treat `blog.example.org` etc. as part of the site |
 | `--ignore-robots` | Do not honour `robots.txt` (only where you are entitled to) |
@@ -109,6 +115,22 @@ excludes them, and the report hides organisations that only appear there by
 default. Identical passages seen on several pages count once
 (`repeat_context`).
 
+## PDFs
+
+PDFs found on a crawled page are read by default, however they are placed:
+ordinary links, embedded viewers (`<iframe>`, `<embed>`, `<object>`),
+WordPress PDF plugins that keep the file URL in a `data-` attribute, pdf.js
+and Google Docs viewers (`viewer.html?file=…`, `docs.google.com/viewer?url=…`),
+Google Drive previews, and Google Docs or Slides shared as documents (fetched
+as their PDF export). They are read even when hosted on another domain (Drive,
+a CDN, a partner's site) and even at the maximum crawl depth, but nothing
+beyond them is crawled. `--include` patterns restrict pages, not PDFs.
+
+Mentions in PDFs carry the page number (`region` = `pdf p.3`) and the web page
+the PDF was found on (`embedded_in`). Scanned PDFs without a text layer cannot
+be read (no OCR); they are listed in `pdfs.csv` as `no text layer (scanned?)`
+so you can see what was missed.
+
 ## Outputs (written to `--output-dir`)
 
 - `report.html` — interactive browser: filter organisations by name, theme,
@@ -128,6 +150,8 @@ default. Identical passages seen on several pages count once
   weighted edge list for Gephi or similar.
 - `pages.csv` — one row per page: title, date, depth, word count, number of
   organisation mentions and hits per theme.
+- `pdfs.csv` — every PDF found: URL, the page it was on, title, date, page
+  and word counts, and whether it could be read.
 - `summary.json` — theme coverage (pages, share of pages, top matched terms),
   organisation-type and confidence breakdowns.
 

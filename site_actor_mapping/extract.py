@@ -148,8 +148,11 @@ GENERIC = {
     "partner", "partners", "member", "members", "main", "other", "related", "local",
     "national", "international", "regional", "global", "european", "our", "contact",
     "about", "home", "menu", "more", "new", "all", "general", "annual", "public",
-    "private", "student", "students", "working", "social", "community", "communities",
-    "civil", "human", "rights", "women", "youth", "research", "affiliated",
+    "private", "working", "affiliated",
+    # document / event furniture that NER tags as ORG, notably in PDFs
+    "workshop", "workshops", "session", "sessions", "programme", "program", "call-out",
+    "callout", "statement", "report", "agenda", "schedule", "timetable", "camp", "day",
+    "week", "plenary", "panel", "talk", "talks", "training", "briefing", "appendix",
 }
 MONTHS = {
     "january", "february", "march", "april", "may", "june", "july", "august", "september",
@@ -165,6 +168,11 @@ LINK_TEXT_JUNK = re.compile(
     re.I,
 )
 
+FILE_SHARING_HOSTS = {
+    "drive.google.com", "docs.google.com", "dropbox.com", "dl.dropboxusercontent.com",
+    "onedrive.live.com", "1drv.ms", "box.com", "wetransfer.com", "issuu.com", "scribd.com",
+    "cloud.disroot.org", "nextcloud.com", "framadrive.org", "pad.riseup.net", "cryptpad.fr",
+}
 BLOCK_TAGS = {
     "p", "div", "li", "ul", "ol", "dl", "dd", "dt", "h1", "h2", "h3", "h4", "h5", "h6",
     "section", "article", "main", "header", "footer", "nav", "aside", "blockquote",
@@ -209,6 +217,7 @@ class ParsedPage:
     depth: int
     blocks: List[Block]
     is_pdf: bool = False
+    referrer: str = ""        # for PDFs: the page that linked or embedded it
 
 
 @dataclass
@@ -407,6 +416,8 @@ def _collect_link(a: Tag, links: List[Link], base_url: str, own_host: str) -> No
     host = urlparse(full).netloc.lower().removeprefix("www.")
     if not host or host == own_host or host.endswith("." + own_host):
         return
+    if host in FILE_SHARING_HOSTS or re.search(r"\.(pdf|docx?|odt|pptx?|xlsx?)(?:$|[?#])", full, re.I):
+        return  # a document, not an organisation's website
     text = clean_ws(a.get_text(" "))
     if not text:
         img = a.find("img")
@@ -444,11 +455,37 @@ def page_date(soup: BeautifulSoup) -> str:
     return ""
 
 
-def parse_pdf_text(text: str, url: str, depth: int) -> ParsedPage:
-    paras = [clean_ws(re.sub(r"-\n(?=\w)", "", p)) for p in re.split(r"\n\s*\n", text)]
-    title = Path(urlparse(url).path).name
-    return ParsedPage(url=url, title=title, date="", depth=depth,
-                      blocks=[Block(text=p, region="main") for p in paras if p], is_pdf=True)
+def _pdf_chunks(para: str, target: int = 600, limit: int = 1500) -> List[str]:
+    """pypdf often returns a whole page without blank lines. Break long text at
+    lines that end a sentence, then merge the pieces back into paragraph-sized
+    chunks so each mention keeps a useful amount of context."""
+    text = clean_ws(para)
+    if len(text) <= limit:
+        return [text] if text else []
+    pieces = [clean_ws(x) for x in re.split(r"(?<=[.!?:;])\s*\n(?=\s*[A-ZÀ-Ý0-9•\-–])", para)]
+    chunks, cur = [], ""
+    for piece in filter(None, pieces):
+        cur = f"{cur} {piece}".strip()
+        if len(cur) >= target:
+            chunks.append(cur)
+            cur = ""
+    if cur:
+        chunks.append(cur)
+    return chunks
+
+
+def parse_pdf_text(text: str, url: str, depth: int, title: str = "", date: str = "",
+                   referrer: str = "") -> ParsedPage:
+    """PDF text (pages separated by form feeds) -> paragraph blocks tagged "pdf p.N"."""
+    blocks: List[Block] = []
+    for page_no, page_text in enumerate(text.split("\f"), 1):
+        page_text = re.sub(r"-\n(?=[a-zà-ÿ])", "", page_text)          # re-join hyphenated words
+        for para in re.split(r"\n\s*\n", page_text):
+            for chunk in _pdf_chunks(para):
+                blocks.append(Block(text=chunk, region=f"pdf p.{page_no}"))
+    title = title or Path(urlparse(url).path).name or url
+    return ParsedPage(url=url, title=title, date=date, depth=depth, blocks=blocks,
+                      is_pdf=True, referrer=referrer)
 
 
 # --------------------------------------------------------------------------
@@ -713,7 +750,8 @@ def _split_conjoined(toks: list) -> List[list]:
     for k, t in enumerate(toks):
         if t.group(0).casefold() in CONJUNCTIONS and 0 < k < len(toks) - 1:
             left = toks[:k]
-            if left[-1].group(0).casefold() in HEAD_TO_TYPE:
+            last = left[-1].group(0).casefold()
+            if last in HEAD_TO_TYPE or (last in TRAILING_TO_TYPE and len(left) >= 2):
                 right = toks[k + 1:]
                 while right and right[0].group(0).casefold() in CONNECTORS:
                     right = right[1:]
@@ -741,13 +779,37 @@ def _descriptor_type(descriptor: str) -> str:
     return "organisation (generic)"
 
 
-def acronym_pairs(text: str) -> List[Tuple[str, str]]:
-    """Find "Long Name (ACR)" definitions whose word initials plausibly spell the acronym.
+def _spells(acr: str, words: List[str], skips: int = 1) -> bool:
+    """Can `acr` be spelt from `words`? Each word contributes its initial (lower-case
+    connectors and up to `skips` capitalised words may contribute nothing), and
+    may add further letters from inside it, for compounds such as
+    "Klimagerechtigkeit" -> KG."""
+    if not acr:
+        return all(not w[:1].isupper() for w in words) or skips >= sum(w[:1].isupper() for w in words)
+    if not words:
+        return False
+    w, rest = words[0], words[1:]
+    key = canonical_key(w).replace(" ", "")
+    if key[:1] == acr[0]:
+        # consume the initial, then optionally more letters from inside the word
+        i, j = 1, 1
+        while True:
+            if _spells(acr[j:], rest, skips):
+                return True
+            pos = key.find(acr[j], i) if j < len(acr) else -1
+            if pos < 0:
+                break
+            i, j = pos + 1, j + 1
+    if not w[:1].isupper():
+        return _spells(acr, rest, skips)
+    return skips > 0 and _spells(acr, rest, skips - 1)
 
-    The acronym's letters must be an in-order subsequence of the initials of
-    the long form ("Independent Workers Union of Great Britain" -> IWGB), and
-    the long form starts at the nearest word beginning with its first letter.
-    """
+
+def acronym_pairs(text: str) -> List[Tuple[str, str]]:
+    """Find "Long Name (ACR)" definitions whose words plausibly spell the acronym
+    ("Independent Workers Union of Great Britain (IWGB)", "Kollektiv
+    Klimagerechtigkeit (KKG)"). The long form starts at the nearest word that
+    begins with the acronym's first letter and can spell it."""
     out = []
     for m in ACRONYM_DEF_RE.finditer(text):
         long_form, acr = m.group(1).strip(), m.group(2).replace(".", "")
@@ -755,11 +817,9 @@ def acronym_pairs(text: str) -> List[Tuple[str, str]]:
         letters = canonical_key(acr).replace(" ", "")
         for i in range(len(words) - 1, max(-1, len(words) - len(acr) - 5), -1):
             tail = words[i:]
-            initials = [canonical_key(w)[:1] for w in tail]
-            if not initials or initials[0] != letters[:1] or not tail[0][:1].isupper():
+            if len(tail) < 2 or not tail[0][:1].isupper():
                 continue
-            it = iter(initials)
-            if len(tail) >= 2 and all(ch in it for ch in letters):
+            if canonical_key(tail[0])[:1] == letters[:1] and _spells(letters, tail):
                 out.append((tidy_surface(" ".join(tail)), acr))
                 break
     return out
