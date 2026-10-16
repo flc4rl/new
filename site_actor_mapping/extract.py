@@ -42,7 +42,7 @@ ORG_HEADS: Dict[str, List[str]] = {
     "collective": [
         "collective", "collectives", "kollektiv", "kollektive", "collettivo", "collettiva",
         "collettivi", "colectivo", "colectiva", "colectivos", "collectif", "collectifs",
-        "coletivo", "coletiva", "crew", "squat", "commune",
+        "coletivo", "coletiva", "crew", "squat", "commune", "collectief", "kollektief",
     ],
     "ngo / charity": [
         "ngo", "ngos", "ong", "onlus", "charity", "nonprofit", "non-profit", "aps", "odv",
@@ -54,6 +54,7 @@ ORG_HEADS: Dict[str, List[str]] = {
         "plataforma", "plateforme", "plattform", "federation", "federazione",
         "federación", "fédération", "föderation", "confederation", "confederazione",
         "forum", "foro", "consortium", "consorzio", "consorcio",
+        "netwerk", "coalitie", "alliantie", "federatie", "platformen",
     ],
     "association / union": [
         "association", "associations", "associazione", "associazioni", "asociación",
@@ -61,10 +62,11 @@ ORG_HEADS: Dict[str, List[str]] = {
         "unión", "sindacato", "sindicato", "syndicat", "gewerkschaft", "guild", "league",
         "lega", "liga", "ligue", "club", "circle", "circolo", "círculo", "cercle",
         "chapter", "fellowship", "brotherhood", "sisterhood", "solidarity",
+        "vereniging", "bond", "vakbond", "unie", "kring", "genootschap",
     ],
     "foundation / trust": [
         "foundation", "fondazione", "fundación", "fundacion", "fondation", "stiftung",
-        "fundação", "trust", "fund", "fondo", "fonds", "endowment",
+        "fundação", "trust", "fund", "fondo", "fonds", "endowment", "stichting",
     ],
     "movement / campaign": [
         "movement", "movements", "movimento", "movimiento", "mouvement", "bewegung",
@@ -72,11 +74,13 @@ ORG_HEADS: Dict[str, List[str]] = {
         "iniziativa", "iniciativa", "initiativ", "front", "fronte", "frente",
         "brigade", "brigata", "brigada", "rebellion", "resistance", "resistenza",
         "resistencia", "résistance", "uprising", "insurgency",
+        "beweging", "campagne", "initiatief", "verzet", "actiegroep", "brigades",
     ],
     "committee / council / assembly": [
         "committee", "comitato", "comité", "comite", "komitee", "council", "consiglio",
         "consejo", "conseil",
         "commission", "commissione", "comisión", "board", "caucus", "tribunal",
+        "comité", "raad", "werkgroep",
         "assemblea", "asamblea", "assemblée",
     ],
     "research / education / culture": [
@@ -86,15 +90,16 @@ ORG_HEADS: Dict[str, List[str]] = {
         "university", "università", "universidad", "université", "universität",
         "school", "scuola", "escuela", "école", "college", "museum", "museo", "musée",
         "library", "biblioteca", "archive", "archives", "archivio", "archivo",
-        "think-tank", "radio",
+        "think-tank", "radio", "instituut", "centrum", "universiteit", "hogeschool",
     ],
-    "cooperative": ["cooperative", "co-op", "coop", "cooperativa", "coopérative", "genossenschaft"],
-    "party": ["party", "partito", "partido", "parti", "partei"],
+    "cooperative": ["cooperative", "co-op", "coop", "cooperativa", "coopérative", "genossenschaft",
+                    "coöperatie", "cooperatie"],
+    "party": ["party", "partito", "partido", "parti", "partei", "partij"],
     "organisation (generic)": [
         "organisation", "organization", "organisations", "organizations",
         "organizzazione", "organización", "organisationen", "group", "groups",
         "gruppo", "gruppi", "grupo", "grupos", "groupe", "gruppe", "project", "progetto",
-        "proyecto", "projet", "projekt", "agency", "agenzia", "agencia", "agence",
+        "proyecto", "projet", "projekt", "project", "groep", "agency", "agenzia", "agencia", "agence",
         "office", "secretariat", "mission", "service", "services", "space", "spazio",
         "espacio", "espace",
     ],
@@ -129,8 +134,9 @@ CONNECTORS = {
     "die", "das", "dos", "das", "do", "contra", "contre", "gegen", "sans", "sin", "senza",
     "pour", "al", "alla", "allo", "ai", "agli", "nel", "nella", "sul", "sulla", "a", "à",
     "i", "il", "lo", "gli", "l", "d", "von", "van", "zu", "zum", "zur", "em", "no", "na",
+    "het", "voor", "en", "tegen", "met", "op", "uit", "der", "den", "ter", "te",
 }
-CONJUNCTIONS = {"and", "&", "e", "y", "et", "und"}
+CONJUNCTIONS = {"and", "&", "e", "y", "et", "und", "en"}
 LEADING_STRIP = {
     "the", "a", "an", "our", "their", "this", "these", "that", "those", "its", "his", "her",
     "my", "your", "all", "every", "with", "and", "in", "on", "at", "by", "from", "for", "of",
@@ -149,6 +155,8 @@ LEADING_STRIP = {
     "voir", "afficher", "catégories", "categories", "tags", "posted", "publié", "publiée",
     "photo", "photos", "merci", "thanks", "c’est", "c'est", "cette", "ce", "cet", "ces",
     "whilst", "earlier", "later", "highlighting", "construisons", "rejoignez", "venez",
+    "het", "een", "onze", "ons", "jouw", "jullie", "deze", "dit", "die", "wij", "zij",
+    "waarom", "hoe", "wat", "wie", "waar", "wanneer", "lees", "bekijk", "meer",
     "warum", "wieder", "welche", "welcher", "welches", "hinweise", "bitte", "dickes",
     "breite", "vollständiges", "wie", "was", "wer", "wo", "wann",
     "we", "it", "they", "he", "she", "i", "us", "them", "wir", "sie", "es", "er", "ihr",
@@ -205,6 +213,8 @@ CTA_WORDS = {
     "lesen", "spenden", "mitmachen", "unterstütze", "unterstützen", "zum", "zur",
     "direkt", "finanziell", "komm", "kommt", "mach", "macht", "spende", "melde", "meldet",
     "werde", "hilf", "helft", "schau", "abonniere", "teile",
+    "doneer", "steun", "lees", "bekijk", "word", "sluit", "meld", "schrijf", "kom", "doe",
+    "ontdek", "volg", "deel", "download", "klik", "hier",
 }
 LINK_SKIP_DOMAINS = {
     "facebook.com", "instagram.com", "twitter.com", "x.com", "t.co", "tiktok.com", "linkedin.com",
@@ -394,11 +404,14 @@ class ThemeSet:
         if term.startswith("re:"):
             return re.compile(term[3:], re.I)
         term = term.strip('"')
+        infix = term.startswith("*")      # *fascis* also matches inside compounds
         prefix = term.endswith("*")
-        body = term.rstrip("*")
+        body = term.strip("*")
         parts = [re.escape(p) for p in re.split(r"[\s-]+", body)]
         pat = r"[\s\-]+".join(parts)
-        return re.compile(r"(?<!\w)" + pat + (r"\w*" if prefix else r"(?!\w)"), re.I)
+        return re.compile((r"(?<![\w-])[\w-]*" if infix else r"(?<!\w)") + pat
+                          + (r"\w*" if prefix else r"(?!\w)"),
+                          re.I)
 
     def find(self, text: str) -> Dict[str, List[Tuple[int, int, str]]]:
         hits: Dict[str, List[Tuple[int, int, str]]] = {}

@@ -13,7 +13,9 @@ counted.
 pip install -r requirements.txt
 python -m spacy download en_core_web_sm
 python -m spacy download fr_core_news_sm     # plus any other language you will meet:
-# it_core_news_sm, de_core_news_sm, es_core_news_sm, pt_core_news_sm, nl_core_news_sm
+python -m spacy download de_core_news_sm
+python -m spacy download nl_core_news_sm
+# it_core_news_sm, es_core_news_sm, pt_core_news_sm
 ```
 
 Each page's language is read from the page (or guessed from its words) and
@@ -138,6 +140,43 @@ the footer is itself informative, but counted separately: `substantive_mentions`
 excludes them, and the report hides organisations that only appear there by
 default. Identical passages seen on several pages count once
 (`repeat_context`).
+
+## Master files
+
+Every run ends by writing two condensed files (as `.xlsx` and `.csv`):
+
+- **`master_network`** — one row per event × organisation × source page:
+  event name, event date, event link, organisation, type, confidence, how many
+  times it was mentioned on that source, the source link, and an example
+  passage. A second sheet (`events`, xlsx only) lists each event once with all
+  of its organisations. Organisations found on a site's general pages (not tied
+  to an event) are kept under "(not tied to an event)".
+- **`master_themes`** — one row per theme term found: theme, term, event,
+  event date, event link, source link, the sentence, two sentences before and
+  after, the organisations named in that paragraph, and whether the same
+  sentence was already found elsewhere (`duplicate_of`).
+
+How pages are tied to events: an event page to itself; a page of a website
+linked from an event to that event (other pages of the same website to every
+event that linked to it); a PDF to the page it was found on; calendar cells and
+lines of a seed PDF to the events named in them (in a seed PDF, description
+lines belong to the entry above them). Event dates come from the calendar
+cells (start to end), the event page's structured data, or the date written
+next to a link in a seed PDF.
+
+To merge several runs into one pair of master files:
+
+```bash
+python make_master.py results/run1 results/run2 -o results/master [--min-confidence medium]
+```
+
+## Seed PDFs (link lists)
+
+`--seed-pdf FILE` reads every link in a PDF (clickable links and URLs written
+out in the text), takes the event name and date from the link's line (or the
+lines just above it), and crawls each linked website like a linked site. The
+PDF's own text is analysed too. Repeat the option for several PDFs; it can be
+combined with a website, or used without one.
 
 ## Calendars and linked websites
 

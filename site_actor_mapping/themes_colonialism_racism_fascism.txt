@@ -1,60 +1,59 @@
-# Standing themes: colonialism, racism, fascism and their variations.
+# Standing themes: colonialism, racism, fascism and their variations, in
+# English, Italian, Spanish, French, German, Portuguese and Dutch.
+#
 # Deliberately broader than frame_analysis/taxonomy.py: activist websites use
 # the adjectives ("colonial violence", "racist borders") analytically, so
 # they are included here. Remove them if you want the stricter definition.
 #
-# Each theme lists English terms first, then Italian, Spanish, French, German
-# and Portuguese. Prefix terms (*) already cover many cognates, e.g.
-# "colonial*" matches colonialismo / colonialisme / colonialista.
+# Syntax (see example_themes.txt): term* = prefix; *term* = also inside
+# compound words (Technofascism, Ökofaschismus, klimaatracisme, neokolonial);
+# re: = regular expression. Overlapping matches count once (the longest).
 
 [colonialism]
-colonial*
-coloniz*
-colonis*
-decolon*
-anticolonial*
-anti-colonial*
-neocolonial*
-neo-colonial*
-postcolonial*
-post-colonial*
-settler colonial*
+# --- any language: word stems, also inside compounds
+*colonial*
+*coloniz*
+*colonis*
+*kolonial*
+*kolonis*
+*koloniaal*
+*koloniale*
+*kolonisatie*
+*imperialis*
+*imperialism*
+*impérialis*
+*imperialisme*
+*extractivis*
+*extraktivis*
+*extrativis*
+*estrattivis*
+*extractivisme*
+*dekoloni*
+*descoloni*
+*décoloni*
+*decoloni*
+# --- English
 settler state*
-climate colonialism
-green colonialism
-carbon colonialism
-imperialis*
-anti-imperialis*
 empire
 empires
-extractivis*
-neo-extractivis*
 land back
 indigenous sovereignty
 global south
-reparation*
+reparations
+climate reparations
 climate debt
-# IT / ES / FR / DE / PT
-coloni*zzazion*
-decoloni*
-colonizaci*
-colonisation*
-colonização
-descoloni*
-décoloni*
-anticoloniali*
-neocoloniali*
-postcoloniali*
-imperialism*
-imperialis*
-impérialis*
+# --- Italian / Spanish / French / Portuguese
 impero
 imperio
 império
-estrattivis*
-extractivis*
-extrativis*
-extractivism*
+sud globale
+sur global
+sud global
+sul global
+debito climatico
+deuda climática
+dette climatique
+dívida climática
 # Reparations: in these languages the word also means "repair", so only the
 # political phrases count.
 riparazioni storiche
@@ -67,34 +66,45 @@ réparations coloniales
 réparation historique
 reparações históricas
 reparações coloniais
-sud globale
-sur global
-sud global
-sul global
-debito climatico
-deuda climática
-dette climatique
-Kolonial*
-Kolonis*
-Dekoloni*
-Antikolonial*
-Neokolonial*
-Postkolonial*
-Antiimperialis*
-Anti-Imperialis*
-Imperialis*
-Extraktivis*
-Reparation*
-Klimaschuld*
+# --- German
 globale Süden
 globalen Süden
+Klimaschuld*
+Reparationen
+# --- Dutch
+mondiale zuiden
+globale zuiden
+herstelbetalingen
+klimaatschuld
+re:\bkolonie(?:s|ën)?\b
 
 [racism]
-racism
-racist*
-anti-racis*
-antiracis*
-raciali*
+# --- any language: stems, also inside compounds
+*racis*
+*razzis*
+*rassis*
+*racism*
+*racisme*
+*raciali*
+*racializ*
+*razzializ*
+*racialis*
+*rassifizier*
+*xenofob*
+*xenophob*
+*xénophob*
+*vreemdelingenhaat*
+*islamofob*
+*islamophob*
+*islamfeindlich*
+*antisemit*
+*antisémit*
+*anti-semit*
+*afrophob*
+*suprematis*
+*supremacis*
+*suprémacis*
+# --- English
 racial justice
 racial capitalism
 racial violence
@@ -102,57 +112,31 @@ white supremac*
 white privilege
 environmental racism
 climate apartheid
-xenophob*
-islamophob*
-antisemit*
-anti-semit*
-afrophob*
 anti-blackness
 hostile environment
 racial profiling
-# IT / ES / FR / DE / PT
-razzis*
-antirazzis*
-anti-razzis*
-razzializ*
-suprematis*
-xenofob*
-islamofob*
-antisemitis*
-racis*
-antirracis*
-racializ*
-supremacis*
-racisme
-raciste*
-antiracis*
-racialis*
-suprémacis*
-xénophob*
-islamophob*
-antisémit*
-Rassismus
-rassistisch*
-Antirassis*
-Rassifizier*
+# --- German / Dutch
 Fremdenfeindlich*
-Islamfeindlich*
-racismo
-racista*
-antirracista*
+etnisch profileren
+etnische profilering
+witte suprematie
+wit privilege
+# Note: Dutch "racisme", "antiracisme", "klimaatracisme" etc. are covered by *racis*.
 
 [fascism]
-fascis*
-antifascis*
-anti-fascis*
+# --- any language: stems, also inside compounds (Technofascism, ecofascism ...)
+*fascis*
+*faschis*
+*fascism*
+*fascisme*
+*fascista*
+*facist*
 antifa
-ecofascis*
-eco-fascis*
-neo-fascis*
-neofascis*
 nazi*
 neo-nazi*
 neonazi*
+*neonazi*
+# --- English
 far right
 far-right
 extreme right
@@ -161,30 +145,27 @@ alt-right
 white nationalis*
 ethnonationalis*
 authoritarianis*
-# IT / ES / FR / DE / PT
-fascis*
-antifascis*
-neofascis*
-ecofascis*
+# --- Italian / Spanish / Portuguese / French
 estrema destra
 ultradestra
 autoritarism*
-fascism*
-antifascism*
 ultraderecha
 extrema derecha
 extrema direita
 ultradireita
 autoritarismo
-fascisme
-antifascisme
 extrême droite
 extrême-droite
 autoritarisme
-Faschis*
-Antifaschis*
-Ökofaschis*
-Neonazi*
+# --- German
 Rechtsextrem*
 Rechtsradikal*
 Autoritarismus
+# --- Dutch
+extreemrechts
+extreem-rechts
+extreem rechts
+radicaal-rechts
+radicaal rechts
+uiterst rechts
+autoritarisme

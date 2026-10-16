@@ -3,5 +3,7 @@ beautifulsoup4>=4.12
 lxml>=4.9
 spacy>=3.7
 pypdf>=4.0
+pdfplumber>=0.10
+openpyxl>=3.1
 # Optional:
 #   playwright>=1.40    --render-js (then: playwright install chromium)

@@ -57,12 +57,14 @@ class Via:
     event: str = ""       # event title (link text in the calendar, or the event page title)
     month: str = ""       # calendar month the event appeared in, if any
     target: str = ""      # the linked URL itself
+    event_url: str = ""   # key of the event in the event index (event page, or the link)
+    date: str = ""        # event date as found next to the link (seed PDFs)
 
 
 @dataclass
 class Site:
     key: str                              # registered host, or host+path for platform pages
-    role: str                             # "main" or "linked"
+    role: str                             # "main", "linked" or "seed" (a seed PDF)
     start_urls: List[str] = field(default_factory=list)
     platform: bool = False
     via: List[Via] = field(default_factory=list)
@@ -203,7 +205,7 @@ def collect_targets(cache: PageCache, main_hosts: Set[str], mode: str,
         for cal in calendars:
             for url, text in _external_links(cal.body, cal.referrer or cal.url, main_hosts, False):
                 targets[url].append(Via(page=cal.referrer or cal.url, event=text, month=cal.label,
-                                        target=url))
+                                        target=url, event_url=url))
             for url, text in _on_site_links(cal.body, cal.referrer or cal.url, main_hosts):
                 if url != cal.referrer and "calendar_" not in url:
                     event_pages.setdefault(url, Via(page=url, event=text, month=cal.label))
@@ -227,12 +229,18 @@ def collect_targets(cache: PageCache, main_hosts: Set[str], mode: str,
         event = via.event or title_of(p)
         for url, _text in links:
             if url not in common:
-                targets[url].append(Via(page=p.final_url, event=event, month=via.month, target=url))
+                targets[url].append(Via(page=p.final_url, event=event, month=via.month, target=url,
+                                        event_url=p.final_url if mode == "events" else ""))
 
     # The same event is listed on several calendar views; keep each (page, event, month) once.
     for url, vias in targets.items():
         targets[url] = list({(v.page, v.event, v.month): v for v in vias}.values())
 
+    return filter_targets(targets, extra_skip)
+
+
+def filter_targets(targets: Dict[str, List[Via]], extra_skip: Set[str]) -> Dict[str, List[Via]]:
+    """Drop links to social media and other hosts never worth crawling."""
     skip = SKIP_HOSTS | extra_skip
     return {u: v for u, v in targets.items()
             if not host_matches(registered_host(urlparse(u).netloc), skip)}
