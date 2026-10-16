@@ -272,6 +272,7 @@ GENERIC = {
     "callout", "statement", "report", "agenda", "schedule", "timetable", "camp", "day",
     "week", "plenary", "panel", "talk", "talks", "training", "briefing", "appendix",
     "morning", "closing", "opening", "evening", "weekly", "monthly", "assembly", "assemblies",
+    "summer", "winter", "spring", "autumn", "faq", "navigation", "newsletter", "kontakt", "impressum",
     "press", "release", "media", "team", "guide", "handbook", "toolkit", "policy", "values",
 }
 MONTHS = {
@@ -366,7 +367,7 @@ TITLE_SEPARATOR = re.compile(r"\s[-–—|]\s|:\s|\s/\s")
 # Prepositions of place right before a name: "in Lingen", "à Bure", "bei Rügen", "near Brunsbüttel".
 LOCATIVE_BEFORE = re.compile(
     r"(?<!\w)(?:in|at|near|around|outside|from|to|à|au|aux|en|près\s+de|près\s+d['’]|vers|sur|"
-    r"nach|bei|im|am|aus|nahe|vor|bij|te|nabij|naar|i|på|vid|nära|ved|nær|a|cerca\s+de|"
+    r"nach|bei|im|am|aus|nahe|vor|auf|bij|te|op|nabij|naar|i|på|vid|nära|ved|nær|a|cerca\s+de|"
     r"vicino\s+a|presso|em|perto\s+de)\s+(?:the\s+|der\s+|den\s+|la\s+|le\s+|l['’])?$", re.I)
 PERSON_APPOS = re.compile(r"(?<!\w)(?:of|de|du|des|di|del|della|dei|von|vom|do|da|member|membre|"
                           r"membro|miembro|mitglied|militante?s?|activist[ae]?s?|attivist[ae]|"
@@ -467,7 +468,9 @@ def tidy_surface(name: str) -> str:
     name = clean_ws(name).strip(" \t\"'“”‘’«»()[]{}:;,.-–—|/")
     name = re.sub(r"\s*[\[(][^\])]*$", "", name)          # unclosed "[DE" / "(UK"
     name = re.sub(r"^[^\w\"“«(]+|[^\w.)\"”»]+$", "", name).strip()  # emoji, bullets, "!"
-    name = re.sub(r"^(?:the|The|THE)\s+", "", name)
+    name = re.sub(r"^(?:the|The|THE|De|Het|Den|Det|Die|Der|Das)\s+(?=\S+\s+\S)", "", name)
+    # a trailing article picked up from the next phrase: "GROUPE ÉCOUTE Le", "Kollektiv X Die"
+    name = re.sub(r"\s+(?:Le|La|Les|L|The|Die|Der|Das|De|Het|El|Il|Lo|Los|Las)$", "", name)
     name = re.sub(r"[’']s$", "", name)
     return name
 

@@ -73,3 +73,16 @@ WEEKDAY_ABBREVIATIONS = {"mo", "tu", "we", "th", "fr", "sa", "su", "mon", "tue",
                          "vr", "za", "zo", "lun", "mar", "mer", "jeu", "ven", "sam", "dim", "lø", "sø",
                          "ti", "on", "to", "fre", "lör", "sön"}
 PLACES |= WEEKDAY_ABBREVIATIONS
+
+# Nationalities / language adjectives NER tags as organisations ("Dutch", "German").
+NATIONALITIES = {
+    "dutch", "german", "french", "english", "british", "irish", "scottish", "welsh", "italian", "spanish",
+    "portuguese", "belgian", "austrian", "swiss", "danish", "swedish", "norwegian", "finnish", "polish",
+    "czech", "slovak", "slovenian", "croatian", "serbian", "greek", "romanian", "bulgarian", "hungarian",
+    "ukrainian", "russian", "turkish", "kurdish", "european", "american", "african", "asian", "indian",
+    "chinese", "nigerian", "brazilian", "mexican", "israeli", "palestinian", "lithuanian", "latvian",
+    "estonian", "catalan", "basque", "deutsch", "deutsche", "francais", "francaise", "nederlandse",
+    "allemand", "allemande", "anglais", "italien", "espagnol", "neerlandais", "europeen", "europeenne",
+}
+PLACES |= NATIONALITIES | {"india", "china", "japan", "nigeria", "brazil", "mexico", "australia", "canada",
+                           "south africa", "new zealand", "indonesia", "philippines", "colombia", "peru"}

@@ -220,6 +220,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     args = parse_args(argv)
     logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO,
                         format="%(asctime)s %(levelname)s %(message)s", datefmt="%H:%M:%S")
+    for noisy in ("pdfminer", "pdfplumber", "pypdf"):   # harmless font warnings, thousands of them
+        logging.getLogger(noisy).setLevel(logging.ERROR)
     out = args.output_dir
     out.mkdir(parents=True, exist_ok=True)
     cache = PageCache(out / "cache")
