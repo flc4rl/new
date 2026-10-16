@@ -1,0 +1,12 @@
+# Known organisations to always catch, one per line:
+#   Canonical Name | alias | alias ...
+# Aliases of six characters or fewer written in capitals (acronyms) are
+# matched case-sensitively, everything else case-insensitively.
+# Watchlist matches are rated high confidence and override the stoplist.
+
+Amnesty International | Amnesty
+Médecins Sans Frontières | Doctors Without Borders | MSF
+Sea-Watch
+Black Lives Matter | BLM
+Extinction Rebellion | XR
+Human Rights Watch | HRW

@@ -1,0 +1,42 @@
+# Names to ignore, one per line (matched after normalisation: case, accents,
+# a leading "The" and punctuation are ignored). Prefix with re: for a regex
+# tested against the surface form. Edit freely for your site.
+
+# Platforms and site furniture that NER often tags as organisations
+Facebook
+Twitter
+X
+Instagram
+YouTube
+LinkedIn
+TikTok
+Telegram
+WhatsApp
+Mastodon
+Bluesky
+Flickr
+Vimeo
+Spotify
+SoundCloud
+Patreon
+PayPal
+Google
+Google Maps
+Google Analytics
+WordPress
+Squarespace
+Wix
+Mailchimp
+Creative Commons
+Cookie Policy
+Privacy Policy
+Terms of Use
+Newsletter
+RSS
+PDF
+
+re:^(?:all )?rights reserved
+re:^copyright\b
+re:^(?:read|learn|find out|click|see) more\b
+re:^(?:home|about|contact|donate|menu|search|shop|news|blog|events?)$
+re:^\W*\d[\d\s./-]*$

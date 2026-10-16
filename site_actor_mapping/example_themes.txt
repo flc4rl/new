@@ -1,0 +1,64 @@
+# Theme file for site_actors.py
+#
+# Format:
+#   [theme name]          starts a theme
+#   term                  whole-word, case-insensitive; spaces/hyphens interchangeable
+#   term*                 prefix match: "decolon*" matches decolonial, decolonisation ...
+#   re:regex              raw regular expression (case-insensitive)
+#   # comment
+#
+# These are illustrative. Replace them with the themes of your study; add
+# translations of each term if the site is multilingual.
+
+[migration and borders]
+migra*
+refugee*
+asylum
+border*
+deportation*
+detention centre*
+detention center*
+undocumented
+sans-papiers
+search and rescue
+
+[racism and anti-racism]
+racism
+anti-racis*
+antiracis*
+racialis*
+racializ*
+white supremac*
+discriminat*
+
+[colonialism and decoloniality]
+colonialis*
+colonialit*
+decolon*
+anti-colonial*
+settler colonial*
+imperialis*
+
+[gender and feminism]
+feminis*
+patriarch*
+gender-based violence
+LGBT*
+queer
+transfeminis*
+
+[climate and environment]
+climate justice
+climate crisis
+ecocide
+extractivis*
+fossil fuel*
+environmental justice
+
+[labour and economic justice]
+trade union*
+workers' rights
+precari*
+strike*
+exploitation
+re:\bliving wage\b
