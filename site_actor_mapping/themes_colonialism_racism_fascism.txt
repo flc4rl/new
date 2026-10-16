@@ -1,5 +1,5 @@
 # Standing themes: colonialism, racism, fascism and their variations, in
-# English, Italian, Spanish, French, German, Portuguese and Dutch.
+# English, Italian, Spanish, French, German, Portuguese, Dutch, Danish and Swedish.
 #
 # Deliberately broader than frame_analysis/taxonomy.py: activist websites use
 # the adjectives ("colonial violence", "racist borders") analytically, so
@@ -77,6 +77,14 @@ globale zuiden
 herstelbetalingen
 klimaatschuld
 re:\bkolonie(?:s|ën)?\b
+# --- Danish / Swedish (kolonialisme, kolonialism, imperialisme, afkolonisering,
+#     extraktivism are covered by the stems above)
+globale syd
+det globale syd
+globala syd
+globala södern
+klimagæld
+klimatskuld
 
 [racism]
 # --- any language: stems, also inside compounds
@@ -121,7 +129,16 @@ etnisch profileren
 etnische profilering
 witte suprematie
 wit privilege
-# Note: Dutch "racisme", "antiracisme", "klimaatracisme" etc. are covered by *racis*.
+# Note: Dutch/Danish "racisme", "antiracisme", "klimaatracisme" etc. are covered by *racis*.
+# --- Danish / Swedish
+*rasis*
+fremmedhad
+fremmedfjendsk*
+främlingsfientlig*
+främlingsfientlighet
+etnisk profilering
+vit överhöghet
+hvid overherredømme
 
 [fascism]
 # --- any language: stems, also inside compounds (Technofascism, ecofascism ...)
@@ -161,6 +178,16 @@ autoritarisme
 Rechtsextrem*
 Rechtsradikal*
 Autoritarismus
+# --- Danish / Swedish (fascisme, antifascisme, fascism, nazism are covered above)
+højreekstrem*
+yderste højre
+højreradikal*
+högerextrem*
+extremhöger*
+yttersta högern
+högerradikal*
+auktoritarism
+autoritarisme
 # --- Dutch
 extreemrechts
 extreem-rechts

@@ -56,7 +56,8 @@ GENERIC_LINK_TEXT = re.compile(
     r"(?i)(here|link|lien|website|site|web|more|more info\w*|info\w*|read more|register|sign up|"
     r"tickets?|programme|program|plus d['’]infos?|en savoir plus|inscription|mehr( infos?)?|"
     r"weitere infos|anmeldung|meer info|meer informatie|aanmelden|más info|más información|"
-    r"inscripción|maggiori informazioni|info e iscrizioni|hier|ici|qui|aquí|aqui)")
+    r"inscripción|maggiori informazioni|info e iscrizioni|hier|ici|qui|aquí|aqui|"
+    r"læs mere|mere info|tilmelding|tilmeld dig|her|läs mer|mer info|anmälan|anmäl dig|här)")
 
 
 def _strip_date(text: str, date_raw: str) -> str:

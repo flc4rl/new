@@ -48,6 +48,8 @@ MONTHS = {
     "septiembre": 9, "setiembre": 9, "octubre": 10, "noviembre": 11, "diciembre": 12,
     "janeiro": 1, "fevereiro": 2, "março": 3, "maio": 5, "junho": 6, "julho": 7,
     "setembro": 9, "outubro": 10, "dezembro": 12,
+    # da / sv
+    "marts": 3, "maj": 5, "augusti": 8,
 }
 _MONTH_RE = "|".join(sorted(map(re.escape, MONTHS), key=len, reverse=True))
 DATE_PATTERNS = [

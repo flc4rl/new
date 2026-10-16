@@ -43,6 +43,7 @@ ORG_HEADS: Dict[str, List[str]] = {
         "collective", "collectives", "kollektiv", "kollektive", "collettivo", "collettiva",
         "collettivi", "colectivo", "colectiva", "colectivos", "collectif", "collectifs",
         "coletivo", "coletiva", "crew", "squat", "commune", "collectief", "kollektief",
+        "kollektivet",
     ],
     "ngo / charity": [
         "ngo", "ngos", "ong", "onlus", "charity", "nonprofit", "non-profit", "aps", "odv",
@@ -55,6 +56,8 @@ ORG_HEADS: Dict[str, List[str]] = {
         "federación", "fédération", "föderation", "confederation", "confederazione",
         "forum", "foro", "consortium", "consorzio", "consorcio",
         "netwerk", "coalitie", "alliantie", "federatie", "platformen",
+        "netværk", "netværket", "nätverk", "nätverket", "koalition", "koalitionen", "allians",
+        "alliansen", "platform", "plattformen", "forbund", "förbund", "förbundet", "forbundet",
     ],
     "association / union": [
         "association", "associations", "associazione", "associazioni", "asociación",
@@ -63,10 +66,13 @@ ORG_HEADS: Dict[str, List[str]] = {
         "lega", "liga", "ligue", "club", "circle", "circolo", "círculo", "cercle",
         "chapter", "fellowship", "brotherhood", "sisterhood", "solidarity",
         "vereniging", "bond", "vakbond", "unie", "kring", "genootschap",
+        "forening", "foreningen", "förening", "föreningen", "fagforening", "fackförening",
+        "fackförbund", "sammenslutning", "sammanslutning", "selskab", "sällskap", "klubb",
     ],
     "foundation / trust": [
         "foundation", "fondazione", "fundación", "fundacion", "fondation", "stiftung",
         "fundação", "trust", "fund", "fondo", "fonds", "endowment", "stichting",
+        "fond", "fonden", "stiftelse", "stiftelsen", "stiftelsen",
     ],
     "movement / campaign": [
         "movement", "movements", "movimento", "movimiento", "mouvement", "bewegung",
@@ -75,12 +81,17 @@ ORG_HEADS: Dict[str, List[str]] = {
         "brigade", "brigata", "brigada", "rebellion", "resistance", "resistenza",
         "resistencia", "résistance", "uprising", "insurgency",
         "beweging", "campagne", "initiatief", "verzet", "actiegroep", "brigades",
+        "bevægelse", "bevægelsen", "rörelse", "rörelsen", "kampagne", "kampanj", "kampanjen",
+        "initiativ", "initiativet", "modstand", "motstånd", "aktionsgruppe", "aktionsgrupp",
+        "fronten",
     ],
     "committee / council / assembly": [
         "committee", "comitato", "comité", "comite", "komitee", "council", "consiglio",
         "consejo", "conseil",
         "commission", "commissione", "comisión", "board", "caucus", "tribunal",
         "comité", "raad", "werkgroep",
+        "udvalg", "udvalget", "kommitté", "kommittén", "komité", "råd", "rådet", "arbejdsgruppe",
+        "arbetsgrupp",
         "assemblea", "asamblea", "assemblée",
     ],
     "research / education / culture": [
@@ -91,19 +102,42 @@ ORG_HEADS: Dict[str, List[str]] = {
         "school", "scuola", "escuela", "école", "college", "museum", "museo", "musée",
         "library", "biblioteca", "archive", "archives", "archivio", "archivo",
         "think-tank", "radio", "instituut", "centrum", "universiteit", "hogeschool",
+        "institutet", "universitet", "universitetet", "højskole", "högskola", "folkhögskola",
+        "centret", "centeret",
     ],
     "cooperative": ["cooperative", "co-op", "coop", "cooperativa", "coopérative", "genossenschaft",
-                    "coöperatie", "cooperatie"],
-    "party": ["party", "partito", "partido", "parti", "partei", "partij"],
+                    "coöperatie", "cooperatie", "kooperativ", "kooperativet", "andelsforening"],
+    "party": ["party", "partito", "partido", "parti", "partei", "partij", "partiet"],
     "organisation (generic)": [
         "organisation", "organization", "organisations", "organizations",
         "organizzazione", "organización", "organisationen", "group", "groups",
         "gruppo", "gruppi", "grupo", "grupos", "groupe", "gruppe", "project", "progetto",
         "proyecto", "projet", "projekt", "project", "groep", "agency", "agenzia", "agencia", "agence",
+        "gruppe", "gruppen", "grupp", "gruppen", "projektet",
         "office", "secretariat", "mission", "service", "services", "space", "spazio",
         "espacio", "espace",
     ],
 }
+# Organisational words that end compound names in German, Dutch, Danish and
+# Swedish ("Klimakollektivet", "Klimabündnis", "Folkebevægelsen", "Klimaatcollectief").
+COMPOUND_HEADS: Dict[str, str] = {
+    **{w: "collective" for w in ("kollektiv", "kollektivet", "kollektive", "collectief", "kollektief")},
+    **{w: "network / coalition" for w in ("netzwerk", "bündnis", "netwerk", "netværk", "netværket",
+                                          "nätverk", "nätverket", "alliantie", "alliansen", "koalitionen",
+                                          "plattform", "plattformen", "föderation")},
+    **{w: "association / union" for w in ("verein", "verband", "vereniging", "forening", "foreningen",
+                                          "förening", "föreningen", "gewerkschaft", "vakbond",
+                                          "fagforening", "fackförening", "forbund", "förbund", "förbundet")},
+    **{w: "foundation / trust" for w in ("stiftung", "stichting", "stiftelse", "stiftelsen", "fonden")},
+    **{w: "movement / campaign" for w in ("bewegung", "beweging", "bevægelse", "bevægelsen", "rörelse",
+                                          "rörelsen", "kampagne", "kampanj", "kampanjen", "initiative",
+                                          "initiativ", "initiativet", "aktionsgruppe", "aktionsgrupp",
+                                          "actiegroep", "widerstand")},
+    **{w: "committee / council / assembly" for w in ("komitee", "kommitté", "udvalg", "werkgroep",
+                                                     "arbeitskreis", "plenum")},
+    **{w: "cooperative" for w in ("genossenschaft", "kooperativ", "kooperativet", "coöperatie")},
+}
+
 # Heads that only signal an organisation as the *last* word of a name
 # ("Amnesty International", "Human Rights Watch", "Médecins Sans Frontières").
 TRAILING_HEADS: Dict[str, List[str]] = {
@@ -135,8 +169,9 @@ CONNECTORS = {
     "pour", "al", "alla", "allo", "ai", "agli", "nel", "nella", "sul", "sulla", "a", "à",
     "i", "il", "lo", "gli", "l", "d", "von", "van", "zu", "zum", "zur", "em", "no", "na",
     "het", "voor", "en", "tegen", "met", "op", "uit", "der", "den", "ter", "te",
+    "og", "och", "mod", "mot", "af", "av", "til", "till", "på", "med", "det", "for", "för",
 }
-CONJUNCTIONS = {"and", "&", "e", "y", "et", "und", "en"}
+CONJUNCTIONS = {"and", "&", "e", "y", "et", "und", "en", "og", "och"}
 LEADING_STRIP = {
     "the", "a", "an", "our", "their", "this", "these", "that", "those", "its", "his", "her",
     "my", "your", "all", "every", "with", "and", "in", "on", "at", "by", "from", "for", "of",
@@ -157,6 +192,9 @@ LEADING_STRIP = {
     "whilst", "earlier", "later", "highlighting", "construisons", "rejoignez", "venez",
     "het", "een", "onze", "ons", "jouw", "jullie", "deze", "dit", "die", "wij", "zij",
     "waarom", "hoe", "wat", "wie", "waar", "wanneer", "lees", "bekijk", "meer",
+    "vores", "vor", "vår", "våra", "vårt", "denne", "denna", "dette", "detta", "disse", "dessa",
+    "hvorfor", "varför", "hvordan", "hur", "hvad", "vad", "hvor", "var", "når", "när", "vi",
+    "læs", "läs", "mere", "mer", "se",
     "warum", "wieder", "welche", "welcher", "welches", "hinweise", "bitte", "dickes",
     "breite", "vollständiges", "wie", "was", "wer", "wo", "wann",
     "we", "it", "they", "he", "she", "i", "us", "them", "wir", "sie", "es", "er", "ihr",
@@ -215,6 +253,9 @@ CTA_WORDS = {
     "werde", "hilf", "helft", "schau", "abonniere", "teile",
     "doneer", "steun", "lees", "bekijk", "word", "sluit", "meld", "schrijf", "kom", "doe",
     "ontdek", "volg", "deel", "download", "klik", "hier",
+    "doner", "donér", "donera", "støt", "stöd", "stött", "læs", "läs", "tilmeld", "anmäl",
+    "bliv", "bli", "følg", "följ", "del", "dela", "klik", "klicka", "kom", "kontakt",
+    "skriv", "meld", "mere", "mer", "her", "här", "se", "køb", "köp", "hent", "ladda",
 }
 LINK_SKIP_DOMAINS = {
     "facebook.com", "instagram.com", "twitter.com", "x.com", "t.co", "tiktok.com", "linkedin.com",
@@ -643,6 +684,8 @@ SPACY_MODELS = {
     "en": "en_core_web_sm", "fr": "fr_core_news_sm", "it": "it_core_news_sm",
     "de": "de_core_news_sm", "es": "es_core_news_sm", "pt": "pt_core_news_sm",
     "nl": "nl_core_news_sm", "ca": "ca_core_news_sm", "pl": "pl_core_news_sm",
+    "da": "da_core_news_sm", "sv": "sv_core_news_sm", "nb": "nb_core_news_sm",
+    "no": "nb_core_news_sm",
 }
 ORG_LABELS = {"ORG"}
 # Labels that, when given to the same name more often than ORG, show it is not one.
@@ -656,6 +699,8 @@ _LANG_HINTS = {
     "de": {"der", "die", "und", "das", "ist", "nicht", "mit", "ein", "eine", "für", "wir", "auf"},
     "pt": {"o", "a", "que", "de", "e", "os", "uma", "para", "com", "não", "por", "são"},
     "nl": {"de", "het", "een", "en", "van", "is", "dat", "niet", "voor", "met", "zijn", "wij"},
+    "da": {"og", "at", "det", "er", "af", "ikke", "til", "på", "med", "jeg", "vi", "har", "som", "mod"},
+    "sv": {"och", "att", "det", "är", "av", "inte", "till", "på", "med", "jag", "vi", "har", "som", "mot"},
 }
 
 
@@ -912,6 +957,11 @@ class OrgExtractor:
                 break
         if typ is None and content[-1] in TRAILING_TO_TYPE and len(content) >= 2:
             typ = TRAILING_TO_TYPE[content[-1]]
+        if typ is None:   # a compound ending in an organisational word: "Klimakollektivet"
+            for t in content:
+                for head, htyp in COMPOUND_HEADS.items():
+                    if t.endswith(head) and len(t) >= len(head) + 3:
+                        return htyp   # the prefix ("Klima-") makes it distinctive
         if typ is None:
             return None
         # Need at least one distinctive word: not a head, not generic, not a connector.
@@ -1022,6 +1072,16 @@ class OrgExtractor:
         return accepted
 
 
+ARTICLES = {"the", "die", "der", "das", "la", "le", "les", "l", "il", "lo", "gli", "el", "los",
+            "las", "de", "het", "den", "det", "o", "a", "os", "as"}
+
+
+def _is_head_word(word: str) -> bool:
+    """An organisational word, alone ("Collective") or ending a compound ("Klimabündnis")."""
+    return word in HEAD_TO_TYPE or any(word.endswith(h) and len(word) >= len(h) + 3
+                                       for h in COMPOUND_HEADS)
+
+
 def _split_conjoined(toks: list) -> List[list]:
     """Split "Migrant Rights Coalition and the Rete Antirazzista" into two names.
 
@@ -1035,8 +1095,14 @@ def _split_conjoined(toks: list) -> List[list]:
             right = toks[k + 1:]
             while right and right[0].group(0).casefold() in CONNECTORS:
                 right = right[1:]
-            right_head = bool(right) and right[0].group(0).casefold() in HEAD_TO_TYPE
-            if last in HEAD_TO_TYPE or (last in TRAILING_TO_TYPE and len(left) >= 2) or right_head:
+            right_head = bool(right) and _is_head_word(right[0].group(0).casefold())
+            # "X Centre ... and the Y Coalition": an article after the conjunction, with an
+            # organisational word on both sides, starts a second name.
+            article_split = (k + 1 < len(toks) and toks[k + 1].group(0).casefold() in ARTICLES
+                             and any(_is_head_word(t.group(0).casefold()) for t in left)
+                             and any(_is_head_word(t.group(0).casefold()) for t in right))
+            if (_is_head_word(last) or (last in TRAILING_TO_TYPE and len(left) >= 2) or right_head
+                    or article_split):
                 return [left] + (_split_conjoined(right) if right else [])
     return [toks]
 

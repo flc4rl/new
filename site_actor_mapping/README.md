@@ -15,7 +15,9 @@ python -m spacy download en_core_web_sm
 python -m spacy download fr_core_news_sm     # plus any other language you will meet:
 python -m spacy download de_core_news_sm
 python -m spacy download nl_core_news_sm
-# it_core_news_sm, es_core_news_sm, pt_core_news_sm
+python -m spacy download da_core_news_sm
+python -m spacy download sv_core_news_sm
+# it_core_news_sm, es_core_news_sm, pt_core_news_sm, nb_core_news_sm
 ```
 
 Each page's language is read from the page (or guessed from its words) and
