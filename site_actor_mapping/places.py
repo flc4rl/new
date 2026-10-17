@@ -123,6 +123,7 @@ middelfart hirtshals elmau ornois horville-en-ornois
 galway
 york norfolk gloucestershire chepstow kings lynn falmouth plymouth
 sint maarten mexico city ciudad de mexico houses of parliament
+castres albi colone
 """
 MORE_REGIONS = """
 rugen usedom sylt lusace lausitz basse-saxe basse-saxony basse saxe lower saxony niedersachsen

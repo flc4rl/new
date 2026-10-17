@@ -1,0 +1,6 @@
+org_key,organisation,include,merge_into_key,canonical_name,actor_class,country,is_organisation,is_partial_name,coder,notes
+ende gelande,Ende Gelände,1,,Ende Gelände,movement_org,DE,yes,no,AB,example row: kept whatever its confidence
+ende gelaende,Ende Gelaende,,ende gelande,,,,yes,no,AB,example row: spelling variant merged into the row above
+faq,FAQ,0,,,site_ui,,no,no,AB,example row: website menu item left out
+shell,Shell,,,Shell plc,company,GB,yes,no,AB,example row: a target company kept as an actor class
+rugen,Rügen,0,,,place,DE,no,no,AB,example row: a place name left out

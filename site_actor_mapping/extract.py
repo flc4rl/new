@@ -26,7 +26,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-from collections import Counter, defaultdict
+from collections import Counter, OrderedDict, defaultdict
 import re
 import unicodedata
 from dataclasses import dataclass, field
@@ -294,6 +294,39 @@ _POSTCODE_AFTER = re.compile(r"^\s*(?:,\s*)?(?:\d[A-Z]{2}\b|\d{4,5}\b|[A-Z]{1,2}
 _PAGINATION_BEFORE = re.compile(r"(?<!\w)(?:suivant|précédent|next|previous|prev|weiter|zurück|siguiente|"
                                 r"anterior|successivo|precedente|volgende|vorige)\s*[:»›>]?\s*$", re.I)
 # Standalone table marks ("X", "N. A.", "M. A."): a table of ticks, not running text.
+# Movement descriptors ("the climate movement X", "le mouvement X") and abstract nouns
+# ("Tokenism", "Kapitalismus") for _generic_movement_pre().
+_MOVEMENT_WORDS = {"movement", "movements", "mouvement", "mouvements", "bewegung", "beweging",
+                   "movimento", "movimiento", "moviment", "bevægelse", "bevægelsen", "rörelse",
+                   "rörelsen", "bevegelse", "bevegelsen", "ruch", "mișcare", "mișcarea", "κίνημα"}
+_ISM = re.compile(r"(?:ism|isme|ismus|ismo|izm|ismi|ισμός|ισμος)$", re.I)
+# "Germany and in the port of Hamburg", "Rheinmetall and the military", "X et l'armée":
+# a conjunction, then a lower-case preposition or article and a lower-case word.
+# ("of" is not a conjunction here: "Friends of the Earth".)
+_CONJ_PHRASE = re.compile(
+    r"\s+(?:and|or|et|ou|und|oder|y|e|en|og|och|&)\s+"
+    r"(?:(?:in|on|at|to|for|with|from|by|into|the|a|an|this|that|these|those|its|their|his|her|our|"
+    r"other|all|some|le|la|les|un|une|des|du|de|à|au|aux|dans|sur|pour|avec|par|der|die|das|den|"
+    r"dem|ein|eine|einen|im|am|zum|zur|mit|für|auf|bei|het|een|op|il|lo|gli|nel|nella|del|al|el|"
+    r"los|las)\s+|l['’])[^\W\d_A-ZÀ-Ý]")
+# Lower-case words after a single capitalised word that are not nouns: function words,
+# auxiliaries and common verbs ("Greenpeace said", "Shell must fall", "AIG are").
+_NOT_NOUN_AFTER = frozenset("""
+and or nor but of in on at to for with from by as is are was were be been being has have had
+will would can could must should may might shall do does did also only not no which who whom
+whose that this these those than then there here it its they their them we our you your he she
+his her him said says say versus vs via into onto over under about after before during between
+against without within near up down out off so if when where while because all any each every
+both either more most much many some such very just still even yet already again now today
+tomorrow tonight per around through across along toward towards since until till upon among
+amongst together alone itself themselves too et
+en op aan van voor met uit bij naar door zijn waren heeft hebben wordt worden de het een die
+dat deze dit ook niet
+og och eller i på til till med av af fra från för er är var har som den det ett
+bei an der die das und im am zu von mit für auf aus nach gegen
+à au aux du des le la les sur pour avec par dans contre près chez qui que
+di del della il al y el los las que con por para contra
+""".split())
 _TABLE_MARKS = re.compile(r"(?<!\S)(?:X|x|✓|✔|N\.\s?A\.|M\.\s?A\.)(?!\S)")
 LEADING_STRIP = {
     "the", "a", "an", "our", "their", "this", "these", "that", "those", "its", "his", "her",
@@ -454,14 +487,36 @@ LINK_SKIP_DOMAINS = {
     "whatsapp.com", "bsky.app", "threads.net", "mastodon.social", "mastodon.scot", "spotify.com",
     "soundcloud.com", "wordpress.org", "wordpress.com", "w3w.co", "what3words.com",
     "maps.google.com", "goo.gl", "openstreetmap.org", "paypal.com", "paypal.me", "addtoany.com",
+    # Chat, pad, form and other tool hosts: a link to a Signal group or a shared pad
+    # names the tool, not an organisation ("Matrix", "Signal", "Cryptpad", "Framaforms").
+    "matrix.org", "matrix.to", "element.io", "signal.org", "signal.group", "signal.me",
+    "discord.com", "discord.gg", "slack.com", "zoom.us", "meet.jit.si", "jit.si", "bbb.de",
+    "cryptpad.fr", "cryptpad.org", "cryptpad.digitalcourage.de", "framaforms.org", "framadate.org",
+    "framapad.org", "framacalc.org", "framagenda.org", "framalink.org", "framaliste.org", "framateam.org",
+    "pad.riseup.net", "pad.systemli.org", "yopad.eu", "nuudel.digitalcourage.de", "docs.google.com",
+    "forms.gle", "drive.google.com", "calendar.google.com", "linktr.ee", "bit.ly", "tinyurl.com",
 }
+# Hosts of pads and forms under any domain: "pad.example.org", "etherpad.x.net", "forms.y.org"
+_TOOL_HOST = re.compile(r"^(?:pads?|etherpad|hedgedoc|cryptpad|forms?|framaforms|poll|nuudel|chat|matrix|"
+                        r"element|jitsi|meet|bbb|visio|cloud|nextcloud|lists?|mailman)\.", re.I)
+
+
+def is_skip_host(host: str, subdomains_of_platforms: bool = True) -> bool:
+    """Social media, chat, pad and form hosts, whose name is not an organisation's.
+    With subdomains_of_platforms=False, "group.noblogs.org" is not skipped as a
+    subdomain of a skipped platform (a blog host gives each group its own name)."""
+    h = host.lower().removeprefix("www.")
+    if _TOOL_HOST.match(h):
+        return True
+    return any(h == d or (h.endswith("." + d) and (subdomains_of_platforms or d not in _SUBDOMAIN_PLATFORMS))
+               for d in LINK_SKIP_DOMAINS)
 
 
 def link_text_is_name(text: str, domain: str) -> bool:
     """Is this link text plausibly an organisation's name (not an instruction,
     sentence, article title or social-media button)?"""
     domain = domain.lower().removeprefix("www.")
-    if any(domain == d or domain.endswith("." + d) for d in LINK_SKIP_DOMAINS):
+    if is_skip_host(domain):
         return False
     if re.match(r"(?:don|dons|donate|donation|donations|give|soutenir|spenden|dona)\.", domain):
         return False
@@ -656,11 +711,15 @@ def canonical_key(name: str) -> str:
     n = n.replace("&", " and ").replace("’", "'")
     n = re.sub(r"'s\b", "", n)
     n = _ELIDED_IN_KEY.sub("", n)
-    n = re.sub(r"[^\w\s-]", " ", n)
+    # Hyphens separate words like spaces do, so "ANV-COP21" and "ANV Cop21", "Code-Rood"
+    # and "Code Rood", "Vélo-city" and "Velo city" have one key in every module. A first
+    # word joined by a hyphen is not an article ("A-camp", "La-Bas").
+    glued = bool(re.match(r"\s*[^\W_]+-[^\W_]", n))
+    n = re.sub(r"[^\w\s]", " ", n)
     toks = [t[:-1] if len(t) > 3 and t.endswith("s") and not t.endswith(("ss", "us", "is", "gas"))
             and t not in _KEEP_S else t for t in n.split()]
     toks = [_UMLAUT_VARIANT.sub(lambda m: m.group(1) or m.group(2), t) if len(t) >= 5 else t for t in toks]
-    while toks and toks[0] in {"the", "il", "lo", "la", "le", "gli", "l", "el", "los", "las",
+    while not glued and toks and toks[0] in {"the", "il", "lo", "la", "le", "gli", "l", "el", "los", "las",
                                "les", "der", "die", "das", "o", "a", "os", "as", "η", "ο", "το", "οι", "τα"}:
         toks = toks[1:]
     return " ".join(toks)
@@ -713,6 +772,45 @@ def is_place_key(key: str) -> bool:
         return 2 <= len(toks) <= 3 and all(t in PLACES_KEYS and (len(t) >= 3 or t in COUNTRY_CODES)
                                            for t in toks)
     return all(p in PLACES_KEYS for p in parts)
+
+
+# The event-location gazetteer (gazetteer.py) knows far more places than places.py:
+# towns, regions and protest sites in every country covered ("Neckarwestheim", "Le
+# Bourget", "Val di Susa", "Floreffe"). Names found only by NER are also checked
+# against it. A few of its entries locate events but are also the names of
+# campaigns, occupations or companies ("No TAV", "ZAD de NDDL", "Drax", "Ilva",
+# "MUOS"); those are never treated as places here.
+try:
+    import gazetteer as _gaz
+    _GAZ_LOOKUP, _GAZ_KEY = _gaz._LOOKUP, _gaz._key
+    _GAZ_CASE, _GAZ_WEAK = _gaz._CASE, _gaz._WEAK
+except (ImportError, AttributeError):   # extract.py also works without gazetteer.py
+    _GAZ_LOOKUP, _GAZ_KEY, _GAZ_CASE, _GAZ_WEAK = {}, None, set(), set()
+_GAZ_NOT_PLACE = {"drax", "drax power station", "ilva", "taranto ilva", "muos", "tav torino",
+                  "zad de nddl", "nddl", "mondeggi"}
+_GAZ_LIST_SPLIT = re.compile(r"\s*[,;/]\s*|\s+(?:and|et|und|y|e|en|i|og|och|ja|és|&)\s+")
+
+
+def is_gazetteer_place(surface: str) -> bool:
+    """A place, or a list of places ("Castres and Toulouse", "Lingen, Ulm"), by the
+    places.py lists or the gazetteer. As in the gazetteer, its CASE_SENSITIVE names
+    ("Lingen", "Bure", "Allier") count only when written with a capital letter, and its
+    WEAK names ("Nice", "Tours", "Roma", "Essen"), which are also ordinary words or
+    people's names, never count on their own."""
+    parts = [p.strip(" .()[]") for p in _GAZ_LIST_SPLIT.split(surface.strip())]
+    parts = [p for p in parts if p]
+    if not parts:
+        return False
+    for p in parts:
+        if canonical_key(p) in PLACES_KEYS:
+            continue
+        if _GAZ_KEY is None:
+            return False
+        k = _GAZ_KEY(p)
+        if (k not in _GAZ_LOOKUP or k in _GAZ_NOT_PLACE or k.startswith("no ") or k in _GAZ_WEAK
+                or (k in _GAZ_CASE and not p[:1].isupper())):
+            return False
+    return True
 
 
 # --------------------------------------------------------------------------
@@ -819,6 +917,20 @@ class ThemeSet:
             self._memo.clear()
         self._memo[text] = hits
         return {t: list(v) for t, v in hits.items()}
+
+    @staticmethod
+    def clip(hits: Dict[str, List[Tuple[int, int, str]]], start: int,
+             end: int) -> Dict[str, List[Tuple[int, int, str]]]:
+        """The hits of find(text) that lie inside text[start:end], with offsets made
+        relative to `start`. For a window of whole sentences this equals
+        find(text[start:end]) without running the term patterns again (finding 33);
+        a hit that crosses the window edge is left out."""
+        out: Dict[str, List[Tuple[int, int, str]]] = {}
+        for theme, hs in hits.items():
+            kept = [(s - start, e - start, w) for s, e, w in hs if start <= s and e <= end]
+            if kept:
+                out[theme] = kept
+        return out
 
     def _find(self, text: str) -> Dict[str, List[Tuple[int, int, str]]]:
         hits: Dict[str, List[Tuple[int, int, str]]] = {}
@@ -1044,20 +1156,111 @@ def parse_pdf_text(text: str, url: str, depth: int, title: str = "", date: str =
 # --------------------------------------------------------------------------
 # Organisation extraction
 # --------------------------------------------------------------------------
+_URL_OR_EMAIL = re.compile(r"(?:https?://|www\.)\S+|[\w.+-]+@[\w-]+(?:\.[\w-]+)+", re.I)
+
+
+class _SquashDict(dict):
+    """A dict of organisation keys that also finds a key written with other spacing or
+    hyphenation ("geef tegengas" finds "geef tegen gas"), so `key in d` and d.get(key)
+    work for every spelling variant that squash_key merges."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._squashed: Dict[str, str] = {}
+
+    def __setitem__(self, key: str, value: str) -> None:
+        super().__setitem__(key, value)
+        self._squashed.setdefault(_squash_of_key(key), key)
+
+    def _find(self, key: object) -> Optional[str]:
+        if dict.__contains__(self, key):
+            return key   # type: ignore[return-value]
+        return self._squashed.get(_squash_of_key(key)) if isinstance(key, str) else None
+
+    def __contains__(self, key: object) -> bool:
+        return self._find(key) is not None
+
+    def get(self, key, default=None):   # type: ignore[override]
+        found = self._find(key)
+        return dict.__getitem__(self, found) if found is not None else default
+
+
+def _squash_of_key(key: str) -> str:
+    """The squashed form of a canonical key (see squash_key); short keys are kept as they
+    are, so that two- and three-letter acronyms are never merged with anything."""
+    sq = re.sub(r"[\W_]+", "", key)
+    return sq if len(sq) >= 4 else key
+
+
 class Watchlist:
-    """Lines of `Canonical Name | alias | alias`. Short all-caps aliases are matched case-sensitively."""
+    """Lines of `Canonical Name | alias | alias`.
+
+    Matching ignores case, accents and umlaut spellings ("Ende Gelaende", "Ende Gëlande"
+    and "ende gelände" all match "Ende Gelände"), and the words of a name may be joined by
+    spaces, hyphens or nothing ("Code-Rood", "CodeRood"). Acronyms (aliases of six
+    characters or fewer written in capitals, or of four or fewer with a capital inside,
+    such as "FoE") are matched case-sensitively. An alias written with a leading "=" must
+    start with a capital letter in the text ("=Stay Grounded" matches "Stay grounded" but
+    not "we stay grounded"): use it for names that are also ordinary phrases."""
 
     def __init__(self, entries: List[Tuple[str, List[str]]]):
-        self.canonical: Dict[str, str] = {}
+        self.canonical: Dict[str, str] = _SquashDict()
         self.patterns: List[Tuple[re.Pattern, str]] = []
-        for canon, aliases in entries:
+        self.display: Dict[str, str] = _SquashDict()
+        seen: Set[Tuple[str, int, str]] = set()
+        for raw, aliases in entries:
+            canon = raw.lstrip("=").strip()
             ckey = canonical_key(canon)
-            for name in [canon, *aliases]:
+            if not ckey:
+                continue
+            self.display[ckey] = canon
+            for name in [raw, *aliases]:
+                first_cap = name.startswith("=")
+                name = name.lstrip("=").strip()
+                if not name:
+                    continue
                 self.canonical[canonical_key(name)] = ckey
-                flags = 0 if (len(name) <= 6 and name.isupper()) else re.I
-                pat = r"(?<!\w)" + r"[\s\-]+".join(re.escape(p) for p in name.split()) + r"(?!\w)"
-                self.patterns.append((re.compile(pat, flags), ckey))
-        self.display = {canonical_key(c): c for c, _ in entries}
+                acronym = ((len(name) <= 6 and name.isupper())
+                           or (len(name) <= 4 and " " not in name and any(c.isupper() for c in name[1:])))
+                pat = self._pattern(name, case=acronym, first_cap=first_cap)
+                if (pat.pattern, pat.flags, ckey) not in seen:   # "Ende Gelaende" = "Ende Gelände"
+                    seen.add((pat.pattern, pat.flags, ckey))
+                    self.patterns.append((pat, ckey))
+
+    @staticmethod
+    def _pattern(name: str, case: bool, first_cap: bool) -> re.Pattern:
+        """A regular expression for `name`, to be run on fold_for_watchlist(text)."""
+        words = []
+        for w in re.split(r"[\s\-‐‑–_]+", name.strip()):
+            if not w:
+                continue
+            # an umlaut matches its plain vowel and its "ae / oe / ue" spelling, and so does
+            # an umlaut spelled out in the alias ("Gelaende" also matches "Gelände")
+            w = re.sub("[äöüÄÖÜ]", lambda m: m.group(0).translate(_WATCHLIST_FOLD) + "e", w)
+            piece = re.escape(w.translate(_WATCHLIST_FOLD))
+            if not case:
+                piece = re.sub(r"(?<=[^aeiouAEIOU\\])([aouAOU])e(?=[^aeiouAEIOU\\])", r"\1e?", piece)
+            words.append(piece)
+        if not words:
+            return re.compile(r"(?!)")
+        body = r"[\s\-‐‑–_]*".join(words)   # spaces, hyphens or nothing between the words
+        if first_cap and not case:
+            first = words[0][0]
+            body = f"(?-i:{first.upper()})" + body[len(first):] if first.isalpha() else body
+        return re.compile(r"(?<!\w)" + body + r"(?!\w)", 0 if case else re.I)
+
+    def finditer(self, text: str):
+        """(start, end, canonical key) of every watchlist name in `text`."""
+        if not self.patterns:
+            return
+        folded = fold_for_watchlist(text)
+        # Not inside a web or e-mail address ("https://lessoulevementsdelaterre.org"):
+        # a name the address spells is found by the website rule, in the text around it.
+        urls = [(m.start(), m.end()) for m in _URL_OR_EMAIL.finditer(text)]
+        for pat, ckey in self.patterns:
+            for m in pat.finditer(folded):
+                if not any(a <= m.start() < b for a, b in urls):
+                    yield m.start(), m.end(), ckey
 
     @classmethod
     def load(cls, path: Optional[Path]) -> "Watchlist":
@@ -1099,6 +1302,10 @@ SPACY_MODELS = {
     # cs, sk, hu, eu have no spaCy pipeline: the multilingual xx_ent_wiki_sm is used if installed
 }
 ORG_LABELS = {"ORG"}
+# Methods that are weak evidence on their own: NER, and the lower-case head written after
+# the name ("Falkirk council area"). A name found only by these is place-gated and vetted
+# site-wide; other modules can import this to treat them alike (confidence, routing).
+NER_LIKE_METHODS = frozenset({"ner", "pattern_after"})
 # Labels that, when given to the same name more often than ORG, show it is not one.
 NON_ORG_LABELS = {"PERSON", "PER", "GPE", "LOC", "FAC", "EVENT", "LAW", "PRODUCT",
                   "WORK_OF_ART", "LANGUAGE"}   # MISC is too broad to count against a name
@@ -1278,6 +1485,11 @@ def page_language(texts: Sequence[str], declared: str = "") -> str:
 
 class OrgExtractor:
     NER_MEMO_SIZE = 200_000   # distinct (model, paragraph) results kept in memory
+    # spaCy models kept loaded at once. A model takes about 70 MB (sm) to 600 MB (lg);
+    # beyond this the least recently used one is freed and reloaded if its language
+    # comes back. Raised automatically when models keep being reloaded.
+    MAX_MODELS = 6
+    MODEL_SIZES = {"lg": ("lg", "md", "sm"), "md": ("md", "sm"), "sm": ("sm",)}
 
     def __init__(self, watchlist: Watchlist, stoplist: Tuple[Set[str], List[re.Pattern]],
                  spacy_model: Optional[str], use_links: bool = True, ner_size: str = "sm",
@@ -1289,6 +1501,11 @@ class OrgExtractor:
         model and spaCy versions and paragraph text, so a re-run (--no-crawl with new
         themes or stop lists) does not run spaCy again on text it has already seen."""
         self.watchlist = watchlist
+        # Organisation keys by squashed form (see merge_key), seeded with the watchlist's
+        # own keys so that a watchlist name is always the one its variants merge into.
+        self._merge_keys: Dict[str, str] = {}
+        for ckey in watchlist.display:
+            self.merge_key(ckey)
         self.stop_exact, self.stop_pats = stoplist
         self.use_links = use_links
         self.spacy_model = (spacy_model or "none").strip()
@@ -1297,15 +1514,26 @@ class OrgExtractor:
         self.common_words: Set[str] = set()
         self.mid_caps: Optional[Set[str]] = None   # None until prepare_corpus() runs
         self._corpus_text = ""                      # distinct paragraphs, for phrase case counts
+        self._modifier_memo: Dict[str, bool] = {}   # _modifier_word() results, per corpus
+        self._title_counts: Counter = Counter()     # folded phrase -> agenda titles that contain it
+        self._title_names: Set[str] = set()         # folded title-slot names accepted so far
         self._corpus_low = ""
         self._corpus_sites: Dict[str, str] = {}
         self._corpus_prefixes: Set[str] = set()
         self._phrase_case: Dict[str, bool] = {}
         self.missing_models: Set[str] = set()
         self.broken_models: Set[str] = set()       # installed but failed to load or run
+        self.models_used: Dict[str, str] = {}       # every model loaded in the run -> version
+        self.ner_fallbacks: Dict[str, Dict[str, str]] = {}   # lang -> {"requested", "used"}
+        self._lru: "OrderedDict[str, None]" = OrderedDict()  # loaded models, least recent first
+        self._evicted: Set[str] = set()
+        self._cache_only: Set[str] = set()          # models whose results all came from cache_dir
+        self.model_reloads = 0
+        self.max_models = self.MAX_MODELS
         self._model_ids: Dict[str, str] = {}
         self._name_for: Dict[str, Optional[str]] = {}
         self._ner_memo: Dict[Tuple[str, str], NerDoc] = {}
+        self._call_results: Dict[Tuple[str, str], NerDoc] = {}   # see pipe()
         self.ner_stats: Counter = Counter()          # "analysed" by spaCy, read from "cache"
         self._db = None
         if cache_dir is not None:
@@ -1351,20 +1579,62 @@ class OrgExtractor:
                     exclude += ["tagger", "attribute_ruler", "morphologizer"]
                 nlp = spacy.load(name, exclude=exclude)
                 nlp.max_length = 2_000_000
-                log.info("Loaded spaCy model %s", name)
+                if name in self._evicted:
+                    self.model_reloads += 1
+                    log.debug("Reloaded spaCy model %s", name)
+                    if self.model_reloads > 2 * self.max_models:
+                        # Languages alternate too often for the limit: keep more models
+                        # loaded rather than reload them again and again.
+                        self.max_models += 2
+                        self.model_reloads = 0
+                        log.info("spaCy models are being reloaded often; now keeping up to %d "
+                                 "loaded at once", self.max_models)
+                else:
+                    log.info("Loaded spaCy model %s", name)
                 self._models[name] = nlp
+                self.models_used[name] = str(getattr(nlp, "meta", {}).get("version", ""))
+                self._cache_only.discard(name)
+                self._lru[name] = None
+                self._evict()
             except (ImportError, OSError) as exc:
                 log.warning("spaCy model %r unavailable (%s). Install with: python -m spacy "
                             "download %s", name, exc, name)
                 self.missing_models.add(name)
                 self._models[name] = None
+                self._forget_name(name)
             except Exception as exc:  # noqa: BLE001 - a broken or mismatched model must not stop the run
-                log.warning("spaCy model %r is installed but failed to load (%s: %s); NER is skipped "
-                            "for its language. Check with: python -m spacy validate, then: "
-                            "python -m spacy download %s --upgrade", name, type(exc).__name__, exc, name)
+                log.warning("spaCy model %r is installed but failed to load (%s: %s); NER uses "
+                            "another installed model for its language, if any. Check with: "
+                            "python -m spacy validate, then: python -m spacy download %s --upgrade",
+                            name, type(exc).__name__, exc, name)
                 self.broken_models.add(name)
                 self._models[name] = None
+                self._forget_name(name)
+        elif name in self._lru:
+            self._lru.move_to_end(name)
         return self._models[name]
+
+    def _evict(self) -> None:
+        """Free the least recently used spaCy models beyond max_models (finding 57: a
+        multilingual run would otherwise keep every model it ever loaded, over 1.4 GB
+        for the 21 small models alone). A freed model is reloaded if needed; its NER
+        results stay in the memo and the persistent cache."""
+        while len(self._lru) > self.max_models:
+            old, _ = self._lru.popitem(last=False)
+            self._models.pop(old, None)
+            self._evicted.add(old)
+            log.info("Freed spaCy model %s (more than %d models loaded; it is reloaded if "
+                     "its language comes up again)", old, self.max_models)
+        if self._evicted:
+            import gc
+            gc.collect()
+
+    def _forget_name(self, name: str) -> None:
+        """After a model failed to load or run, resolve its languages again so that
+        the next smaller installed model is used (see _resolve_model_name)."""
+        for lang, n in list(self._name_for.items()):
+            if n == name:
+                del self._name_for[lang]
 
     def model_name_for(self, lang: str = "en") -> Optional[str]:
         """Name of the spaCy model used for `lang`, without loading it (None: no NER)."""
@@ -1372,22 +1642,52 @@ class OrgExtractor:
             self._name_for[lang] = self._resolve_model_name(lang)
         return self._name_for[lang]
 
+    def _usable(self, name: str) -> bool:
+        return (name not in self.broken_models and name not in self.missing_models
+                and _installed(name))
+
     def _resolve_model_name(self, lang: str) -> Optional[str]:
         if self.spacy_model.lower() == "none":
             return None
         if self.spacy_model.lower() != "auto":
             return self.spacy_model
-        if lang in SPACY_MODELS:   # the requested size if installed, else the small model
+        if lang in SPACY_MODELS:
+            # The requested size if installed, else the next smaller one (lg -> md -> sm),
+            # with one warning per language: results differ between sizes.
             base = SPACY_MODELS[lang][:-3]
-            for size in dict.fromkeys((self.ner_size, "sm")):
-                if _installed(f"{base}_{size}"):
-                    return f"{base}_{size}"
+            sizes = self.MODEL_SIZES.get(self.ner_size, (self.ner_size, "sm"))
+            wanted = f"{base}_{sizes[0]}"
+            for size in sizes:
+                name = f"{base}_{size}"
+                if self._usable(name):
+                    if name != wanted and self.ner_fallbacks.get(lang, {}).get("used") != name:
+                        if wanted in self.broken_models:
+                            log.warning("spaCy model %s failed to load or run; using %s for '%s' "
+                                        "instead. Check with: python -m spacy validate",
+                                        wanted, name, lang)
+                        else:
+                            log.warning("spaCy model %s is not installed; using %s for '%s' instead. "
+                                        "Install the requested size with: python -m spacy download %s",
+                                        wanted, name, lang, wanted)
+                        self.ner_fallbacks[lang] = {"requested": wanted, "used": name}
+                    return name
         if lang != "en":
             # Never fall back to the English model on another language: it tags
             # ordinary capitalised words (every German noun) as organisations.
-            if _installed("xx_ent_wiki_sm"):
+            if self._usable("xx_ent_wiki_sm"):
+                if lang in SPACY_MODELS and lang not in self.ner_fallbacks:
+                    # a language model exists but is not installed (or is broken)
+                    wanted = f"{SPACY_MODELS[lang][:-3]}_{self.ner_size}"
+                    log.warning("No usable spaCy model for '%s'; using the multilingual "
+                                "xx_ent_wiki_sm instead. %s", lang,
+                                "Check with: python -m spacy validate" if self.broken_models & {
+                                    f"{SPACY_MODELS[lang][:-3]}_{z}" for z in ("sm", "md", "lg")}
+                                else f"Install with: python -m spacy download {wanted}")
+                    self.ner_fallbacks[lang] = {"requested": wanted, "used": "xx_ent_wiki_sm"}
                 return "xx_ent_wiki_sm"
             self.missing_models.add(SPACY_MODELS.get(lang, f"a spaCy model for '{lang}'"))
+            return None
+        if "en_core_web_sm" in self.broken_models:
             return None
         return "en_core_web_sm"
 
@@ -1399,6 +1699,37 @@ class OrgExtractor:
     def nlp(self):
         """English (or the fixed) model; kept for callers that do not pass a language."""
         return self.model_for("en")
+
+    def model_record(self) -> Dict[str, object]:
+        """spaCy models of the run, for run_info.json: every model whose results were
+        used (loaded, even if freed since, or only read back from the NER cache), the
+        size fallbacks, and the models missing or broken."""
+        return {"spacy_models_used": dict(sorted(self.models_used.items())),
+                "spacy_models_cache_only": sorted(self._cache_only),
+                "ner_fallbacks": dict(sorted(self.ner_fallbacks.items())),
+                "spacy_models_missing": sorted(self.missing_models),
+                "spacy_models_broken": sorted(self.broken_models),
+                "spacy_models_freed": sorted(self._evicted)}
+
+    def log_model_summary(self, logger: logging.Logger) -> None:
+        """End-of-analysis summary of models that were missing, broken or replaced by
+        a smaller size (one line each)."""
+        if self.missing_models:
+            logger.warning("NER was skipped for some text because these spaCy models are not "
+                           "installed (rule-based detection still ran): %s. Install with: %s",
+                           ", ".join(sorted(self.missing_models)),
+                           " && ".join(f"python -m spacy download {m}" for m in sorted(self.missing_models)
+                                       if m.endswith("_sm")))
+        if self.broken_models:
+            logger.warning("These spaCy models are installed but failed to load or run, so NER "
+                           "used another model or was skipped for their language: %s. They are "
+                           "usually built for another spaCy version: run 'python -m spacy validate' "
+                           "and reinstall the models it lists, e.g. python -m spacy download %s --upgrade",
+                           ", ".join(sorted(self.broken_models)), sorted(self.broken_models)[0])
+        if self.ner_fallbacks:
+            logger.warning("NER used another spaCy model than the one asked for (--ner-size %s) for: %s",
+                           self.ner_size, ", ".join(f"{lang} ({v['used']})"
+                                                    for lang, v in sorted(self.ner_fallbacks.items())))
 
     def paragraph_languages(self, texts: Sequence[str], lang: str = "en") -> List[str]:
         """Language used for NER on each paragraph. Paragraphs of 8 or more words with
@@ -1454,16 +1785,28 @@ class OrgExtractor:
         across runs."""
         per_text = self.paragraph_languages(texts, lang)
         docs: list = [None] * len(texts)
+        # Results of this call, kept apart from the run-wide memo: _remember() may clear
+        # the memo when it is full, which must not lose texts analysed earlier in this call.
+        self._call_results = {}
         by_model: Dict[str, List[int]] = defaultdict(list)
         for i, code in enumerate(per_text):
             name = self.model_name_for(code)
             if name and texts[i]:
                 by_model[name].append(i)
-        for name, idx in by_model.items():
+        queue = list(by_model.items())
+        while queue:
+            name, idx = queue.pop(0)
             if self._models.get(name, True) is None:
-                continue   # missing or broken model
+                queue.extend(self._regroup(name, idx, per_text))
+                continue   # missing or broken model: a smaller one may take over
             mid = self._model_id(name)
-            todo = [t for t in dict.fromkeys(texts[i] for i in idx) if (mid, t) not in self._ner_memo]
+            todo = []
+            for t in dict.fromkeys(texts[i] for i in idx):
+                rec = self._ner_memo.get((mid, t))
+                if rec is None:
+                    todo.append(t)
+                else:
+                    self._call_results[(mid, t)] = rec
             if todo and self._db is not None:
                 keys = {t: hashlib.sha1(f"{mid}\x00{t}".encode("utf-8")).hexdigest() for t in todo}
                 stored = self._cache_get(list(keys.values()))
@@ -1471,10 +1814,14 @@ class OrgExtractor:
                     if k in stored:
                         self._remember(mid, t, NerDoc.from_json(stored[k], t))
                         self.ner_stats["cache"] += 1
-                todo = [t for t in todo if (mid, t) not in self._ner_memo]
+                        if name not in self.models_used:   # results of this model, read back
+                            self.models_used[name] = mid.split("|")[0].partition("@")[2]
+                            self._cache_only.add(name)
+                todo = [t for t in todo if (mid, t) not in self._call_results]
             if todo:
                 nlp = self._load(name)
                 if nlp is None:
+                    queue.extend(self._regroup(name, idx, per_text))
                     continue
                 new_rows = []
                 try:
@@ -1490,22 +1837,39 @@ class OrgExtractor:
                                 "for its language from now on", name, type(exc).__name__, exc)
                     self.broken_models.add(name)
                     self._models[name] = None
+                    self._lru.pop(name, None)
+                    self._forget_name(name)
+                    left = [i for i in idx if (mid, texts[i]) not in self._call_results]
+                    queue.extend(self._regroup(name, left, per_text))
                 if new_rows:
                     self._db.executemany("INSERT OR REPLACE INTO ner (k, v) VALUES (?, ?)", new_rows)
                     self._db.commit()
             for i in idx:
-                rec = self._ner_memo.get((mid, texts[i]))
+                rec = self._call_results.get((mid, texts[i]))
                 if rec is None:
                     continue
                 docs[i] = rec
                 for ent in rec.ents:  # every label a name receives anywhere on the site
                     self.label_votes[canonical_key(tidy_surface(ent.text))][ent.label_] += 1
+                if self._title_counts:   # names in agenda titles, for entries NER missed
+                    self._title_slot_spans(texts[i], rec.ents, ())
         return docs
+
+    def _regroup(self, name: str, idx: List[int], per_text: List[str]) -> List[Tuple[str, List[int]]]:
+        """Paragraphs whose model `name` failed, grouped by the model now chosen for
+        their language (a smaller installed size, or none)."""
+        groups: Dict[str, List[int]] = defaultdict(list)
+        for i in idx:
+            new = self.model_name_for(per_text[i])
+            if new and new != name and self._models.get(new, True) is not None:
+                groups[new].append(i)
+        return list(groups.items())
 
     def _remember(self, mid: str, text: str, rec: "NerDoc") -> None:
         if len(self._ner_memo) >= self.NER_MEMO_SIZE:
             self._ner_memo.clear()
         self._ner_memo[(mid, text)] = rec
+        self._call_results[(mid, text)] = rec
 
     def close(self) -> None:
         """Close the persistent NER cache (safe to call more than once)."""
@@ -1541,6 +1905,20 @@ class OrgExtractor:
             low = "".join(c if len(c.lower()) != 1 else c.lower() for c in self._corpus_text)
         self._corpus_low = low
         self._phrase_case = {}
+        self._modifier_memo = {}
+        # Phrases of two to six words in the titles of agenda entries, each distinct title
+        # counted once ("Shell must fall" is in three titles of the French agenda).
+        self._title_counts = Counter()
+        self._title_names = set()
+        titles = set()
+        for text in seen:
+            span = agenda_title_span(text)
+            if span:
+                titles.add(_fold_phrase(text[span[0]:span[1]]))
+        for t in titles:
+            w = t.split()
+            self._title_counts.update({" ".join(w[i:j]) for i in range(len(w))
+                                       for j in range(i + 2, min(len(w), i + 6) + 1)})
         # Websites given anywhere in the corpus ("https://alternatiba.eu" in one agenda
         # entry): a name that spells one is that site's organisation in other paragraphs too.
         self._corpus_sites = _sites_of(m.group(1) for m in _URL_HOST.finditer(self._corpus_text))
@@ -1564,11 +1942,28 @@ class OrgExtractor:
         return all(w in self.common_words or w in LEADING_STRIP or w in GENERIC for w in content)
 
     def vet(self, key: str, methods: Iterable[str]) -> bool:
-        """Site-wide check for names found only by NER: reject those that are mostly
-        written after a place preposition ("in X", "à X", "bei X"), or that spaCy more
-        often labels as a place, person, law, event... Names also found by a rule, a
-        descriptor, a link or the watchlist are kept."""
-        if set(methods) - {"ner"}:
+        """Site-wide check for names found only by NER (and by the weak lower-case-head
+        rule "pattern_after", vetted the same way); names also found by another rule, a
+        descriptor, a website, a link, an agenda title or the watchlist are kept.
+
+        A name is rejected when:
+        - at least 60% of its 2 or more NER mentions follow a place preposition
+          (counted in extract(), see LOCATIVE_BEFORE): "in X", "at X", "à X", "bei X",
+          "op X". "from X" and "to X" (LOCATIVE_WEAK) count only when no actor word
+          comes before them: "1 mile from Kinneil" counts, while "activists from
+          Greenpeace", "support from Attac", "donate to Sea-Watch" and "sich bei X"
+          (ACTOR_PREPOSITION) do not. "a" (Romance "to, at") and "i" (Scandinavian
+          "in") count only in paragraphs of those languages (LOCATIVE_BY_LANG), since
+          they are also the English and Italian articles ("Despite a United Nations");
+        - or spaCy labels it a place at least twice as often as an organisation (and
+          3 or more times);
+        - or spaCy labels it a person, law, event, work... at least three times as often
+          as an organisation, with fewer than 3 organisation labels (person labels
+          count for less than place labels: small models often tag coined group names
+          as people).
+        The place-preposition check comes first and does not look at the label votes:
+        small models label many place names ORG (Kinneil, ZAD, Scholven, Sassnitz)."""
+        if set(methods) - NER_LIKE_METHODS:
             return True   # a rule, a link or a descriptor also supports it
         after_loc, total = self.locative.get(key, (0, 0))
         if total >= 2 and after_loc / total >= 0.6:
@@ -1584,6 +1979,20 @@ class OrgExtractor:
         if place >= 2 * org and place >= 3:
             return False
         return not (other >= 3 * org and org < 3)
+
+    def merge_key(self, name: str) -> str:
+        """The organisation key for `name` (a name or a canonical key) in this run.
+
+        Spellings that differ only in spacing or hyphens ("Geef Tegengas" and "Geef Tegen
+        Gas", "Shell Must Fall" and "Shellmustfall") get the key of the spelling seen
+        first; canonical_key already merges case, accents, umlaut spellings, elided
+        articles and hyphens. The display name is chosen later from the surface forms,
+        so the most frequent spelling is shown whichever key was seen first. Keys of
+        three letters or fewer are never merged."""
+        key = canonical_key(name)
+        if not key:
+            return key
+        return self._merge_keys.setdefault(_squash_of_key(key), key)
 
     # ---------------------------------------------------------------- filters
     def is_stopped(self, key: str, surface: str) -> bool:
@@ -1879,6 +2288,57 @@ class OrgExtractor:
             i = low.find(needle, i + 1)
         return upper >= lower
 
+    def _generic_movement_pre(self, pre, surface: str, s: int, e: int, ents) -> bool:
+        """A one-word "name" after a movement descriptor that is not a group: an -ism
+        ("the German climate movement Tokenism can ...") or an ordinary word of the site.
+        Names spaCy tags as an organisation here ("le mouvement Alternatiba") are kept."""
+        words = re.findall(r"[^\W\d_]+", pre.group(1).casefold())
+        if not words or words[-1] not in _MOVEMENT_WORDS:
+            return False
+        if any(a < e and s < b and lab in ("ORG", "NORP_ORG") for a, b, lab in ents):
+            return False
+        return bool(_ISM.search(surface)) or (self.mid_caps is not None and self.is_ordinary_words(surface))
+
+    def _modifier_word(self, surface: str, after: str, lang: str) -> bool:
+        """Is this single word, found only by NER, used as a modifier of the lower-case
+        noun after it ("Drax power station", "the Dietenbach forest", "Ecotopia bike
+        tour", "Danish movement")? Only in languages whose adjectives and noun modifiers
+        come first (not French, Italian, Spanish...; not German, which capitalises nouns).
+        Acronyms ("NATO summit", "IPPNW camp") and lower-case organisational heads (left
+        to the head rules) do not count. With a corpus, the word must be used this way
+        nearly everywhere it occurs, so that "Shell" in "Shell shareholders" stays a name
+        when the site also writes "Shell" on its own."""
+        if lang in _ADJ_AFTER_NOUN_LANGS or lang == "de":
+            return False
+        if surface.isupper() or re.search(r"\d|.[A-Z]", surface) or not _is_cap(surface):
+            return False
+
+        def noun_follows(tail: str) -> bool:
+            m = re.match(r" ([^\W\d_A-ZÀ-Ý][^\W\d_]{2,})(?![\w\-’'])", tail)
+            if not m:
+                return False
+            w = m.group(1)
+            return not (w in _NOT_NOUN_AFTER or w in HEAD_TO_TYPE or w.endswith(("ly", "ed", "ing")))
+
+        if not noun_follows(after):
+            return False
+        text = self._corpus_text
+        if not text:
+            return True
+        hit = self._modifier_memo.get(surface)
+        if hit is None:
+            n = mod = 0
+            i = text.find(surface)
+            while i >= 0:
+                j = i + len(surface)
+                if not (i > 0 and (text[i - 1].isalnum() or text[i - 1] in "-_")) and not (
+                        j < len(text) and (text[j].isalnum() or text[j] in "-_")):
+                    n += 1
+                    mod += noun_follows(text[j:j + 40])
+                i = text.find(surface, i + 1)
+            hit = self._modifier_memo[surface] = n == 0 or mod == n or (n >= 4 and mod >= 0.8 * n)
+        return hit
+
     def _name_before_head(self, surface: str, toks: Sequence[str], before: str) -> bool:
         """For "the Abolitionist Futures collective" (a lower-case head after the name):
         is the capitalised part a plausible name, not a place, nationality, sentence
@@ -1933,12 +2393,134 @@ class OrgExtractor:
                                                                      conjunctions, listed)
         return [(start, end)]
 
+    def _title_name_ok(self, surface: str) -> bool:
+        """A phrase from an agenda title that may be a group's name: two words or more,
+        not an event, place, document, generic or stop-listed name ("Climate Camp",
+        "République Tchèque", "Camp climat" are not)."""
+        words = TOKEN_RE.findall(surface)
+        if len(words) < 2 or tidy_surface(surface) != surface or not self.plausible_name(surface):
+            return False
+        first, last = words[0].casefold(), words[-1].casefold()
+        if (first in CONNECTORS or first in ARTICLES or last in CONNECTORS or last in ARTICLES
+                or not strip_elision(words[0])[:1].isupper() or first == "action"
+                or any(strip_elision(w).casefold() in _TITLE_EVENT_WORDS for w in words)):
+            return False
+        key = canonical_key(surface)
+        if (not key or self.is_stopped(key, surface) or starts_with_cta(surface.split())
+                or is_place_key(key) or is_gazetteer_place(surface)
+                or all(canonical_key(w) in LANGUAGE_KEYS or w.casefold() in MONTHS for w in words)):
+            return False
+        return not (_has_event_word(surface) or _is_generic_name(surface) or _is_event_name(surface)
+                    or _is_document_name(surface))
+
+    def _title_slot_spans(self, text: str, ents, links: Sequence[Link]) -> List[Tuple[int, int]]:
+        """Group names in the title of an agenda entry that NER tagged as a person or
+        "MISC", or only in part ("Rood-Rouge" in "Code Rood-Rouge").
+
+        The phrase is the title's leading phrase when the entity starts the title
+        ("Stay grounded / Aviaction, ..." -> "Stay grounded"), otherwise the run of
+        capitalised words around it ("organisée par Shell Must Fall, Pays-Bas"). The
+        longest prefix of two words or more is kept that is in the titles of at least
+        two entries, or that the entry's website or link path spells
+        (".../shell-must-fall-action-call-out/"). Accepted names are remembered, so an
+        entry whose title has the same name without any entity gets it too."""
+        span = agenda_title_span(text) if self._title_counts else None
+        if not span:
+            return []
+        ts, te = span
+        toks = list(TOKEN_RE.finditer(text, ts, te))
+        if len(toks) < 2:
+            return []
+
+        def joined(a: int, b: int) -> bool:   # only spaces between tokens a and b
+            return not text[toks[a].end():toks[b].start()].strip()
+
+        def caps(i: int) -> bool:
+            return strip_elision(toks[i].group(0))[:1].isupper()
+
+        sites = set(_sites_of([m.group(1) for m in _URL_HOST.finditer(text)]
+                              + [ln.domain for ln in links if getattr(ln, "domain", "")]))
+        slugs = _url_slug_words(text, links)
+        candidates: List[List[int]] = []   # token index lists, longest first in each
+        for ent in ents:
+            lab = ent.label_
+            if lab not in _TITLE_SLOT_LABELS and lab not in ("ORG", "NORP_ORG"):
+                continue
+            idx = [i for i, t in enumerate(toks) if t.start() < ent.end_char and ent.start_char < t.end()]
+            if not idx:
+                continue
+            a = idx[0]
+            if lab in _TITLE_SLOT_LABELS and a == 0:
+                b = 0
+                while b + 1 < len(toks) and b < 5 and joined(b, b + 1):
+                    b += 1
+            else:
+                b = a
+                while b + 1 <= idx[-1] and joined(b, b + 1):
+                    b += 1
+                start = a
+                while start > 0 and joined(start - 1, start) and caps(start - 1):
+                    start -= 1
+                if lab not in _TITLE_SLOT_LABELS:
+                    if start == a:
+                        continue   # an ORG span not extended to the left is NER's own business
+                else:
+                    while b + 1 < len(toks) and joined(b, b + 1) and caps(b + 1):
+                        b += 1
+                a = start
+            candidates.append(list(range(a, b + 1)))
+        if self._title_names:   # names accepted in other entries: "Infosessions about Code Rood-Rouge"
+            for a in range(len(toks)):
+                if not caps(a):
+                    continue
+                b = a
+                while b + 1 < len(toks) and b - a < 5 and joined(b, b + 1):
+                    b += 1
+                for k in range(b, a, -1):
+                    if _fold_phrase(text[toks[a].start():toks[k].end()]) in self._title_names:
+                        candidates.append(list(range(a, k + 1)))
+                        break
+        events = EVENT_WORDS | EVENT_LAST_WORDS | CONFERENCE_WORDS | _TITLE_EVENT_WORDS
+        out: List[Tuple[int, int]] = []
+        for c in candidates:
+            # The longest prefix that recurs or spells the site is the name; when that one
+            # is a place or an event, a shorter part of it is not tried ("Notre Dame des
+            # Landes" does not leave "Notre Dame").
+            for k in range(len(c), 1, -1):
+                s, e = toks[c[0]].start(), toks[c[k - 1]].end()
+                surface = text[s:e]
+                folded = _fold_phrase(surface)
+                spelled = folded.replace(" ", "") in sites or f" {folded} " in slugs
+                if not (folded in self._title_names or self._title_counts.get(folded, 0) >= 2 or spelled):
+                    continue
+                nxt = strip_elision(toks[c[k]].group(0)).casefold() if k < len(c) else ""
+                first = toks[c[0]].group(0)
+                if (self._title_name_ok(surface) and nxt not in events
+                        and not (c[0] > 0 and (canonical_key(first) in PLACES_KEYS or is_gazetteer_place(first)))
+                        and not any(x < e and s < y for x, y in out)):
+                    # (not with an event word right after it: "Food Autonomy Festival", "Ecotopia
+                    # bike tour"; not a place and a venue inside the title: "Rotterdam Ahoy")
+                    out.append((s, e))
+                    self._title_names.add(folded)
+                break
+        return out
+
     def extract(self, text: str, links: Sequence[Link], doc=None) -> List[Mention]:
         cands: List[Tuple[int, Mention]] = []   # (priority, mention); lower priority wins
 
-        for pat, ckey in self.watchlist.patterns:
-            for m in pat.finditer(text):
-                cands.append((0, Mention(m.group(0), ckey, {"watchlist"}, "", m.start(), m.end())))
+        for ws, we, ckey in self.watchlist.finditer(text):
+            cands.append((0, Mention(text[ws:we], ckey, {"watchlist"}, "", ws, we)))
+
+        # "XR Zagreb", "XR Norway", "FFF Lisbon": a movement acronym and a place
+        for m in _ACRONYM_PLACE.finditer(text):
+            words = list(re.finditer(r"[^\s\-]+(?:-[^\s\-]+)*", m.group(2)))
+            for k in range(len(words), 0, -1):
+                place = m.group(2)[:words[k - 1].end()].rstrip("’'")
+                if is_place_key(canonical_key(place)) or is_gazetteer_place(place):
+                    e = m.start(2) + len(place)
+                    cands.append((2, Mention(text[m.start():e], "", {"pattern"}, "movement / campaign",
+                                             m.start(), e)))
+                    break
 
         lang = doc.lang_ if doc is not None and doc.lang_ != "xx" else (
             confident_language(text) if len(text.split()) >= 8 else "")
@@ -1972,6 +2554,8 @@ class OrgExtractor:
             before = text[max(0, s - 80):s]
             after = text[e:e + 90]
             pre = self._pre_appositive(before)
+            if pre and len(toks) == 1 and self._generic_movement_pre(pre, surface, s, e, ents):
+                pre = None   # "the rest of the German climate movement Tokenism can ...": a topic
             post = self.post_appos.match(after)
             if post and (PERSON_APPOS.search(post.group(0)) or re.match(r"\s+[A-ZÀ-Ý]", after[post.end():])):
                 # "Claire, une militante de l'association X": a person, not an org;
@@ -2016,7 +2600,11 @@ class OrgExtractor:
                     ptyp = (head_typ if len(parts) == 1 or after_head
                             else self._head_type(TOKEN_RE.findall(text[ps:pe])))
                     if ptyp:   # a part without a head is left to NER ("Greenpeace and the X Coalition")
-                        cands.append((2, Mention(text[ps:pe], "", {"pattern"}, ptyp, ps, pe)))
+                        # A head written after the name in lower case ("the Abolitionist
+                        # Futures collective") is weaker evidence than one inside the name:
+                        # "pattern_after" is gated and vetted like NER.
+                        cands.append((2, Mention(text[ps:pe], "", {"pattern_after" if after_head else "pattern"},
+                                                 ptyp, ps, pe)))
 
         if doc is not None and not table:
             german = doc.lang_ == "de" and doc.has_annotation("POS")
@@ -2029,18 +2617,34 @@ class OrgExtractor:
                     continue   # a common German noun ("Gemeinschaft", "Küche"), not a name
                 # "General Election, Reform UK", "Climáximo, Lisbon": one name per comma part;
                 # "IPPNW and ICAN": two acronyms joined by a conjunction are two names
-                parts, pos = [], ent.start_char
-                for piece in re.split(r"(,\s+|(?<=[A-Z0-9])\s+(?:and|et|und|y|e|en|og|och|&)\s+(?=[A-Z0-9]{2,10}\b))",
-                                      text[ent.start_char:ent.end_char]):
-                    if piece and not re.fullmatch(r",\s+|\s+(?:and|et|und|y|e|en|og|och|&)\s+", piece):
+                # "Bure, France]/ Transnational": a square bracket (or a round one followed by
+                # a slash) ends a name too; what follows starts a new phrase. (Round brackets
+                # may be inside a name, "Trespass (Scotland) Act"; a slash may join two names.)
+                # "Germany and in the port of Hamburg", "Rheinmetall and the military": a
+                # conjunction followed by a lower-case preposition or article phrase starts
+                # a new phrase; only the part before it can be a name.
+                ent_end = ent.end_char
+                cut = _CONJ_PHRASE.search(text, ent.start_char, ent_end)
+                if cut:
+                    ent_end = cut.start()
+                parts, pos, after_bracket = [], ent.start_char, set()
+                for piece in re.split(r"(,\s+|\s*(?:[\[\]|]+\s*/?|\)\s*/)\s*|"
+                                      r"(?<=[A-Z0-9])\s+(?:and|et|und|y|e|en|og|och|&)\s+(?=[A-Z0-9]{2,10}\b))",
+                                      text[ent.start_char:ent_end]):
+                    if re.fullmatch(r"\s*(?:[\[\]|]+\s*/?|\)\s*/)\s*", piece or "-"):
+                        after_bracket.add(pos + len(piece))
+                    elif piece and not re.fullmatch(r",\s+|\s+(?:and|et|und|y|e|en|og|och|&)\s+", piece):
                         parts.append((pos, pos + len(piece)))
-                    pos += len(piece)
+                    pos += len(piece or "")
                 parts = [q for ps, pe in parts for q in self._split_known_left(text, ps, pe, conjunctions)]
                 for ps, pe in parts:
                     s, e = self._trim(text, ps, pe)
                     surface = text[s:e]
                     if not surface.strip():
                         continue
+                    if (ps in after_bracket and e == ent_end and len(TOKEN_RE.findall(surface)) == 1
+                            and re.match(r"\s+[^\W\d_A-Z]", text[e:e + 3]) and not surface.isupper()):
+                        continue   # "…]/ Transnational meeting of peasant struggles": the start of a phrase
                     pre_text = text[max(0, s - 25):s]
                     if _PAGINATION_BEFORE.search(pre_text):
                         continue   # "Article suivant Suivant Amaury": the author of the next post
@@ -2052,6 +2656,8 @@ class OrgExtractor:
                         e = s + m_pc.start()   # "Edinburgh EH8 9RR": a postcode, not part of the name
                         surface = text[s:e]
                     toks = [t.group(0) for t in TOKEN_RE.finditer(surface)]
+                    if len(toks) == 1 and self._modifier_word(surface, text[e:e + 40], doc.lang_):
+                        continue   # "Drax power station", "the Dietenbach forest": a modifier, not a name
                     stats = self.locative[canonical_key(tidy_surface(surface))]
                     stats[1] += 1
                     if ACTOR_PREPOSITION.search(text[max(0, s - 60):s]):
@@ -2060,6 +2666,12 @@ class OrgExtractor:
                           or (locative_lang and locative_lang.search(pre_text))):
                         stats[0] += 1
                     cands.append((3, Mention(surface, "", {"ner"}, self._head_type(toks) or "", s, e)))
+
+        # A group named in an agenda title that NER tagged as a person or "MISC"
+        if not table and self._title_counts:
+            for s, e in self._title_slot_spans(text, doc.ents if doc is not None else [], links):
+                cands.append((3, Mention(text[s:e], "", {"title"}, self._head_type(TOKEN_RE.findall(text[s:e])) or "",
+                                         s, e)))
 
         if self.use_links:
             for ln in links:
@@ -2086,7 +2698,7 @@ class OrgExtractor:
                 continue   # "Sign Up Now", "Join the ...": an instruction
             if not m.key:
                 m.key = canonical_key(m.surface)
-            m.key = self.watchlist.canonical.get(m.key, m.key)
+            m.key = self.merge_key(self.watchlist.canonical.get(m.key, m.key))
             if "watchlist" not in m.methods:
                 if not self.plausible_name(m.surface) or self.is_stopped(m.key, m.surface):
                     continue
@@ -2095,20 +2707,35 @@ class OrgExtractor:
                     continue   # a language menu: "Deutsch English Español Français Italiano"
                 if "pattern" not in m.methods and is_place_key(m.key):
                     continue   # a bare place name: "Genève", "Hambach", "Suisse", "In Germany the movement"
-                if _is_generic_name(m.surface) or _is_event_name(m.surface):
-                    continue   # "Working Group", "Media Team"; "International Anti-War Conference"
+                if (not m.methods - NER_LIKE_METHODS - {"website"}
+                        and ("website" not in m.methods or id(m) in corpus_only)
+                        and is_gazetteer_place(m.surface)):
+                    continue   # a place the gazetteer knows: "Neckarwestheim", "Castres and Toulouse"
+                if _is_generic_name(m.surface) or _is_event_name(m.surface) or _is_document_name(m.surface):
+                    continue   # "Working Group", "Media Team"; "International Anti-War Conference";
+                    #            "Climate Camp Scotland Safer Spaces Policy"
                 # A name that spells a website needs nothing more, unless it is made of
                 # ordinary words: then it must be written capitalised at least as often as
-                # in lower case ("Climate justice" for climatejustice.org is not a name), and,
-                # when the website is only given in another paragraph, have two words or more
-                # ("Signal", "Matrix", "Files").
+                # in lower case ("Climate justice" for climatejustice.org is not a name).
+                # When the website is only given in another paragraph or agenda entry, the
+                # name must be neither ordinary words ("Signal", "Camp climat" for
+                # campclimat.eu, which the French agenda uses for every climate camp) nor
+                # an event series ("Tour de Natur"): only the entry that gives the site
+                # ties such a name to it.
                 site_named = "website" in m.methods
-                if (site_named and "pattern" not in m.methods and self.mid_caps is not None
-                        and self.is_ordinary_words(m.surface)):
-                    if ((id(m) in corpus_only and len(TOKEN_RE.findall(m.surface)) < 2)
-                            or not self._phrase_case_counts(" ".join(TOKEN_RE.findall(m.surface)))):
+                if site_named and "pattern" not in m.methods and id(m) in corpus_only and (
+                        _has_event_word(m.surface)
+                        or (self.mid_caps is not None and self.is_ordinary_words(m.surface))):
+                    m.methods.discard("website")
+                    if not m.methods:
                         continue
-                if ("pattern" not in m.methods and not site_named and not self._head_type(TOKEN_RE.findall(m.surface))
+                    site_named = False
+                if (site_named and "pattern" not in m.methods and self.mid_caps is not None
+                        and self.is_ordinary_words(m.surface)
+                        and not self._phrase_case_counts(" ".join(TOKEN_RE.findall(m.surface)))):
+                    continue
+                if (not m.methods & {"pattern", "pattern_after", "title"} and not site_named
+                        and not self._head_type(TOKEN_RE.findall(m.surface))
                         and not self._ordinary_but_named(m.surface)):
                     if self.is_ordinary_words(m.surface):
                         continue
@@ -2238,7 +2865,7 @@ def _sites_of(hosts: Iterable[str]) -> Dict[str, str]:
     sites: Dict[str, str] = {}
     for host in hosts:
         h = host.lower().removeprefix("www.")
-        if not any(h == d or (h.endswith("." + d) and d not in _SUBDOMAIN_PLATFORMS) for d in LINK_SKIP_DOMAINS):
+        if not is_skip_host(h, subdomains_of_platforms=False):
             for n in site_names(h):
                 sites.setdefault(n, h)
     return sites
@@ -2249,6 +2876,16 @@ def squash_key(name: str) -> str:
     Must Fall" both give "shellmustfall", "ende-gelaende" gives "endegelande". Use it to
     compare spellings that differ only in spacing (it is not the organisation key)."""
     return re.sub(r"[\W_]+", "", canonical_key(name))
+
+
+def squash_runs(text: str, max_words: int = 6) -> Set[str]:
+    """Squashed forms of every run of up to `max_words` consecutive words of `text`
+    (after canonical_key), so that "Geef Tegengas" can be found in the title "Geef
+    Tegen Gas ..." on word boundaries only ("climat" is not found in "climate camp")."""
+    words = [re.sub(r"[\W_]+", "", w) for w in canonical_key(text).split()]
+    words = [w for w in words if w]
+    return {"".join(words[i:j]) for i in range(len(words))
+            for j in range(i + 1, min(len(words), i + max_words) + 1)}
 
 
 def site_names(host: str) -> Set[str]:
@@ -2275,7 +2912,16 @@ def site_names(host: str) -> Set[str]:
 # Accented Latin letters -> plain letters (a fast str.translate table)
 _ACCENT_FOLD = {ord(c): unicodedata.normalize("NFKD", c)[0] for c in map(chr, range(0xC0, 0x250))
                 if unicodedata.normalize("NFKD", c)[0] != c and unicodedata.normalize("NFKD", c)[0].isascii()}
-_LEADING_ARTICLE = re.compile(r"^(?:the|les?|la|l['’]|die|der|das|de|het|el|il|lo|los|las|o|os)\s*", re.I)
+
+
+# The same, plus typographic apostrophes and hyphens, for watchlist matching: every
+# character maps to exactly one character, so match positions are valid in the original.
+_WATCHLIST_FOLD = {**_ACCENT_FOLD, ord("’"): "'", ord("‘"): "'", ord("‐"): "-", ord("‑"): "-"}
+
+
+def fold_for_watchlist(text: str) -> str:
+    """`text` with accents folded ("Gëlande" -> "Gelande"), the same length as `text`."""
+    return text.translate(_WATCHLIST_FOLD)
 
 
 def _plain_squash(name: str) -> str:
@@ -2283,12 +2929,6 @@ def _plain_squash(name: str) -> str:
     n = "".join(c for c in unicodedata.normalize("NFKD", name) if not unicodedata.combining(c)).casefold()
     n = re.sub(r"[\W_]+", "", n.replace("&", "and"))
     return _UMLAUT_VARIANT.sub(lambda m: m.group(1) or m.group(2), n) if len(n) >= 5 else n
-
-
-def _name_variants(name: str) -> Set[str]:
-    """Spellings of a name as it may appear in a domain: "Les Amis de la Terre" ->
-    {"lesamisdelaterre", "amisdelaterre", ...}."""
-    return {_plain_squash(name), _plain_squash(_LEADING_ARTICLE.sub("", name)), squash_key(name)}
 
 
 def _is_generic_name(surface: str) -> bool:
@@ -2310,6 +2950,85 @@ def _is_event_name(surface: str) -> bool:
                               or (len(content) >= 2 and content[-1] in EVENT_LAST_WORDS
                                   and not any(w in HEAD_TO_TYPE for w in content))   # not "Mainshill Solidarity Camp"
                               or any(w in CONFERENCE_WORDS for w in content))
+
+
+# Last words of document titles, which NER often tags as ORG ("… Accountability Toolkit")
+DOCUMENT_LAST_WORDS = {"toolkit", "handbook", "guide", "guidelines", "policy", "act", "pack", "leaflet",
+                       "flyer", "brochure", "factsheet", "booklet"}
+
+
+def _is_document_name(surface: str) -> bool:
+    """A document, not an organisation: the last word is a document word and no word is
+    an organisational head ("Climate Camp Scotland Safer Spaces Policy", "Trespass
+    (Scotland) Act"; not "Institute for European Environmental Policy")."""
+    words = TOKEN_RE.findall(surface)
+    if len(words) < 2 or words[-1].isupper() or words[-1].casefold() not in DOCUMENT_LAST_WORDS:
+        return False
+    return not any(strip_elision(w).casefold() in HEAD_TO_TYPE for w in words[:-1])
+
+
+# ---- Agenda entry titles ("title slots") -------------------------------------------
+# An agenda entry starts with its dates and then its title: "(12.10) Stay Grounded
+# European Members meeting [Milan, Italy]", "– 5 au 9 octobre : Stay grounded /
+# Aviaction, conférence-action ...". The small NER models often tag the group named in
+# such a title as a person or "MISC" ("Shell must fall", "Stay grounded"); a name in a
+# title slot is recovered when it recurs in the titles of other entries or spells the
+# entry's website (see OrgExtractor._title_slot_spans).
+_AGENDA_DATE_PREFIX = re.compile(
+    r"^\s*(?:\(\s*[\d.\s\-–/]+\)\s*[-–]?\s*"
+    r"|[–\-]\s*(?=[^:\n]{0,45}?(?:\d|dates?\b|à venir|tba\b|tbc\b))[^:\n]{1,45}?\s?:\s+)", re.I)
+_TITLE_END = re.compile(r"\s*(?:\[|https?://|www\.)|[.!?](?=\s+[A-ZÀ-Þ]|\s*$)")
+# Labels a title-slot name may carry. ORG spans are only extended to the left
+# ("the action Code Rood-Rouge" tagged "Rood-Rouge"); ORG spans are otherwise NER's job.
+_TITLE_SLOT_LABELS = {"PER", "PERSON", "MISC"}
+# Words of event titles that EVENT_WORDS leaves out because they also occur in group
+# names elsewhere; a title-slot name with one of them is an event ("Semaine d’actions",
+# "Week-end de mobilisation", "Salon du livre anarchiste", "Appel à une manifestation").
+_TITLE_EVENT_WORDS = {
+    "semaine", "semaines", "week-end", "week-ends", "mobilisation", "mobilisations", "appel", "salon",
+    "fête", "fete", "voyage", "grève", "greve", "printemps", "camping", "training", "trainings",
+    "actions", "occupation", "strike", "streik", "sciopero", "huelga", "woche", "aktionswoche",
+    "aktionstage", "settimana", "semana", "jornada", "jornadas", "giornata", "giornate", "journée",
+    "journées", "rencontres", "festival-action", "infosessions", "infosession", "actiontraining",
+}
+
+
+def agenda_title_span(text: str) -> Optional[Tuple[int, int]]:
+    """(start, end) of the title of an agenda entry that starts with its dates, or None."""
+    m = _AGENDA_DATE_PREFIX.match(text)
+    if not m or m.end() >= len(text):
+        return None
+    end = _TITLE_END.search(text, m.end())
+    return m.end(), min(end.start() if end else len(text), m.end() + 220)
+
+
+def _fold_phrase(surface: str) -> str:
+    """Words of `surface` folded for comparison: "Shell Must Fall" and "Shell must fall"
+    give "shell must fall", "Code Rood-Rouge" gives "code roodrouge"."""
+    return " ".join(filter(None, (_plain_squash(strip_elision(t)) for t in TOKEN_RE.findall(surface))))
+
+
+def _url_slug_words(text: str, links: Sequence["Link"] = ()) -> str:
+    """The words of the URL paths in `text` and `links`, " "-joined and folded
+    (".../18-may-shell-agm-shell-must-fall-action-call-out/" -> "... shell must fall ...")."""
+    urls = re.findall(r"https?://\S+", text) + [getattr(ln, "href", "") or "" for ln in links]
+    words = [w for u in urls for w in re.split(r"[^0-9a-z]+", u.lower().split("://", 1)[-1]) if w]
+    return " " + " ".join(words) + " "
+
+
+# A movement acronym followed by a place is a local group: "XR Zagreb", "XR Norway",
+# "FFF Lisbon". Only acronyms that are unambiguous in this field are listed.
+MOVEMENT_ACRONYMS = {"XR", "XRY", "FFF", "FfF"}
+_ACRONYM_PLACE = re.compile(r"(?<![\w\-/.@#])(" + "|".join(sorted(MOVEMENT_ACRONYMS, key=len, reverse=True))
+                            + r")\s+((?:[A-ZÀ-Þ][\w’'\-]*)(?:[ \-][A-ZÀ-Þ][\w’'\-]*){0,2})")
+
+
+def _has_event_word(surface: str) -> bool:
+    """Any word of the name is an event word: "Camp climat", "Tour de Natur",
+    "Climate Camp Scotland", "Klimacamp Leipziger Land" (a compound ending in one)."""
+    words = {strip_elision(w).casefold() for w in TOKEN_RE.findall(surface)}
+    events = EVENT_WORDS | EVENT_LAST_WORDS | CONFERENCE_WORDS
+    return bool(words & events) or any(w.endswith(("camp", "festival", "tour")) and len(w) > 7 for w in words)
 
 
 _VERB_WORDS = {"ne", "pas", "n", "est", "sont", "était", "être", "devait", "doit", "peut", "is", "are",

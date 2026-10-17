@@ -1,0 +1,4 @@
+event_id,series_id,duplicate_of,country_override,notes
+0123456789ab,klimacamp-2024-series,,,example row: put two editions with different links into one series (event_id from events_enriched)
+ba9876543210,,0123456789ab,,example row: the same event listed twice; its ties count for the event named in duplicate_of
+cafe12345678,,,DE,example row: the country found automatically was wrong

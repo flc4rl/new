@@ -42,8 +42,9 @@ from urllib.parse import urlparse
 
 from crawler import CachedPage, CrawlConfig, Crawler, PageCache, normalise_url, registered_host
 from extract import (
-    Block, OrgExtractor, ParsedPage, detect_language, ThemeSet, Watchlist, acronym_pairs, block_hash,
-    canonical_key, clean_ws, load_stoplist, parse_html, parse_pdf_text, split_sentences,
+    NER_LIKE_METHODS, Block, OrgExtractor, ParsedPage, ThemeSet, Watchlist, acronym_pairs, block_hash,
+    canonical_key, clean_ws, load_stoplist, page_language, parse_html, parse_pdf_text, split_sentences,
+    squash_key, squash_runs,
 )
 from events import EventIndex, EventRef
 from linked_sites import (PLATFORM_HOSTS, Site, SiteRegistry, Via, collect_targets, crawl_linked,
@@ -110,8 +111,10 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     g.add_argument("--follow-links", choices=["none", "events", "all"], default="none",
                    help="Also crawl websites linked from calendar events ('events') or from any "
                         "page's main content ('all'), and analyse them too")
-    g.add_argument("--follow-max-sites", type=int, default=60,
-                   help="At most this many linked sites, most-linked first (0 = no limit)")
+    g.add_argument("--follow-max-sites", type=int, default=0,
+                   help="At most this many linked websites, most-linked first; links from seed "
+                        "PDFs count too; 0 = no limit. Sites left out are logged and "
+                        "listed in sites.csv as 'not crawled (--follow-max-sites)'")
     g.add_argument("--follow-max-pages", type=int, default=25, help="Pages per linked site")
     g.add_argument("--follow-max-depth", type=int, default=1,
                    help="Clicks from the linked page within each linked site")
@@ -545,9 +548,11 @@ def build_targets(cache: PageCache, hosts: Set[str], mode: str, skip: Set[str],
                   entry_keys: Dict[tuple, str], args: argparse.Namespace) -> Dict[str, List[Via]]:
     """External URLs to follow: links of the main site (by --follow-links) and the
     links of every agenda entry in the seed PDFs, each with the event(s) it came from."""
+    platform_hosts = PLATFORM_HOSTS | {registered_host(h) for h in args.follow_single_page}
     targets: Dict[str, List[Via]] = {}
     if hosts and mode != "none":
-        targets = collect_targets(cache, hosts, mode, skip, args.calendar_from, args.calendar_to)
+        targets = collect_targets(cache, hosts, mode, skip, args.calendar_from, args.calendar_to,
+                                  platform_hosts=platform_hosts)
     seed_targets: Dict[str, List[Via]] = defaultdict(list)
     for ln in seed_links:
         # Links outside any agenda entry (introductions, "other calendars" lists)
@@ -558,7 +563,7 @@ def build_targets(cache: PageCache, hosts: Set[str], mode: str, skip: Set[str],
             seed_targets[ln.url].append(Via(page=ln.pdf, event=ln.event, target=ln.url,
                                             event_url=entry_keys.get((ln.pdf, ln.entry), ln.url),
                                             date=ln.date_iso or ln.date_raw))
-    for url, vias in filter_targets(seed_targets, skip).items():
+    for url, vias in filter_targets(seed_targets, skip, platform_hosts).items():
         targets.setdefault(url, []).extend(vias)
     return targets
 
@@ -567,7 +572,8 @@ def _name_tokens(name: str) -> Set[str]:
     return {t for t in canonical_key(name).split() if len(t) > 2}
 
 
-def assign_entry_keys(seed_pdfs: Dict[str, dict], skip_hosts: Set[str]
+def assign_entry_keys(seed_pdfs: Dict[str, dict], skip_hosts: Set[str],
+                      platform_hosts: Optional[Set[str]] = None
                       ) -> Tuple[Dict[tuple, str], Dict[tuple, str]]:
     """One event key per agenda entry.
 
@@ -585,7 +591,7 @@ def assign_entry_keys(seed_pdfs: Dict[str, dict], skip_hosts: Set[str]
     for pdf_url, d in seed_pdfs.items():
         for e in d["entries"]:
             idx = (pdf_url, e["index"])
-            good = [u for u in e["links"] if filter_targets({u: []}, skip_hosts)]
+            good = [u for u in e["links"] if filter_targets({u: []}, skip_hosts, platform_hosts)]
             # Social media links are not followed, but still shown as the event's link.
             entry_links[idx] = good[0] if good else (e["links"][0] if e["links"] else "")
             start, end = e.get("start") or "", e.get("end") or ""
@@ -614,6 +620,14 @@ def main(argv: Optional[List[str]] = None) -> int:
     out = args.output_dir
     out.mkdir(parents=True, exist_ok=True)
     setup_logging(out, args.verbose)
+    # "--seed-pdf a.pdf b.pdf" makes b.pdf a start URL (the option takes one file each
+    # time); a local PDF file given as a start URL is read as a seed PDF instead.
+    for u in list(args.start_urls):
+        if "://" not in u and u.lower().endswith(".pdf") and Path(u).expanduser().is_file():
+            args.start_urls.remove(u)
+            args.seed_pdf.append(u)
+            log.warning("%s is a PDF file, not a website: read as a seed PDF (write --seed-pdf "
+                        "before each PDF)", u)
     info = {"tool": "site_actors.py", "started_at": now_iso(), "status": "running",
             "command": sys.argv if argv is None else ["site_actors.py"] + list(argv),
             "cwd": str(Path.cwd()), "arguments": {k: str(v) if isinstance(v, Path) else v
@@ -629,7 +643,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     except KeyboardInterrupt:
         info["status"] = "interrupted"
         log.warning("Interrupted. Cached pages are kept: run the same command again to resume.")
-        raise
+        return 130      # the usual exit code after Ctrl+C, without a Python traceback
     except BaseException as exc:
         info["status"] = f"failed: {type(exc).__name__}: {exc}"
         raise
@@ -640,7 +654,7 @@ def main(argv: Optional[List[str]] = None) -> int:
 
 
 def run(args: argparse.Namespace, out: Path, info: dict) -> int:
-    from calendar_sweep import month_window, parse_month
+    from calendar_sweep import duplicate_calendar_months, month_window, parse_month
     try:
         parse_month(args.calendar_from)
         parse_month(args.calendar_to)
@@ -676,7 +690,12 @@ def run(args: argparse.Namespace, out: Path, info: dict) -> int:
             log.warning("%s: no effect with --no-crawl (no website is crawled; the sites in "
                         "sites.json are analysed as they were cached)", ", ".join(changed))
     if start_urls and not args.no_crawl:
-        Crawler(base_cfg, cache).crawl()
+        try:
+            Crawler(base_cfg, cache).crawl()
+        except Exception as exc:  # noqa: BLE001 - analyse what was cached so far (finding 53)
+            log.error("Main-site crawl stopped by an error (%s: %s); continuing with the pages "
+                      "cached so far. Run the same command again later to resume.",
+                      type(exc).__name__, exc)
 
     hosts = {registered_host(urlparse(u).netloc) for u in start_urls}
     main_sites = [Site(h, "main", [u for u in start_urls if registered_host(urlparse(u).netloc) == h])
@@ -734,10 +753,12 @@ def run(args: argparse.Namespace, out: Path, info: dict) -> int:
 
     # One event per agenda entry (see assign_entry_keys).
     skip_hosts = {registered_host(h) for h in args.follow_skip}
-    entry_keys, entry_links = assign_entry_keys(seed_pdfs, skip_hosts)
+    # Hosts read one page at a time; also used when filtering links, so that entry
+    # keys and the URLs actually followed agree.
+    platform_hosts = PLATFORM_HOSTS | {registered_host(h) for h in args.follow_single_page}
+    entry_keys, entry_links = assign_entry_keys(seed_pdfs, skip_hosts, platform_hosts)
     seed_sites = [Site(f"pdf:{pdf_name(u)}", "seed", [u], platform=True)
                   for u in dict.fromkeys([ln.pdf for ln in seed_links] + list(seed_pdfs))]
-    platform_hosts = PLATFORM_HOSTS | {registered_host(h) for h in args.follow_single_page}
 
     registry = SiteRegistry(main_sites + seed_sites, args.include_subdomains)
     registry_rebuilt = False
@@ -771,12 +792,18 @@ def run(args: argparse.Namespace, out: Path, info: dict) -> int:
             kwargs["workers"] = max(1, args.follow_workers)
         if "blocked_hosts" in params:
             kwargs["blocked_hosts"] = set(hosts)
+        finished: List[Site] = []
+        if "progress" in params:
+            kwargs["progress"] = finished
         try:
             linked = crawl_linked(targets, cache, base_cfg, args.follow_max_sites,
                                   args.follow_max_pages, args.follow_max_depth, platform_hosts, **kwargs)
         except BaseException:
-            SiteRegistry(main_sites + seed_sites
-                         + planned_sites(targets, platform_hosts, "interrupted (partly crawled)"),
+            # Sites finished before the stop keep their status; the others are marked.
+            done = {s.key: s for s in list(finished)}
+            planned = [done.get(s.key, s) for s in
+                       planned_sites(targets, platform_hosts, "interrupted (not finished)")]
+            SiteRegistry(main_sites + seed_sites + planned,
                          args.include_subdomains).save(out / "sites.json")
             log.warning("Linked-site crawl stopped. sites.json lists every planned site, so "
                         "--no-crawl analyses what was cached; run the same command again to resume.")
@@ -830,6 +857,21 @@ def run(args: argparse.Namespace, out: Path, info: dict) -> int:
                     "(e.g. %s). If the linked-site crawl was interrupted, run the command once "
                     "without --no-crawl to resume (cached pages are reused).", len(orphans), len(oh),
                     ", ".join(h for h, _ in oh.most_common(5)))
+    # Safety net for folders made by earlier versions, which swept the calendar again
+    # from every paginated archive page (/events/page/2/?calendar_month=...): such
+    # repeated months are neither analysed nor used as event listings (finding 28).
+    dup_months = duplicate_calendar_months(
+        cp for cp in (cache.get(u) for u, m in meta.items() if m[2] == "calendar") if cp is not None)
+    if dup_months:
+        for u in dup_months:
+            final = meta.pop(u, (u,))[0]
+            for k in (u, final):
+                pg = pages_by_url.get(k)
+                if pg is not None and pg.kind == "calendar":
+                    del pages_by_url[k]
+        log.warning("%d cached calendar months repeat a month already loaded from another page "
+                    "of the same calendar (left by an older version, e.g. /events/page/2/) and are "
+                    "ignored. A fresh output folder or --refresh avoids them.", len(dup_months))
     order = {"main": 0, "linked": 1}
     pages = sorted(pages_by_url.values(), key=lambda p: (order.get(p.site_role, 2), p.site, p.depth, p.url))
     del pages_by_url, loaded_pages
@@ -893,14 +935,14 @@ def run(args: argparse.Namespace, out: Path, info: dict) -> int:
     if index.date_conflicts:
         log.info("%d agenda entries repeat an event with a different date range; the first "
                  "listing's dates are kept", index.date_conflicts)
-    real_seed = filter_targets({ln.url: [] for ln in seed_links}, skip_hosts)
+    real_seed = filter_targets({ln.url: [] for ln in seed_links}, skip_hosts, platform_hosts)
     for ln in seed_links:   # older runs without entries
         if ln.url in real_seed and not seed_pdfs.get(ln.pdf):
             index.add_pdf_link(ln.url, ln.event, ln.date_raw, ln.date_iso, ln.pdf)
     why = index.locate()
     if why:
         log.warning("Event countries not set: %s", why)
-    else:
+    elif index.events:
         located = sum(1 for ev in index.events.values() if ev.country.get("countries"))
         log.info("Event countries found for %d of %d events", located, len(index.events))
     event_fields = ["event", "date", "event_link", "event_key", "listed_on", "calendar_months",
@@ -1063,6 +1105,7 @@ def run(args: argparse.Namespace, out: Path, info: dict) -> int:
         return "linked_pdf" if page.is_pdf else "linked_page"
 
     title_keys: Dict[str, str] = {}
+    title_runs: Dict[str, Set[str]] = {}
 
     def in_title(org_key: str, ref: EventRef) -> bool:
         """Is the organisation named in the event's title (as whole words, or as the
@@ -1073,6 +1116,13 @@ def run(args: argparse.Namespace, out: Path, info: dict) -> int:
         if tk is None:
             tk = title_keys[ref.name] = f" {canonical_key(ref.name)} "
         if f" {org_key} " in tk:
+            return True
+        # Spacing variants on word boundaries: "Geef Tegengas" in "Geef Tegen Gas ...".
+        runs = title_runs.get(ref.name)
+        if runs is None:
+            runs = title_runs[ref.name] = squash_runs(ref.name)
+        sq = squash_key(org_key)
+        if len(sq) >= 4 and sq in runs:
             return True
         if " " not in org_key and len(org_key) >= 4 and "#" in ref.name:
             return any(canonical_key(h).startswith(org_key) for h in re.findall(r"#(\w+)", ref.name))
@@ -1115,6 +1165,7 @@ def run(args: argparse.Namespace, out: Path, info: dict) -> int:
             for long_form, acr in acronym_pairs(b.text):
                 lk = canonical_key(long_form)
                 if extractor._head_type(long_form.split()) or lk in extractor.watchlist.canonical:
+                    lk = extractor.merge_key(lk)     # the run-wide key of spacing variants
                     acronyms.setdefault(canonical_key(acr), lk)
                     acr_display[lk][acr] += 1
 
@@ -1141,7 +1192,7 @@ def run(args: argparse.Namespace, out: Path, info: dict) -> int:
     prog = Progress("pages analysed", len(pages))
     for pi, page in enumerate(pages, 1):
         texts = [b.text for b in page.blocks]
-        lang = detect_language(" ".join(texts[:200]), page.lang)
+        lang = page_language(texts, page.lang)   # declared, else most paragraphs' language
         langs[lang] += 1
         docs = extractor.pipe(texts, lang)
         block_hits = [themes.find(t) for t in texts]
@@ -1279,7 +1330,7 @@ def run(args: argparse.Namespace, out: Path, info: dict) -> int:
                 continue
             evs = block_refs[bi]
             for m in mentions:
-                m.key = acronyms.get(m.key, m.key)
+                m.key = extractor.merge_key(acronyms.get(m.key, m.key))
             if on_listing and evs:
                 # A calendar cell's title (and the link around it) names the event, not
                 # an organisation that takes part in it.
@@ -1300,10 +1351,15 @@ def run(args: argparse.Namespace, out: Path, info: dict) -> int:
                 if m.start >= 0 and sents:
                     idx = next((i for i, (s, e) in enumerate(sents) if s <= m.start < e), 0)
                     sentence = block.text[sents[idx][0]:sents[idx][1]]
-                    context = window(sents, idx, args.context_sentences, block.text)
+                    lo = max(0, idx - args.context_sentences)
+                    hi = min(len(sents) - 1, idx + args.context_sentences)
+                    context = block.text[sents[lo][0]:sents[hi][1]]      # as window()
+                    # The paragraph's hits inside the window, without searching again (finding 33).
+                    ctx_hits = ThemeSet.clip(bhits, sents[lo][0], sents[hi][1])
                 else:
                     sentence = context = block.text or f"[link] {m.surface}"
-                ctx_hits = themes.find(context)
+                    # a link-only block: the '[link] name' text itself can hold a term
+                    ctx_hits = bhits if block.text else themes.find(context)
 
                 scope_hits = {"any": None, "page": page_hits, "paragraph": bhits,
                               "sentence": ctx_hits}[args.theme_scope]
@@ -1376,12 +1432,7 @@ def run(args: argparse.Namespace, out: Path, info: dict) -> int:
         prog.tick(pi)
 
     log.info("Page languages: %s", ", ".join(f"{k} {n}" for k, n in langs.most_common()))
-    if extractor.missing_models:
-        log.warning("NER was skipped for some text because these spaCy models are not installed "
-                    "(rule-based detection still ran): %s. Install with: %s",
-                    ", ".join(sorted(extractor.missing_models)),
-                    " && ".join(f"python -m spacy download {m}" for m in sorted(extractor.missing_models)
-                                if m.endswith("_sm")))
+    extractor.log_model_summary(log)    # missing, broken (spacy validate) and smaller models
     log.info("Merging organisation names ...")
     # Site-wide vetting of names found only by NER / links / appositives.
     methods_by_key: Dict[str, Set[str]] = defaultdict(set)
@@ -1458,7 +1509,7 @@ def run(args: argparse.Namespace, out: Path, info: dict) -> int:
     site_status = {s.key: s for s in registry.sites}
     rows = index.rows(pdf_display)
     for ev, row in zip(sorted(index.events.values(), key=lambda e: (e.date, e.name, e.key)), rows):
-        row.update(event_coverage(ev, registry, site_status, analysed, skip_hosts))
+        row.update(event_coverage(ev, registry, site_status, analysed, skip_hosts, platform_hosts))
         row["pages_analysed"] = len(ev_pages.get(ev.key, ()))
         row["words_analysed"] = ev_words.get(ev.key, 0)
         row["org_mentions"] = ev_mentions.get(ev.key, 0)
@@ -1472,15 +1523,12 @@ def run(args: argparse.Namespace, out: Path, info: dict) -> int:
                  [st.key for st in registry.sites if analysed.get(st.key)])
 
     # Run record (completed in main()).
-    models = {}
-    for name, nlp in (getattr(extractor, "_models", None) or {}).items():
-        if nlp is not None:
-            models[name] = getattr(nlp, "meta", {}).get("version", "")
     fetched = [getattr(p, "fetched_at", 0) for p in pages if getattr(p, "fetched_at", 0)]
     info.update({
-        "spacy_models_used": models, "ner_size": args.ner_size, "spacy_model": args.spacy_model,
-        "spacy_models_missing": sorted(getattr(extractor, "missing_models", ()) or ()),
-        "spacy_models_broken": sorted(getattr(extractor, "broken_models", ()) or ()),
+        # every model whose results were used (also freed or cache-only ones), fallbacks,
+        # missing and broken models
+        **extractor.model_record(),
+        "ner_size": args.ner_size, "spacy_model": args.spacy_model,
         "pages_fetched_between": [dt.datetime.fromtimestamp(min(fetched)).isoformat(timespec="seconds"),
                                   dt.datetime.fromtimestamp(max(fetched)).isoformat(timespec="seconds")]
         if fetched else [],
@@ -1488,7 +1536,13 @@ def run(args: argparse.Namespace, out: Path, info: dict) -> int:
                    "organisations": len(orgs), "mentions": len(kept), "theme_hits": n_theme_rows,
                    "sources": n_units, "sources_with_theme_hit": n_units_theme},
         "sites_registry": "rebuilt from cached links" if registry_rebuilt else "sites.json",
+        # paragraphs run through spaCy now ("analysed") or read from the NER cache ("cache")
+        "ner_paragraphs": dict(getattr(extractor, "ner_stats", None) or {}),
     })
+    ner_stats = getattr(extractor, "ner_stats", None) or {}
+    if ner_stats:
+        log.info("Named-entity recognition: %d distinct paragraphs analysed by spaCy, %d read from the NER cache",
+                 ner_stats.get("analysed", 0), ner_stats.get("cache", 0))
     n_orgs, n_kept, n_pages = len(orgs), len(kept), len(pages)
 
     # Free the large structures before the master files are built (they are read
@@ -1527,14 +1581,14 @@ def run(args: argparse.Namespace, out: Path, info: dict) -> int:
 
 
 def event_coverage(ev, registry: SiteRegistry, sites: Dict[str, Site], analysed: Counter,
-                   skip_hosts: Set[str]) -> Dict[str, str]:
+                   skip_hosts: Set[str], platform_hosts: Optional[Set[str]] = None) -> Dict[str, str]:
     """Was the event's own link read? link_followed yes/no, and why not."""
     link = ev.link or ev.key
     if not re.match(r"https?://", link or ""):
         return {"link_followed": "no", "link_status": "no link"}
     site = registry.site_of(link)
     if site is None:
-        if not filter_targets({link: []}, skip_hosts):
+        if not filter_targets({link: []}, skip_hosts, platform_hosts):
             return {"link_followed": "no", "link_status": "not followed (social media or skipped host)"}
         return {"link_followed": "no", "link_status": "not followed"}
     n = analysed.get(site.key, 0)
@@ -1597,17 +1651,28 @@ def aggregate(rows: List[dict], extractor: OrgExtractor, acr_display: Dict[str, 
 
 def _best_form(forms: Counter) -> str:
     # Most frequent surface form, preferring spelled-out names over acronyms;
-    # ties go to the longer (more complete) form.
+    # ties go to the longer (more complete) form. A capitalised form is not taken
+    # for an acronym when another form is the same name in other case or spacing
+    # ("ANV-COP21" and "ANV Cop21" are one name, so the more frequent one is shown).
+    squashed = Counter(re.sub(r"[\W_]+", "", f.casefold()) for f in forms)
+
     def is_acronym(f: str) -> bool:
-        return bool(re.fullmatch(r"[A-Z0-9&.\-]{2,12}", f))
+        return (bool(re.fullmatch(r"[A-Z0-9&.\-]{2,12}", f))
+                and squashed[re.sub(r"[\W_]+", "", f.casefold())] < 2)
     return max(forms.items(), key=lambda kv: (not is_acronym(kv[0]), kv[1], len(kv[0])))[0]
 
 
 def _confidence(methods: Counter, n_pages: int) -> str:
     strong = {"watchlist", "appositive"}
-    if strong & set(methods) or len(methods) >= 2:
+    # NER and the weak lower-case-head rule ('pattern_after') count as one method, so
+    # a name they both find is not 'high' on that alone.
+    ms = set(methods)
+    if ms & NER_LIKE_METHODS:
+        ms = (ms - NER_LIKE_METHODS) | {"ner"}
+    if strong & ms or len(ms) >= 2:
         return "high"
-    if "pattern" in methods or "link" in methods or n_pages >= 3:
+    # 'title' (a recurring name in agenda titles) is a rule like 'pattern'.
+    if ms & {"pattern", "link", "title"} or n_pages >= 3:
         return "medium"
     return "low"
 

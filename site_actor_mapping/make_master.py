@@ -175,7 +175,7 @@ _title_key_cache: Dict[str, str] = {}
 
 def _in_title(org_key: str, event_name: str) -> bool:
     """Organisation named in the event title as whole words (for older folders)."""
-    from extract import canonical_key
+    from extract import canonical_key, squash_key, squash_runs
     k = canonical_key(org_key or "")
     if not k:
         return False
@@ -183,6 +183,10 @@ def _in_title(org_key: str, event_name: str) -> bool:
     if t is None:
         t = _title_key_cache[event_name] = f" {canonical_key(event_name or '')} "
     if f" {k} " in t:
+        return True
+    # Spacing variants on word boundaries: "Geef Tegengas" in "Geef Tegen Gas ...".
+    sq = squash_key(k)
+    if len(sq) >= 4 and sq in squash_runs(event_name or ""):
         return True
     # "#ShellMustFall": a one-word name at the start of a hashtag.
     return " " not in k and len(k) >= 4 and any(
@@ -590,9 +594,11 @@ def build_masters(results: Sequence[Path], out_dir: Path, min_confidence: str = 
     left_out_sources = len({x["source_unit"] for x in excl})
     if theme_filter != "none":
         log.info("Theme filter '%s': kept %d of %d network rows, %d of %d organisations and %d of %d "
-                 "events; %d sources with organisations but no theme hit were left out (listed in the "
+                 "events; %d %s with organisations but no theme hit %s left out (listed in the "
                  "excluded_sources sheet). Use --theme-filter none to keep everything.",
-                 theme_filter, *n["network_rows"], *n["organisations"], *n["events"], left_out_sources)
+                 theme_filter, *n["network_rows"], *n["organisations"], *n["events"], left_out_sources,
+                 "source" if left_out_sources == 1 else "sources",
+                 "was" if left_out_sources == 1 else "were")
         if before_content and not net:
             log.warning("The theme filter left master_network empty: no source has a theme hit. "
                         "Check the --themes file.")

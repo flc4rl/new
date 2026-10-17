@@ -22,7 +22,7 @@ from urllib.parse import urlparse
 
 from bs4 import BeautifulSoup
 
-from calendar_sweep import month_window
+from calendar_sweep import duplicate_calendar_months, month_window
 from crawler import (CachedPage, CrawlConfig, Crawler, PageCache, fmt_duration, normalise_url,
                      registered_host, safe_join)
 
@@ -193,7 +193,8 @@ def calendar_html(html: str) -> str:
 
 def collect_targets(cache: PageCache, main_hosts: Set[str], mode: str,
                     extra_skip: Set[str], calendar_from: Optional[str] = None,
-                    calendar_to: Optional[str] = None) -> Dict[str, List[Via]]:
+                    calendar_to: Optional[str] = None,
+                    platform_hosts: Optional[Set[str]] = None) -> Dict[str, List[Via]]:
     """External URLs to follow, each with where it was found.
 
     mode "events": links in loaded calendar months, plus links in the main
@@ -202,6 +203,7 @@ def collect_targets(cache: PageCache, main_hosts: Set[str], mode: str,
     Links present on many pages (sponsors, partner strips) are left out.
     calendar_from / calendar_to (YYYY-MM): cached calendar months outside this
     window (left by an earlier, wider run in the same folder) are ignored.
+    platform_hosts: hosts read one page at a time (see filter_targets).
     """
     in_window = month_window(calendar_from, calendar_to)
     pages = {p.url: p for p in cache if not p.is_pdf and p.body and p.status < 400
@@ -224,6 +226,8 @@ def collect_targets(cache: PageCache, main_hosts: Set[str], mode: str,
 
     if mode == "events":
         calendars = [p for p in pages.values() if p.kind == "calendar"]
+        dup = duplicate_calendar_months(calendars)     # stale /events/page/N/ sweeps (finding 28)
+        calendars = [p for p in calendars if p.url not in dup]
         # The calendar page itself already shows some months when it loads. Their
         # dates are not known here, so with a month window they are left out.
         for host_url in ({c.referrer for c in calendars if c.referrer} if in_window is None else ()):
@@ -270,7 +274,7 @@ def collect_targets(cache: PageCache, main_hosts: Set[str], mode: str,
     for url, vias in targets.items():
         targets[url] = list({(v.page, v.event, v.month): v for v in vias}.values())
 
-    return filter_targets(targets, extra_skip)
+    return filter_targets(targets, extra_skip, platform_hosts)
 
 
 def filter_targets(targets: Dict[str, List[Via]], extra_skip: Set[str],
@@ -341,7 +345,8 @@ def _why_unreachable(cr: Crawler) -> str:
 def crawl_linked(targets: Dict[str, List[Via]], cache: PageCache, base_cfg: CrawlConfig,
                  max_sites: Optional[int], max_pages: int, max_depth: int,
                  platform_hosts: Set[str], workers: int = 8,
-                 blocked_hosts: Optional[Set[str]] = None) -> List[Site]:
+                 blocked_hosts: Optional[Set[str]] = None,
+                 progress: Optional[List[Site]] = None) -> List[Site]:
     """Crawl each linked website (grouped by host) with its own, smaller limits.
 
     max_sites: crawl at most this many sites, most-linked first; 0, None or a
@@ -351,6 +356,8 @@ def crawl_linked(targets: Dict[str, List[Via]], cache: PageCache, base_cfg: Craw
     a time with the usual --delay; hosts on one server share a worker).
     blocked_hosts: hosts a moved site may never be redirected onto (e.g. the
     main site); skip and platform hosts and the other linked sites are added.
+    progress: if given, each site is appended to it as soon as it is finished, so
+    a caller interrupted by Ctrl+C still knows which sites were completed.
     The returned list is in the same order whatever the number of workers.
     """
     by_host: Dict[str, List[str]] = defaultdict(list)
@@ -403,6 +410,8 @@ def crawl_linked(targets: Dict[str, List[Via]], cache: PageCache, base_cfg: Craw
             n = cr.crawl()
             why = "" if n else _why_unreachable(cr)
             status = "crawled" if n else f"unreachable: {why}" if why else "unreachable"
+            if stop.is_set():          # Ctrl-C stopped this site before it was finished
+                status = "interrupted (partly crawled)"
         except Exception as exc:  # noqa: BLE001 - one broken site should not stop the run
             log.error("Linked site %s failed: %s: %s", host, type(exc).__name__, exc)
             n, status = 0, f"failed: {exc}"
@@ -417,8 +426,10 @@ def crawl_linked(targets: Dict[str, List[Via]], cache: PageCache, base_cfg: Craw
             status_of[host] = status
             elapsed = time.monotonic() - t0
             left = elapsed / done[0] * (limit - done[0])
-            log.info("Linked site %d/%d done: %s, %s (%d pages); %s elapsed, ~%s left",
+            log.info("Linked site done (%d of %d finished): %s, %s (%d pages); %s elapsed, ~%s left",
                      done[0], limit, host, status, n, fmt_duration(elapsed), fmt_duration(left))
+            if progress is not None:   # lets the caller record finished sites if the run is stopped
+                progress.extend(out)
         return out
 
     # Hosts on one server form one job, run in ranked order; jobs run side by side.

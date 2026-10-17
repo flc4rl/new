@@ -7,8 +7,9 @@ Analysis tables, charts and network files for a finished run (read-only).
 RESULTS_DIR is a site_actors.py results folder (or a make_master.py output
 folder). It must hold master_network (.xlsx or .csv), master_themes (.xlsx or
 .csv) and events.csv. Optional files (seed_links.json, pages.csv, sites.csv,
-sources.csv) are looked up there and then in every --run folder; analyses that
-need a missing file are skipped and listed in summary.json ("skipped").
+sources.csv) are read from there and from every --run folder (combined);
+analyses that need a missing file are skipped and listed in summary.json
+("skipped").
 
 Nothing in RESULTS_DIR is changed. OUT receives:
 
@@ -67,7 +68,7 @@ import time
 import unicodedata
 from collections import Counter, OrderedDict, defaultdict
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional, Sequence, Set, Tuple
+from typing import Dict, List, Optional, Sequence, Set, Tuple
 from urllib.parse import unquote, urlparse
 
 log = logging.getLogger("analytics")
@@ -180,6 +181,21 @@ def host_of(u: str) -> str:
 
 def is_web(u: str) -> bool:
     return bool(re.match(r"https?://", s(u), re.I))
+
+
+def _join_entry_lines(lines: List[str]) -> str:
+    """Join the wrapped lines of an agenda entry as site_actors.seed_blocks does: a
+    line ending in a hyphen right after a non-space continues on the next line
+    without a space (so a URL broken by a line wrap stays one URL and its tail is
+    not searched for theme terms)."""
+    txt = ""
+    for ln in lines:
+        ln = ln.strip()
+        if txt.endswith("-") and len(txt) > 1 and not txt[-2].isspace():
+            txt += ln
+        else:
+            txt = f"{txt} {ln}" if txt else ln
+    return txt
 
 
 def year_of(date: str) -> Optional[int]:
@@ -451,23 +467,28 @@ def write_xlsx(path: Path, sheets: List[Tuple[str, List[dict], List[str]]],
             letter = get_column_letter(fields.index(col) + 1)
             dv = DataValidation(type="list", formula1='"' + ",".join(allowed) + '"', allow_blank=True)
             dv.add(f"{letter}2:{letter}{max(len(rows), 1) + 500}")
-            ws.add_data_validation(dv)
+            ws.data_validations.append(dv)   # write-only sheets keep a plain list
         hdr = []
         for f in fields:
             c = WriteOnlyCell(ws, value=f)
             c.font = bold
             hdr.append(c)
         ws.append(hdr)
+        # Wrapped text only on smaller sheets: styled cells are slow to write, and a
+        # 20,000-row sheet is read with filters rather than scrolled through.
+        wrap_cols = {f for f in fields if WIDE.get(f, 0) >= 40} if len(rows) <= 5000 else set()
         for r in rows:
             cells = []
             for f in fields:
                 v = _xl(r.get(f, ""))
-                c = WriteOnlyCell(ws, value=v)
-                if isinstance(v, str) and v.startswith("="):
-                    c.data_type = "s"          # text, never a formula
-                if WIDE.get(f, 0) >= 40:
-                    c.alignment = wrap
-                cells.append(c)
+                if f in wrap_cols or (isinstance(v, str) and v.startswith("=")):
+                    c = WriteOnlyCell(ws, value=v)
+                    if isinstance(v, str) and v.startswith("="):
+                        c.data_type = "s"          # text, never a formula
+                    if f in wrap_cols:
+                        c.alignment = wrap
+                    v = c
+                cells.append(v)
             ws.append(cells)
     tmp = _atomic(path)
     wb.save(tmp)
@@ -475,13 +496,17 @@ def write_xlsx(path: Path, sheets: List[Tuple[str, List[dict], List[str]]],
 
 
 def clean_graph(G):
-    """A copy whose attributes the GEXF and GraphML writers accept: None and NaN
-    become "", lists and sets "; "-joined text, control characters removed."""
+    """A copy whose attributes the GEXF and GraphML writers accept: lists and sets
+    become "; "-joined text, control characters are removed, and every attribute
+    gets one type (GEXF refuses mixed types). A numeric attribute with gaps
+    becomes a float with NaN for the gaps; any other attribute with None/NaN or
+    mixed values becomes text with "" for the gaps."""
     import networkx as nx
 
-    def fix(v):
-        if v is None or (isinstance(v, float) and math.isnan(v)):
-            return ""
+    def missing(v):
+        return v is None or (isinstance(v, float) and math.isnan(v)) or v == ""
+
+    def plain(v):
         if isinstance(v, bool):
             return yn(v)
         if isinstance(v, (list, tuple, set, frozenset)):
@@ -489,11 +514,30 @@ def clean_graph(G):
         if isinstance(v, (int, float)):
             return v
         return _CTRL.sub("", str(v))
+
+    def fixers(items):
+        kinds: Dict[str, Set[str]] = defaultdict(set)
+        for d in items:
+            for k, v in d.items():
+                v = plain(v) if not missing(v) else None
+                kinds[k].add("none" if v is None else "float" if isinstance(v, float) else
+                             "int" if isinstance(v, int) else "str")
+        out = {}
+        for k, ks in kinds.items():
+            if ks <= {"int"}:
+                out[k] = lambda v: v
+            elif ks <= {"int", "float", "none"}:
+                out[k] = lambda v: float("nan") if missing(v) else float(v)
+            else:
+                out[k] = lambda v: "" if missing(v) else str(plain(v))
+        return out
+    nf = fixers([d for _, d in G.nodes(data=True)])
+    ef = fixers([d for _, _, d in G.edges(data=True)])
     H = nx.Graph()
     for n, d in G.nodes(data=True):
-        H.add_node(_CTRL.sub("", str(n)), **{k: fix(v) for k, v in d.items()})
+        H.add_node(_CTRL.sub("", str(n)), **{k: nf[k](v) for k, v in d.items()})
     for a, b, d in G.edges(data=True):
-        H.add_edge(_CTRL.sub("", str(a)), _CTRL.sub("", str(b)), **{k: fix(v) for k, v in d.items()})
+        H.add_edge(_CTRL.sub("", str(a)), _CTRL.sub("", str(b)), **{k: ef[k](v) for k, v in d.items()})
     return H
 
 
@@ -527,6 +571,7 @@ class Analysis:
         self.results = Path(args.results)
         self.runs = [Path(r) for r in (args.run or [])]
         self.inputs: Dict[str, Path] = {}
+        self.all_inputs: Dict[str, List[Path]] = {}
         self.skipped: Dict[str, str] = {}
         self.warnings: List[str] = []
         self.diag: List[dict] = []
@@ -546,17 +591,32 @@ class Analysis:
         self.tables[name] = (rows, fields)
 
     def optional(self, name: str) -> Optional[Path]:
+        """First copy of an optional file in RESULTS_DIR or the --run folders. Every
+        copy found is kept in self.all_inputs[name], so that several --run folders
+        (masters merged by make_master.py) are all read; later copies are also listed
+        in summary.json as "<name> [2]", "<name> [3]" and so on."""
+        found: List[Path] = []
         for d in [self.results] + self.runs:
             p = d / name
-            if p.exists() and p.stat().st_size:
-                self.inputs[name] = p
-                return p
-        return None
+            if p.exists() and p.stat().st_size and p.resolve() not in {q.resolve() for q in found}:
+                found.append(p)
+        if not found:
+            return None
+        self.all_inputs[name] = found
+        self.inputs[name] = found[0]
+        for i, p in enumerate(found[1:], 2):
+            self.inputs[f"{name} [{i}]"] = p
+        return found[0]
+
+    def optional_rows(self, name: str) -> List[dict]:
+        """Rows of every copy of an optional CSV file (see optional())."""
+        return [r for p in self.all_inputs.get(name, []) for r in read_csv(p)[1]]
 
     # ------------------------------------------------------------ loading
     def load(self) -> None:
         a = self.a
-        path, net = read_master(self.results, "master_network", ["event_organisations", "menus_and_footers"])
+        path, net = read_master(self.results, "master_network", ["event_organisations", "menus_and_footers",
+                                                                 "all_events", "sources", "excluded_sources", "about"])
         if path is None:
             raise InputError(f"master_network.xlsx or master_network.csv not found in {self.results}")
         self.inputs["master_network"] = path
@@ -565,14 +625,25 @@ class Analysis:
             raise InputError(f"master_themes.xlsx or master_themes.csv not found in {self.results}")
         self.inputs["master_themes"] = path
         ev_path = self.results / "events.csv"
-        if not ev_path.exists():
-            raise InputError(f"events.csv not found in {self.results}")
-        self.inputs["events.csv"] = ev_path
+        if ev_path.exists():
+            self.inputs["events.csv"] = ev_path
+            self.ev_fields, self.ev_rows = read_csv(ev_path)
+        elif net["all_events"][1]:
+            # A make_master.py folder without events.csv: its all_events sheet lists every event.
+            self.ev_fields, self.ev_rows = net["all_events"]
+            self.note("events table", "master_network all_events sheet", "events.csv not found")
+        else:
+            raise InputError(f"events.csv not found in {self.results} (and master_network has no all_events sheet)")
         self.net_fields, self.net_rows = net["event_organisations"]
         self.menu_rows = net["menus_and_footers"][1]
         self.th_fields, self.th_rows = th["theme_instances"]
         self.th_menu_rows = th["menus_and_sidebars"][1]
-        self.ev_fields, self.ev_rows = read_csv(ev_path)
+        self.sources_sheet = net["sources"][1]
+        self.excluded_sources = net["excluded_sources"][1]
+        # The theme filter make_master.py already applied (newer masters say so in their about sheet).
+        about = {r.get("item", ""): r.get("value", "") for r in net["about"][1]}
+        self.master_filter = about.get("theme_filter", "") or ("none" if not self.excluded_sources else "")
+        self.master_about = about
         need_net = {"event", "event_date", "event_link", "organisation", "confidence", "source_link", "site",
                     "site_role"}
         need_th = {"theme", "term", "event", "event_date", "event_link", "source_link", "sentence"}
@@ -603,9 +674,35 @@ class Analysis:
         self.themes = names or ["colonialism", "racism", "fascism"]
         for name in ("seed_links.json", "pages.csv", "sites.csv", "sources.csv", "summary.json"):
             self.optional(name)
+        self.sources_rows = (self.optional_rows("sources.csv") if "sources.csv" in self.inputs
+                             else self.sources_sheet)
+        self._check_master_filter()
         self.org_codes = self._read_codes(a.org_codes, "org_codes") if a.org_codes else []
         self.event_codes = self._read_codes(a.event_codes, "event_codes") if a.event_codes else []
         self.curated = bool(self.org_codes)
+
+    def _check_master_filter(self) -> None:
+        """make_master.py (newer versions) applies the inclusion criterion itself, so
+        sources left out there cannot be brought back here. Say so when a weaker
+        filter is asked for."""
+        mf, tf = self.master_filter, self.a.theme_filter
+        if mf:
+            self.note("theme filter applied by make_master.py", mf,
+                      f"{len(self.excluded_sources)} sources listed in excluded_sources")
+        # make_master.py's own counts (about sheet): what its filter kept of what was found
+        self.master_counts = {}
+        for what in ("network_rows", "organisations", "events"):
+            kept, before = s(self.master_about.get(f"{what}_kept")), s(self.master_about.get(f"{what}_before_filter"))
+            if kept.isdigit() and before.isdigit():
+                self.master_counts[what] = (int(kept), int(before))
+                self.note(f"make_master.py theme filter: {what} kept", f"{kept}/{before}",
+                          f"{int(before) - int(kept)} left out before analytics")
+        if mf and mf != "none" and tf != mf:
+            strength = {"none": 0, "site": 1, "event": 1, "source": 2}
+            if strength.get(tf, 0) <= strength.get(mf, 0):
+                self.warn("master_network was built with --theme-filter %s, so organisations from sources "
+                          "without a theme hit are not in it. --theme-filter %s here cannot bring them back; "
+                          "rebuild the masters with make_master.py --theme-filter none first", mf, tf)
 
     def _read_codes(self, path: str, label: str) -> List[dict]:
         p = Path(path)
@@ -721,8 +818,11 @@ class Analysis:
                 ev["streams"] = ev["_streams"]
             return
         try:
-            data = json.loads(path.read_text(encoding="utf-8"))
-            pdfs = data.get("pdfs") or {}
+            pdfs = {}
+            for p in self.all_inputs.get("seed_links.json", [path]):   # several --run folders
+                data = json.loads(p.read_text(encoding="utf-8"))
+                for k, v in (data.get("pdfs") or {}).items():
+                    pdfs.setdefault(k, v)
         except (OSError, ValueError) as exc:
             self.skipped["entry_rates"] = f"seed_links.json unreadable ({exc})"
             for ev in self.events:
@@ -896,7 +996,7 @@ class Analysis:
 
     def build_refs(self) -> None:
         self.page_year: Dict[str, int] = {}
-        self.pages = read_csv(self.inputs["pages.csv"])[1] if "pages.csv" in self.inputs else []
+        self.pages = self.optional_rows("pages.csv")
         for pg in self.pages:
             y = year_of(pg.get("date") or pg.get("page_date") or "")
             if y:
@@ -943,18 +1043,28 @@ class Analysis:
         # ---- theme instances
         self.instances: List[dict] = []
         for sheet, rows in (("theme_instances", self.th_rows), ("menus_and_sidebars", self.th_menu_rows)):
-            groups: "OrderedDict[tuple, dict]" = OrderedDict()
+            # Long layout: one row per (hit, event), so rows of one hit are joined again.
+            # A term found twice in the same sentence gives two hits with identical
+            # columns; a row whose event is already in the group starts a new instance.
+            groups: "OrderedDict[tuple, List[dict]]" = OrderedDict()
             for i, r in enumerate(rows):
                 gk = ((sheet, r.get("source_unit") or r.get("source_link", ""), r.get("theme", ""),
                        r.get("term", ""), r.get("sentence", ""), r.get("context_before", ""),
-                       r.get("context_after", ""), r.get("region", "")) if self.long_th else (sheet, i))
-                g = groups.get(gk)
+                       r.get("context_after", ""), r.get("region", ""), r.get("duplicate_of", ""),
+                       r.get("boilerplate", "")) if self.long_th else (sheet, i))
+                refs = [(name, date, link, key, r.get("layer", ""))
+                        for name, date, link, key in self._explode(r, self.long_th)]
+                ev_ids = {rf[:4] for rf in refs}
+                cands = groups.setdefault(gk, [])
+                g = next((c for c in cands if not ev_ids & c["seen"]), None)
                 if g is None:
-                    g = groups[gk] = {"row": r, "sheet": sheet, "refs": []}
-                for name, date, link, key in self._explode(r, self.long_th):
-                    g["refs"].append((name, date, link, key, r.get("layer", "")))
-            for g in groups.values():
-                self.instances.append(self._instance(g))
+                    g = {"row": r, "sheet": sheet, "refs": [], "seen": set()}
+                    cands.append(g)
+                g["refs"].extend(refs)
+                g["seen"] |= ev_ids
+            for cands in groups.values():
+                for g in cands:
+                    self.instances.append(self._instance(g))
         self.theme_refs = [rf for inst in self.instances for rf in inst["refs"]]
         tc = Counter(rf["match"] for rf in self.theme_refs)
         self.note("event refs, theme rows", "; ".join(f"{k} {v}" for k, v in sorted(tc.items())))
@@ -1098,7 +1208,7 @@ def _derive(an: Analysis) -> None:
             pe[0] += 1
             pe[1] += int(pg.get("words") or 0) if s(pg.get("words")).isdigit() else 0
     read_hosts = set()
-    sites_rows = read_csv(an.inputs["sites.csv"])[1] if "sites.csv" in an.inputs else []
+    sites_rows = an.optional_rows("sites.csv")
     for sr in sites_rows:
         n = int(sr.get("pages_analysed") or 0) if s(sr.get("pages_analysed")).isdigit() else 0
         if sr.get("role") == "linked" and n >= 1:
@@ -1107,11 +1217,11 @@ def _derive(an: Analysis) -> None:
     row_web |= {rf["event_id"] for rf in an.theme_refs if rf["event_id"] and rf["layer"] != "listing_seed"}
     csv_followed = "link_followed" in an.ev_fields
     if csv_followed:
-        an.web_method = "events.csv (link_followed) + rows"
+        an.web_method = "link_followed column of events.csv, plus events with web-layer rows"
     elif an.pages or sites_rows:
-        an.web_method = "sites+pages"
+        an.web_method = "sites.csv and pages.csv, plus events with web-layer rows"
     else:
-        an.web_method = "proxy"
+        an.web_method = "proxy: events with web-layer rows in the masters"
     for ev in an.events:
         r = ev["_row"]
         host = ev["link_host"]
@@ -1182,7 +1292,7 @@ def _org_identity(an: Analysis) -> None:
                 umlaut[k] = f
     an.umlaut_merges = umlaut
     codes: Dict[str, dict] = {}
-    stale = 0
+    stale = same = 0
     for c in an.org_codes:
         name = c.get("organisation", "")
         derived = p.key(name) if name else p.key(c.get("org_key", ""))
@@ -1190,10 +1300,22 @@ def _org_identity(an: Analysis) -> None:
             continue
         if c.get("org_key") and c["org_key"] != derived and p.key(c["org_key"]) != derived:
             stale += 1
-        codes[derived] = c
+        if derived in codes:
+            # Two rows now give the same key (e.g. a spelling variant the current
+            # canonical_key already folds): fill the gaps of the first row, never overwrite it.
+            same += 1
+            first = codes[derived]
+            for f, v in c.items():
+                if s(v) and not s(first.get(f)):
+                    first[f] = v
+        else:
+            codes[derived] = dict(c)
     if stale:
         an.warn("org_codes: %d rows whose org_key no longer matches the organisation name (keys re-derived "
                 "from the name; check them)", stale)
+    if same:
+        an.note("org_codes rows folded into an earlier row with the same key", same,
+                "the first row's values win; empty cells are filled from the later row")
     merge = {}
     for k, c in codes.items():
         tgt = c.get("merge_into_key", "")
@@ -1567,7 +1689,7 @@ def a4_prevalence(an: Analysis) -> None:
         agg = defaultdict(lambda: {"entries": 0, "words": 0, "hits": Counter(), "with": Counter()})
         total_hits = 0
         for en in an.entries:
-            text = " ".join(en["lines"])
+            text = _join_entry_lines(en["lines"])
             words = len(_WORD.findall(p.URL_LIKE.sub(" ", text)))
             hits = an.ts.find(text)
             y = year_of(en["start"] or en["month"])
@@ -1608,7 +1730,12 @@ def a4_prevalence(an: Analysis) -> None:
     elif "entry_rates" not in an.skipped:
         an.skipped["entry_rates"] = "no agenda entries or no theme file"
     # ---- per-page rates (pages.csv / sources.csv)
-    src = read_csv(an.inputs["sources.csv"])[1] if "sources.csv" in an.inputs else an.pages
+    src = an.sources_rows or an.pages
+    # A seed PDF (or calendar page) is listed once as a whole and once per agenda entry
+    # (or cell); count only the parts, so words are not counted twice.
+    split_links = {r.get("source_link", "") for r in src if "#" in s(r.get("source_unit"))}
+    src = [r for r in src if not (r.get("source_unit") and "#" not in r["source_unit"]
+                                  and r.get("source_link", "") in split_links)]
     if src:
         agg = defaultdict(lambda: {"n": 0, "words": 0, "hits": Counter(), "with": Counter()})
         for pg in src:
@@ -1805,7 +1932,8 @@ def a5_network(an: Analysis) -> None:
                 for level in ("edition", "series"):
                     G = bipartite(an, ties, level)
                     st = graph_stats(G, an.a.backbone_alpha)
-                    rows.append({"theme_filter": f, "scenario": sc, "description": SCENARIOS[sc], "layers": layers,
+                    rows.append({"theme_filter": f, "master_theme_filter": an.master_filter or "unknown",
+                                 "scenario": sc, "description": SCENARIOS[sc], "layers": layers,
                                  "node_level": level, "rows": len(ties),
                                  "events": len({t["event_id"] for t in ties}),
                                  "series": len({t["series_id"] for t in ties}), "orgs": st["orgs"],
@@ -1818,7 +1946,7 @@ def a5_network(an: Analysis) -> None:
     for r in rows:
         r["orgs_in_2plus"] = r.pop("orgs_in_2plus_events", None) if r["node_level"] == "edition" else r.pop(
             "orgs_in_2plus_series", None)
-    an.table("sensitivity", rows, ["theme_filter", "scenario", "description", "layers", "node_level", "rows", "events",
+    an.table("sensitivity", rows, ["theme_filter", "master_theme_filter", "scenario", "description", "layers", "node_level", "rows", "events",
                                    "series", "orgs", "orgs_in_2plus", "edges", "components", "giant_nodes",
                                    "proj_edges", "top_event_share_of_proj_edges", "backbone_nodes", "backbone_edges",
                                    "backbone_a02_nodes", "backbone_a02_edges"])
@@ -1835,6 +1963,14 @@ def a5_network(an: Analysis) -> None:
         1 for n in G if n.startswith("E:")), "orgs": sum(1 for n in G if n.startswith("O:")),
         "edges": G.number_of_edges(), "proj_edges": P.number_of_edges(), "backbone_nodes": B.number_of_nodes(),
         "backbone_edges": B.number_of_edges()}
+    n_orgs = an.facts["default_graph"]["orgs"]
+    if n_orgs < 5:
+        # e.g. a run of the seed agendas only: most entry names are low-confidence NER finds
+        n_a = next((r["orgs"] for r in rows if r["theme_filter"] == tf and r["scenario"] == "A"
+                    and r["layers"] == "L1-L3" and r["node_level"] == "series"), 0)
+        an.warn("The default network (scenario %s) has only %d organisations (scenario A: %s). Centrality and "
+                "backbone figures are not meaningful; see the sensitivity table or try --min-confidence low",
+                an.default_sc, n_orgs, n_a)
     a6_centrality(an, ties, G, P, B)
     an.exports = {an.default_sc: (G, B)}
     if an.default_sc != "A":
@@ -1861,7 +1997,9 @@ def _betweenness(an: Analysis, G) -> Tuple[Dict[str, float], str]:
     else:
         bc = nx.betweenness_centrality(G, k=k, normalized=True, seed=an.a.seed)
         how = f"sampled k={k}, seed={an.a.seed}"
-    an.note("bipartite betweenness", how, f"{G.number_of_nodes()} nodes, {time.time() - t0:.1f} s")
+    # the time goes to the log only, so the diagnostics table stays identical between runs
+    log.info("Bipartite betweenness (%s) on %d nodes in %.1f s", how, G.number_of_nodes(), time.time() - t0)
+    an.note("bipartite betweenness", how, f"{G.number_of_nodes()} nodes")
     return bc, how
 
 
@@ -1894,7 +2032,7 @@ def a6_centrality(an: Analysis, ties: List[dict], G, P, B) -> None:
             others = set().union(*(members[e] for e in series if e != big)) if len(series) > 1 else set()
             hd = round(len(members[big] - others) / len(neigh), 4)
         evs = {t["event_id"] for t in ts}
-        cc = Counter(c for e in evs for c in an.ev_by_id[e]["countries"])
+        cc = Counter(c for e in sorted(evs) for c in an.ev_by_id[e]["countries"])
         tot = sum(cc.values())
         years = {an.ev_by_id[e]["year"] for e in evs if an.ev_by_id[e]["year"]}
         lv = {lev: len({t["series_id"] for t in ts if t["tie_level"] == lev}) for lev in ("L1", "L2", "L3")}
@@ -2058,8 +2196,12 @@ SITE_UI = re.compile(r"^(?:faq|newsletter|archive|archives|archiv|calendar|kalen
                      r"donate|spenden|shop|blog|news|press|presse|about|about us|team|events?)$", re.I)
 
 
+# Methods that are as weak as NER on their own (extract.NER_LIKE_METHODS).
+_NER_LIKE = frozenset({"ner", "pattern_after"})
+
+
 def _route(found_by: Set[str]) -> str:
-    return "ner_only" if found_by and found_by <= {"ner"} else ("rule" if found_by else "unknown")
+    return "ner_only" if found_by and found_by <= _NER_LIKE else ("rule" if found_by else "unknown")
 
 
 def a1_authority(an: Analysis, cap_rows: Optional[int] = None) -> None:
@@ -2086,13 +2228,13 @@ def a1_authority(an: Analysis, cap_rows: Optional[int] = None) -> None:
         for t in ts:
             fb.update(x for x in re.split(r"[;+,\s]+", t["found_by"].lower()) if x)
         years = sorted({an.ev_by_id[e]["year"] for e in evs if an.ev_by_id[e]["year"]})
-        cc = Counter(c for e in evs for c in an.ev_by_id[e]["countries"])
+        cc = Counter(c for e in sorted(evs) for c in an.ev_by_id[e]["countries"])
         lv = Counter(t["tie_level"] for t in real)
         ex = sorted(ts, key=lambda t: (t["in_menus"], -len(t["example"] or "")))
         exs = list(dict.fromkeys(collapse(t["example"]) for t in ex if t["example"]))[:2]
         surf = an.org_surfaces.get(k, Counter())
         flags = []
-        if " " not in k and fb <= {"ner"}:
+        if " " not in k and fb <= _NER_LIKE:
             flags.append("single_word_ner_only")
         if re.fullmatch(r"[A-Z0-9&.-]{2,6}", name):
             flags.append("unexpanded_acronym")
@@ -2148,7 +2290,8 @@ def a1_authority(an: Analysis, cap_rows: Optional[int] = None) -> None:
 
 
 def _is_place_name(p: Project, name: str) -> bool:
-    if p.gazetteer is None or len(name) < 3:
+    # Place names are short; longer names are not looked up (the gazetteer is the slow part).
+    if p.gazetteer is None or len(name) < 3 or len(name.split()) > 3:
         return False
     try:
         res = p.country(name)
@@ -2203,14 +2346,21 @@ def merge_candidates(an: Analysis, rows: List[dict]) -> List[dict]:
         if how == "inclusive":
             return re.sub(r"[.·•-]?(?:e[.·•-]?s|ne[.·•-]?s|e)\b", "", k)
         return k
+    hows = ("umlaut", "elision", "article", "year", "inclusive")
+    normed = {k: tuple(norm(k, h) for h in hows) for k in keys}   # once per key, not per pair
     out = []
     for a, b in sorted(pairs):
         reason = ""
-        for how in ("umlaut", "elision", "article", "year", "inclusive"):
-            if norm(a, how) == norm(b, how) and norm(a, how):
+        for i, how in enumerate(hows):
+            if normed[a][i] and normed[a][i] == normed[b][i]:
                 reason = how
                 break
-        ratio = difflib.SequenceMatcher(None, a, b).ratio()
+        # the cheap upper bounds first (length, then letters): the full ratio is computed
+        # only when it can reach 0.88
+        sm = None
+        if reason or 2 * min(len(a), len(b)) / (len(a) + len(b)) >= 0.88:
+            sm = difflib.SequenceMatcher(None, a, b)
+        ratio = sm.ratio() if sm and (reason or sm.quick_ratio() >= 0.88) else 0.0
         ta, tb = set(a.split()), set(b.split())
         if not reason:
             if ratio >= 0.88:
@@ -2221,6 +2371,7 @@ def merge_candidates(an: Analysis, rows: List[dict]) -> List[dict]:
             elif ta and tb and (ta < tb or tb < ta) and max(len(x) for x in ta & tb or {""}) >= 4:
                 reason = "contained"
         if reason:
+            ratio = ratio or difflib.SequenceMatcher(None, a, b).ratio()
             out.append({"key_a": a, "name_a": name[a], "key_b": b, "name_b": name[b], "reason": reason,
                         "score": round(ratio, 3), "accept": "yes" if reason == "umlaut" else ""})
     out.sort(key=lambda r: (r["reason"] != "umlaut", -r["score"], r["key_a"], r["key_b"]))
@@ -2274,7 +2425,7 @@ def precision_readback(an: Analysis, rows: List[dict]) -> List[dict]:
         if a["n"] and totN:
             est += a["N"] / totN * a["k"] / a["n"]
             estl += a["N"] / totN * a["kl"] / a["n"]
-    out.append({"stratum": "ALL (stratified estimate)", "N": totN, "n": sum(a["n"] for a in strata.values()),
+    out.append({"stratum": "ALL (stratified estimate over strata with coded names; N = their size)", "N": totN, "n": sum(a["n"] for a in strata.values()),
                 "k": sum(a["k"] for a in strata.values()), "precision": round(est, 4),
                 "k_lenient": sum(a["kl"] for a in strata.values()), "precision_lenient": round(estl, 4)})
     an.facts["precision"] = out[-1]
@@ -2376,3 +2527,1028 @@ KWIC_FIELDS = ["passage_id", "theme", "subtheme", "stance", "term_family", "left
                "site", "source_link", "orgs", "in_event_title", "in_handle", "in_sample", "sample_weight",
                "double_coded", "relevance", "frame_function", "code_1", "code_2", "code_3", "climate_linkage", "memo",
                "coder"]
+
+
+# ==========================================================================
+# Charts (matplotlib, Agg backend, 150 dpi; colour-blind-safe slots with a
+# legend, markers as a second encoding and an n= label on every bar or point)
+# ==========================================================================
+def _plt():
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    plt.rcParams.update({"font.size": 9, "axes.edgecolor": INK2, "axes.labelcolor": INK, "text.color": INK,
+                         "xtick.color": INK2, "ytick.color": INK2, "axes.grid": True, "grid.color": GRID,
+                         "grid.linewidth": 0.6, "axes.axisbelow": True, "axes.spines.top": False,
+                         "axes.spines.right": False, "figure.facecolor": SURFACE, "axes.facecolor": SURFACE,
+                         "legend.frameon": False, "svg.hashsalt": "analytics"})
+    return plt
+
+
+def _save(plt, fig, path: Path) -> None:
+    tmp = _atomic(path)
+    fig.savefig(tmp, dpi=150, format="png", bbox_inches="tight", metadata={"Software": None})
+    plt.close(fig)
+    os.replace(tmp, path)
+
+
+def _stream_colour(st: str, i: int = 0) -> str:
+    return STREAM_COLOUR.get(st, EXTRA_COLOURS[i % len(EXTRA_COLOURS)])
+
+
+def chart_coverage(an: Analysis, plt, path: Path) -> None:
+    """01: events per year stacked by stream; below it (same x, own y axis) the share
+    of events whose linked site was read, with Wilson intervals."""
+    years = sorted({e["year"] for e in an.events if e["year"]})
+    if not years:
+        return
+    streams = sorted({e["stream_primary"] for e in an.events})
+    fig, (ax, ax2) = plt.subplots(2, 1, figsize=(9, 6.5), sharex=True, gridspec_kw={"height_ratios": [3, 2]})
+    bottom = [0] * len(years)
+    for i, st in enumerate(streams):
+        vals = [sum(1 for e in an.events if e["year"] == y and e["stream_primary"] == st) for y in years]
+        ax.bar(years, vals, bottom=bottom, color=_stream_colour(st, i), label=st, width=0.8,
+               edgecolor=SURFACE, linewidth=1)
+        bottom = [a + b for a, b in zip(bottom, vals)]
+    for x, n in zip(years, bottom):
+        ax.annotate(f"n={n}", (x, n), xytext=(0, 2), textcoords="offset points", ha="center", fontsize=7, color=INK2)
+    ax.set_ylabel("events")
+    ax.set_title("Events per year by listing stream", loc="left")
+    ax.legend(title="stream", ncol=len(streams))
+    ks = [sum(1 for e in an.events if e["year"] == y and e["has_web_text"]) for y in years]
+    ns = bottom
+    sh = [k / n if n else 0 for k, n in zip(ks, ns)]
+    ci = [wilson(k, n) for k, n in zip(ks, ns)]
+    ax2.errorbar(years, sh, yerr=[[max(0, v - (c[0] or 0)) for v, c in zip(sh, ci)],
+                                  [max(0, (c[1] or 0) - v) for v, c in zip(sh, ci)]],
+                 color=INK2, marker="o", ms=5, lw=2, capsize=2)
+    for x, v, k, n in zip(years, sh, ks, ns):
+        ax2.annotate(f"{k}/{n}", (x, v), xytext=(0, 6), textcoords="offset points", ha="center", fontsize=7,
+                     color=INK2)
+    ax2.set_ylim(0, 1.05)
+    ax2.set_ylabel("share with web text")
+    ax2.set_title("Share of events whose linked site was read"
+                  + (" (proxy: events with web-layer rows)" if an.web_method.startswith("proxy") else ""), loc="left")
+    ax2.set_xticks(years)
+    ax2.tick_params(axis="x", rotation=45)
+    _save(plt, fig, path)
+
+
+def chart_ladder(an: Analysis, plt, path: Path) -> None:
+    """02: each theme's share of the total at every level of the measurement ladder."""
+    levels = ["raw_rows", "clean_rows", "unique_passages", "documents", "sites", "events_any", "events_own"]
+    th = an.themes
+    tot = [sum(an.ladder[t][lv] for t in th) for lv in levels]
+    if not any(tot):
+        return
+    fig, ax = plt.subplots(figsize=(9, 4.5))
+    left = [0.0] * len(levels)
+    for i, t in enumerate(th):
+        vals = [an.ladder[t][lv] / n if n else 0 for lv, n in zip(levels, tot)]
+        ax.barh(levels, vals, left=left, color=THEME_COLOUR.get(t, EXTRA_COLOURS[i % 8]), label=t,
+                edgecolor=SURFACE, linewidth=1.5)
+        for j, (v, lf) in enumerate(zip(vals, left)):
+            if v >= 0.08:
+                ax.text(lf + v / 2, j, str(an.ladder[t][levels[j]]), ha="center", va="center", fontsize=7,
+                        color="white")
+        left = [a + b for a, b in zip(left, vals)]
+    for j, n in enumerate(tot):
+        ax.text(1.01, j, f"n={n}", va="center", fontsize=7, color=INK2)
+    ax.invert_yaxis()
+    ax.set_xlim(0, 1.12)
+    ax.set_xlabel("share of the level's total")
+    ax.set_title("Measurement ladder: theme shares from raw rows to events", loc="left")
+    ax.legend(title="theme", ncol=len(th), loc="lower center", bbox_to_anchor=(0.5, -0.32))
+    _save(plt, fig, path)
+
+
+def chart_prevalence(an: Analysis, plt, path: Path) -> None:
+    """03: own-text prevalence per period, one panel per theme, one marker per stream."""
+    rows = [r for r in an.prev_sp if r["measure"] == "own" and r["stream"] != "all"
+            and "(all listings)" not in r["stream"] and r["group"] in [p[2] for p in PERIODS] and r["n_events"]]
+    if not rows:
+        return
+    themes = an.themes + ["any"]
+    periods = [p[2] for p in PERIODS]
+    streams = sorted({r["stream"] for r in rows})
+    fig, axes = plt.subplots(1, len(themes), figsize=(3.2 * len(themes), 3.8), sharey=True)
+    for ax, t in zip(axes, themes):
+        for i, st in enumerate(streams):
+            pts = [r for r in rows if r["theme"] == t and r["stream"] == st]
+            off = (i - (len(streams) - 1) / 2) * 0.18
+            xs = [periods.index(r["group"]) + off for r in pts]
+            ys = [r["share"] for r in pts]
+            lo = [max(0, r["share"] - r["wilson_lo"]) for r in pts]
+            hi = [max(0, r["wilson_hi"] - r["share"]) for r in pts]
+            ax.errorbar(xs, ys, yerr=[lo, hi], fmt=STREAM_MARKER.get(st, "D"), color=_stream_colour(st, i),
+                        ms=6, capsize=2, lw=1.2, label=st)
+            for r in pts:
+                # k/n in a band at the top of the panel, one line per stream (in its colour),
+                # centred on the period: labels next to the points overlapped
+                ax.text(periods.index(r["group"]), 0.97 - 0.055 * i, f"{r['k_events']}/{r['n_events']}",
+                        transform=ax.get_xaxis_transform(), ha="center", va="top", fontsize=6,
+                        color=_stream_colour(st, i))
+        ax.set_xticks(range(len(periods)))
+        ax.set_xticklabels(periods, rotation=45)
+        ax.set_title(t, loc="left")
+    # leave the top band (one text line per stream) free of data
+    top = max([r["wilson_hi"] for r in rows if r["wilson_hi"] is not None] + [0.05])
+    axes[0].set_ylim(0, top / (1 - 0.055 * len(streams) - 0.05))
+    axes[0].set_ylabel("share of events (own listing text)")
+    axes[-1].legend(title="stream (k/n at top)", loc="center left", bbox_to_anchor=(1.02, 0.5), fontsize=7,
+                    title_fontsize=7)
+    fig.suptitle("Theme in the event's own listing text, by period and stream (Wilson 95 % intervals)", x=0.01,
+                 y=1.04, ha="left")
+    _save(plt, fig, path)
+
+
+def chart_concentration(an: Analysis, plt, path: Path) -> None:
+    """04: the 12 documents with the most clean theme rows, stacked by theme."""
+    c = defaultdict(Counter)
+    for inst, d in _clean_inst_docs(an):
+        c[d][inst["theme"]] += 1
+    top = sorted(c, key=lambda d: (-sum(c[d].values()), d))[:12]
+    if not top:
+        return
+    tot = sum(sum(v.values()) for v in c.values())
+    fig, ax = plt.subplots(figsize=(10, 0.45 * len(top) + 1.6))
+    left = [0] * len(top)
+    for i, t in enumerate(an.themes):
+        vals = [c[d][t] for d in top]
+        ax.barh(range(len(top)), vals, left=left, color=THEME_COLOUR.get(t, EXTRA_COLOURS[i % 8]), label=t,
+                edgecolor=SURFACE, linewidth=1.5)
+        left = [a + b for a, b in zip(left, vals)]
+    for j, n in enumerate(left):
+        ax.text(n, j, f" n={n} ({100 * n / tot:.0f} %)", va="center", fontsize=7, color=INK2)
+    ax.set_yticks(range(len(top)))
+    ax.set_yticklabels([short(pdf_display(d), 70) for d in top], fontsize=7)
+    ax.invert_yaxis()
+    ax.set_xlabel("clean theme rows")
+    ax.set_title(f"Documents with the most clean theme rows (all documents: {len(c)}, rows: {tot})", loc="left")
+    ax.legend(title="theme")
+    ax.set_xlim(0, max(left) * 1.25)
+    _save(plt, fig, path)
+
+
+def _component_layout(G, seed: int) -> Dict[str, Tuple[float, float]]:
+    """Spring layout per connected component, the components packed in rows.
+    One spring layout of a disconnected graph pushes the components far apart and
+    squeezes each one, so labels in a dense component overlap."""
+    import networkx as nx
+    comps = sorted((sorted(c) for c in nx.connected_components(G)), key=lambda c: (-len(c), c[0]))
+    radius = [max(0.6, len(c) ** 0.5) for c in comps]
+    row_width = max(2 * radius[0], sum(2 * r for r in radius) ** 0.5 * 2.2)
+    pos, x, y, row_h = {}, 0.0, 0.0, 0.0
+    for c, r in zip(comps, radius):
+        if x > 0 and x + 2 * r > row_width:
+            x, y, row_h = 0.0, y - row_h - 0.8, 0.0
+        # a copy with sorted nodes and edges: the layout must not depend on insertion order
+        sub = nx.Graph()
+        sub.add_nodes_from(c)
+        sub.add_edges_from(sorted((min(u, v), max(u, v), d) for u, v, d in G.subgraph(c).edges(data=True)))
+        if len(c) == 1:
+            p = {c[0]: (0.0, 0.0)}
+        elif len(c) > 3 and nx.density(sub) >= 0.5:
+            p = nx.circular_layout(sub, scale=r)     # near-cliques: a spring layout piles the labels up
+        else:
+            p = nx.spring_layout(sub, seed=seed, weight="weight", k=1.6 / len(c) ** 0.5, iterations=200, scale=r)
+        for n, (px, py) in p.items():
+            pos[n] = (x + r + float(px), y - r + float(py))
+        x += 2 * r + 0.8
+        row_h = max(row_h, 2 * r)
+    return pos
+
+
+def chart_backbone(an: Analysis, plt, path: Path) -> None:
+    """05: disparity backbone of the organisation projection (spring layout, fixed seed)."""
+    import networkx as nx
+    B = an.B
+    fig, ax = plt.subplots(figsize=(10, 8))
+    ax.set_axis_off()
+    title = (f"Organisation backbone, scenario {an.default_sc}, alpha {an.a.backbone_alpha} "
+             f"({B.number_of_nodes()} organisations, {B.number_of_edges()} ties)")
+    ax.set_title(title, loc="left")
+    if not B.number_of_edges():
+        ax.text(0.5, 0.5, "No backbone ties at this alpha", ha="center", va="center", transform=ax.transAxes,
+                color=INK2)
+        _save(plt, fig, path)
+        return
+    pos = _component_layout(B, an.a.seed)
+    ax.set_aspect("equal", adjustable="datalim")
+    ax.margins(0.08)
+    cen ={"O:" + r["org_key"]: r for r in an.org_centrality}
+    classes = sorted({cen.get(n, {}).get("actor_class") or "not coded" for n in B})
+    col = {c: (INK2 if c == "not coded" else EXTRA_COLOURS[i % len(EXTRA_COLOURS)]) for i, c in enumerate(classes)}
+    widths = [0.5 + 2 * d["weight"] for _, _, d in B.edges(data=True)]
+    nx.draw_networkx_edges(B, pos, ax=ax, width=widths, edge_color=GRID, alpha=0.9)
+    for c in classes:
+        nodes = sorted(n for n in B if (cen.get(n, {}).get("actor_class") or "not coded") == c)
+        nx.draw_networkx_nodes(B, pos, nodelist=nodes, ax=ax, node_color=col[c],
+                               node_size=[40 + 40 * cen.get(n, {}).get("n_series", 1) for n in nodes],
+                               edgecolors=SURFACE, linewidths=1.5, label=c)
+    strength = sorted(B, key=lambda n: (-B.degree(n, weight="weight"), n))[:25]
+    ys = [y for _, y in pos.values()]
+    dy = 0.03 * ((max(ys) - min(ys)) or 1)
+    lpos = {n: (x, y + dy) for n, (x, y) in pos.items()}     # labels just above their node
+    nx.draw_networkx_labels(B, lpos, labels={n: short(B.nodes[n].get("label", n[2:]), 28) for n in strength},
+                            ax=ax, font_size=7, font_color=INK)
+    ax.legend(title="actor_class (size = series)", loc="lower left", fontsize=7)
+    _save(plt, fig, path)
+
+
+def chart_country(an: Analysis, plt, path: Path) -> None:
+    """06: prevalence per country (n >= 15 events), own text and any layer side by side."""
+    rows = [r for r in an.tables["prev_country"][0] if r["theme"] == "any" and r["n_events"] >= 15
+            and not r["group"].startswith(("(", "other"))]
+    groups = sorted({r["group"] for r in rows if r["measure"] == "own"},
+                    key=lambda g: (-next(r["n_events"] for r in rows if r["group"] == g and r["measure"] == "own"), g))
+    if not groups:
+        return
+    labels = {"own": "own listing text (all events)", "any": "any layer (events with web text)"}
+    # the any-layer panel only when at least one country has 15 or more events with web text
+    measures = ["own"] + (["any"] if any(r["measure"] == "any" and r["n_events"] >= 15 for r in rows) else [])
+    fig, axes = plt.subplots(1, len(measures), figsize=(5 * len(measures), 0.35 * len(groups) + 1.8),
+                             sharey=True, squeeze=False)
+    axes = list(axes[0])
+    if len(measures) == 1:
+        fig.text(0.01, -0.02, "Any-layer panel left out: no country has 15 or more events whose linked site "
+                 "was read.", fontsize=7, color=INK2)
+    for ax, m in zip(axes, measures):
+        for j, g in enumerate(groups):
+            r = next((x for x in an.tables["prev_country"][0] if x["group"] == g and x["measure"] == m
+                      and x["theme"] == "any"), None)
+            if not r or r["share"] is None or r["n_events"] < 15:
+                ax.text(0, j, f"  n={r['n_events'] if r else 0} (fewer than 15, not shown)", va="center",
+                        fontsize=7, color=INK2)
+                continue
+            ax.errorbar([r["share"]], [j], xerr=[[r["share"] - r["wilson_lo"]], [r["wilson_hi"] - r["share"]]],
+                        fmt="o", color=THEME_COLOUR["colonialism"], ms=6, capsize=2)
+            ax.annotate(f"{r['k_events']}/{r['n_events']}", (r["wilson_hi"], j), xytext=(4, -3),
+                        textcoords="offset points", fontsize=7, color=INK2)
+        ax.set_title(labels[m], loc="left")
+        top = [x["wilson_hi"] for x in rows if x["measure"] == m and x["wilson_hi"] is not None]
+        ax.set_xlim(0, min(1.0, max(top + [0.1]) * 1.25))
+        ax.set_xlabel("share of events with any theme")
+    axes[0].set_yticks(range(len(groups)))
+    axes[0].set_yticklabels([f"{an.p.country_name(g)} ({g})" for g in groups])
+    axes[0].invert_yaxis()
+    fig.suptitle("Theme prevalence by event country (countries with at least 15 events; Wilson 95 % intervals)",
+                 x=0.01, ha="left")
+    _save(plt, fig, path)
+
+
+def write_charts(an: Analysis, out: Path) -> List[str]:
+    plt = _plt()
+    made = []
+    for name, fn in (("01_coverage_frame.png", chart_coverage), ("02_measurement_ladder.png", chart_ladder),
+                     ("03_prevalence_stream_period.png", chart_prevalence),
+                     ("04_doc_concentration.png", chart_concentration), ("05_backbone.png", chart_backbone),
+                     ("06_prevalence_country.png", chart_country)):
+        path = out / "charts" / name
+        try:
+            fn(an, plt, path)
+        except Exception as exc:  # noqa: BLE001 - one chart must not stop the others
+            an.warn("chart %s not drawn: %s: %s", name, type(exc).__name__, exc)
+            plt.close("all")
+            continue
+        if path.exists():
+            made.append(name)
+        else:
+            an.skipped[f"chart {name}"] = "nothing to draw"
+    return made
+
+
+# ==========================================================================
+# Network files (Gephi: GEXF and GraphML, plus node and edge CSVs)
+# ==========================================================================
+def _node_rows(G) -> Tuple[List[dict], List[str]]:
+    fields = ["id"] + sorted({k for _, d in G.nodes(data=True) for k in d})
+    return [{"id": n, **d} for n, d in sorted(G.nodes(data=True))], fields
+
+
+def _edge_rows(G) -> Tuple[List[dict], List[str]]:
+    fields = ["source", "target"] + sorted({k for _, _, d in G.edges(data=True) for k in d})
+    rows = [{"source": min(a, b), "target": max(a, b), **d} for a, b, d in G.edges(data=True)]
+    return sorted(rows, key=lambda r: (r["source"], r["target"])), fields
+
+
+def write_networks(an: Analysis, out: Path) -> List[str]:
+    cen = {"O:" + r["org_key"]: r for r in an.org_centrality}
+    made = []
+    for sc, (G, B) in an.exports.items():
+        for n in G:
+            if n in cen:     # centralities as node attributes (only for the scenario they were computed on)
+                if sc == an.default_sc:
+                    c = cen[n]
+                    G.nodes[n].update(n_series=c["n_series"], bip_betweenness=c["bip_betweenness"],
+                                      in_backbone=c["in_backbone"], backbone_strength=c["backbone_strength"],
+                                      hub_dependence=c["hub_dependence"], core_2_2=c["core_2_2"])
+        for n in B:
+            B.nodes[n]["strength"] = round(B.degree(n, weight="weight"), 4)
+            B.nodes[n]["n_series"] = G.degree(n) if n in G else 0
+        base = out / "network"
+        for g, stem in ((G, f"bipartite_{sc}"), (B, f"org_backbone_{sc}")):
+            made += [p.name for p in write_graph(g, base / stem)]
+        suffix = "" if sc == an.default_sc else f"_{sc}"
+        for g, stem in ((G, "bipartite"), (B, "backbone")):
+            rows, fields = _node_rows(clean_graph(g))
+            write_csv(base / f"nodes_{stem}{suffix}.csv", rows, fields)
+            rows, fields = _edge_rows(clean_graph(g))
+            write_csv(base / f"edges_{stem}{suffix}.csv", rows, fields)
+            made += [f"nodes_{stem}{suffix}.csv", f"edges_{stem}{suffix}.csv"]
+    return made
+
+
+# ==========================================================================
+# Workbooks
+# ==========================================================================
+SHEET_DOCS = OrderedDict([
+    ("README", "This sheet: what each sheet holds."),
+    ("diagnostics", "How the inputs were read: layouts, joins of event references, theme filter counts, "
+                    "country sources, methods used."),
+    ("missingness", "What is missing or uncertain, as k of n (thesis table 2)."),
+    ("coverage_by_stream", "Coverage frame per listing stream: links, links read, organisation ties, theme hits, "
+                           "countries, day-precise dates; shares with Wilson 95 % intervals (thesis table 1)."),
+    ("events_enriched", "One row per event (events.csv) with event_id, series_id, streams, countries, coverage "
+                        "and theme flags per layer: own (listing text), landing (event link), linked (other pages "
+                        "and PDFs), any, in_title."),
+    ("ties", "One row per event x organisation x source, with tie level (L1 listing, L2 landing page, L3 other "
+             "linked pages and PDFs) and whether the source passes the theme filter."),
+    ("theme_units", "One row per passage x theme x event; passage_id is the stable key for coded workbooks."),
+    ("measurement_ladder", "Each theme counted at seven levels, from raw rows to events."),
+    ("concentration", "How much of the theme material comes from a few documents (eff_docs = 1 / sum of squared "
+                      "shares)."),
+    ("attribution", "Clean theme references and documents per layer and theme."),
+    ("term_families", "Theme-file lines (term families) with their rows, passages, documents, events and surface "
+                      "forms."),
+    ("prev_stream_period", "Theme prevalence with the event as unit, per period and stream. own and in_title use "
+                           "all events; landing, linked and any only events whose linked site was read."),
+    ("prev_stream_year", "As prev_stream_period, per year."),
+    ("prev_country", "As prev_stream_period, per event country (an event in two countries counts in both; "
+                     "countries with fewer than 15 events pooled; headline_ok means at least 30 events)."),
+    ("prev_lang", "Own-text prevalence per language of the agenda entry."),
+    ("entry_rates", "Theme hits per 10,000 words of agenda entry text (Byar 95 % intervals) and the share of "
+                    "entries with a hit."),
+    ("page_rates", "Theme hits per 10,000 words of the sources that were read, per site role and kind."),
+    ("sensitivity", "The event x organisation network under scenarios A-D (and C_curated), for all layers and for "
+                    "L1+L2, at edition and series level, with and without the theme filter."),
+    ("org_centrality", "Organisations of the default network: series, years, countries, bipartite betweenness, "
+                       "backbone strength, hub dependence, (2,2)-core, country participation."),
+    ("org_theme", "Organisation x theme: passage level (organisation named in the theme paragraph, counted in "
+                  "documents) and event level (series whose own or landing text carries the theme)."),
+    ("org_bridging", "Organisations robustly tied to two or more themes."),
+    ("theme_cooccurrence", "Themes together in the same passage, document or series, with a leave-one-site-out "
+                           "range."),
+])
+
+
+def write_analytics_workbook(an: Analysis, out: Path) -> None:
+    readme = [{"sheet": k, "description": v} for k, v in SHEET_DOCS.items()
+              if k in ("README", "diagnostics") or k in an.tables]
+    readme += [{"sheet": k, "description": "(see summary.md)"} for k in an.tables if k not in SHEET_DOCS]
+    readme.append({"sheet": "", "description": ""})
+    readme.append({"sheet": "theme filter", "description": f"'{an.a.theme_filter}' (applied by make_master.py: "
+                                                           f"'{an.master_filter or 'unknown'}')"})
+    readme.append({"sheet": "curated", "description": yn(an.curated) + (
+        "" if an.curated else ": organisations are not curated yet; read network results as provisional")})
+    for k, v in an.skipped.items():
+        readme.append({"sheet": "skipped", "description": f"{k}: {v}"})
+    sheets = [("README", readme, ["sheet", "description"]),
+              ("diagnostics", an.diag, ["item", "value", "note"])]
+    sheets += [(k, rows, fields) for k, (rows, fields) in an.tables.items()]
+    # Very long tables go to CSV only (writing them to xlsx takes minutes; Excel stops at 1,048,576 rows).
+    big = [k for k, rows, _ in sheets if len(rows) > XLSX_MAX_ROWS]
+    for k in big:
+        readme.append({"sheet": k, "description": f"more than {XLSX_MAX_ROWS:,} rows: only in tables/{k}.csv"})
+    write_xlsx(out / "analytics.xlsx", [x for x in sheets if x[0] not in big])
+    for title, rows, fields in sheets:
+        write_csv(out / "tables" / f"{title}.csv", rows, fields)
+
+
+XLSX_MAX_ROWS = 100_000
+
+AUTH_FIELDS = ["org_key", "organisation", "variants", "max_confidence", "found_by", "route", "n_events", "n_series",
+               "n_years", "years", "countries", "n_sources", "n_sites", "sites", "tie_levels", "only_in_event_title",
+               "only_menus_footers", "theme_passages", "themes_in_paragraph", "example_context_1",
+               "example_context_2", "suggested_class", "flags", "variant_group", "merge_into_suggested",
+               "include", "merge_into_key", "canonical_name", "actor_class", "country", "is_organisation",
+               "is_partial_name", "coder", "notes"]
+
+
+def write_org_template(an: Analysis, out: Path) -> None:
+    readme = [{"text": x} for x in [
+        "Organisation authority list. Fill in the curation columns (include ... notes) of the 'organisations' "
+        "sheet, save that sheet as org_codes.csv (UTF-8) and run analytics.py again with --org-codes org_codes.csv.",
+        "include: 1 keeps the organisation in the network whatever its confidence, 0 drops it, blank leaves it to "
+        "--min-confidence.",
+        "merge_into_key: the org_key this one is the same organisation as (e.g. 'ende gelaende' -> 'ende gelande').",
+        "canonical_name: the name to show. actor_class: one of " + ", ".join(ACTOR_CLASSES) + ". With codes, "
+        "place, site_ui, noise and event_name are left out of the curated scenario (C_curated).",
+        "is_organisation (yes / no / partial) and is_partial_name: precision coding. The precision_sample sheet "
+        "lists a stratified random sample to code first; once coded, analytics writes precision_by_stratum.",
+        "suggested_class and flags are guesses from simple rules, not codes. merge_candidates lists pairs that "
+        "may be the same organisation (umlaut variants are merged automatically).",
+        f"The list covers organisations from sources that pass the theme filter '{an.a.theme_filter}'.",
+        "Keys are re-derived from the organisation name when org_codes.csv is read, so a stale org_key only "
+        "produces a warning."]]
+    sheets = [("organisations", an.authority, AUTH_FIELDS),
+              ("merge_candidates", an.merge_cands, ["key_a", "name_a", "key_b", "name_b", "reason", "score", "accept"]),
+              ("precision_sample", an.precision_sample,
+               ["stratum", "stratum_N", "n", "weight", "org_key", "organisation", "found_by", "n_events",
+                "example_context_1", "is_organisation", "is_partial_name", "coder"])]
+    if an.precision_rows:
+        sheets.append(("precision_by_stratum", an.precision_rows,
+                       ["stratum", "N", "n", "k", "precision", "wilson_lo", "wilson_hi", "k_lenient",
+                        "precision_lenient"]))
+    sheets.append(("README", readme, ["text"]))
+    yn_ = ["yes", "no", "partial"]
+    write_xlsx(out / "org_codes_template.xlsx", sheets, validations={
+        "organisations": {"include": ["1", "0"], "actor_class": ACTOR_CLASSES, "is_organisation": yn_,
+                          "is_partial_name": ["yes", "no"]},
+        "merge_candidates": {"accept": ["yes", "no"]},
+        "precision_sample": {"is_organisation": yn_, "is_partial_name": ["yes", "no"]}})
+    if an.precision_rows:
+        an.table("precision_by_stratum", an.precision_rows,
+                 ["stratum", "N", "n", "k", "precision", "wilson_lo", "wilson_hi", "k_lenient", "precision_lenient"])
+
+
+CODEBOOK = [
+    ("relevance", "substantive", "The passage is about the theme (colonialism, racism, fascism) in its own right."),
+    ("relevance", "name_or_title_only", "The term only appears in a name or title (an organisation, event, book)."),
+    ("relevance", "list_or_tag", "The term is one item of a list of causes or a tag, without development."),
+    ("relevance", "off_topic_sense", "The word is used in another sense (e.g. 'colony' of animals)."),
+    ("relevance", "false_match", "The match is not the term at all (part of another word, a handle, a URL)."),
+    ("relevance", "unclear", "Cannot be decided from the passage."),
+    ("frame_function", "(open)", "What the theme does in the passage: diagnosis, motivation, identity, alliance, "
+                                 "target, history ... to be fixed after the first coding round."),
+    ("code_1..3", "(open)", "Inductive codes."),
+    ("climate_linkage", "(open)", "How the passage links the theme to climate (none, causal, justice, solidarity ...)."),
+    ("memo", "(free text)", "Notes."),
+    ("coder", "(initials)", "Who coded the row. Rows flagged double_coded are coded by two people (reliability)."),
+    ("sentence", "", "Use the sentence for attribution: in agenda PDFs the context columns can run into the "
+                     "neighbouring entry (caveat C6)."),
+    ("sample_weight", "", "N_h / n_h of the row's stratum (theme x layer group x period); use it for weighted "
+                          "shares of the sample."),
+]
+
+
+def write_kwic(an: Analysis, out: Path, kw: dict) -> None:
+    readme = [{"text": x} for x in [
+        "Theme passages in keyword-in-context layout for qualitative coding. One row per passage and theme "
+        "(furniture and pipeline duplicates removed).",
+        f"The per-theme sheets hold at most {an.a.doc_cap} passages per document (--doc-cap), so one long "
+        "brochure cannot dominate; all_units has every passage.",
+        f"in_sample marks a stratified random sample (theme x layer group x period, proportional with at least 2 "
+        f"per stratum, {an.a.sample_size} rows at most, seed {an.a.seed}); double_coded marks 25 % of it for a "
+        "second coder. sampling_frame lists the strata with their weights.",
+        "passage_id is stable across runs: keep it when copying rows, it is the key for merging coded sheets back.",
+        "Code relevance first (dropdown); the codebook sheet explains every column.",
+        "Caveat C6: in agenda PDFs the context columns can include text of the neighbouring entry; attribute "
+        "with the sentence column."]]
+    sheets = [("README", readme, ["text"])]
+    for t in an.themes:
+        rows = sorted([u for u in kw["capped"] if u["theme"] == t], key=lambda u: (not u["in_sample"],
+                                                                                   u["stratum"], u["passage_id"]))
+        sheets.append((t, rows, KWIC_FIELDS))
+    sheets.append(("all_units", sorted(kw["all"], key=lambda u: (u["theme"], u["passage_id"])),
+                   KWIC_FIELDS + ["document", "stratum"]))
+    sheets.append(("sampling_frame", kw["frame"], ["stratum", "theme", "layer_group", "period", "N_h", "n_h",
+                                                   "weight"]))
+    sheets.append(("codebook", [{"column": a, "value": b, "meaning": c} for a, b, c in CODEBOOK],
+                   ["column", "value", "meaning"]))
+    lists = [{"relevance": r, "actor_class": ACTOR_CLASSES[i] if i < len(ACTOR_CLASSES) else ""}
+             for i, r in enumerate(RELEVANCE)]
+    lists += [{"relevance": "", "actor_class": c} for c in ACTOR_CLASSES[len(RELEVANCE):]]
+    sheets.append(("lists", lists, ["relevance", "actor_class"]))
+    val = {t: {"relevance": RELEVANCE} for t in an.themes}
+    val["all_units"] = {"relevance": RELEVANCE}
+    write_xlsx(out / "kwic_for_coding.xlsx", sheets, validations=val)
+
+
+# ==========================================================================
+# A9 provenance: summary.json and summary.md
+# ==========================================================================
+def _versions() -> dict:
+    v = {"python": platform.python_version()}
+    for mod in ("networkx", "matplotlib", "openpyxl"):
+        try:
+            v[mod] = __import__(mod).__version__
+        except Exception:  # noqa: BLE001
+            v[mod] = "not installed"
+    return v
+
+
+def _pct(k, n) -> str:
+    return f"{k}/{n} ({100 * k / n:.1f} %)" if n else f"{k}/0"
+
+
+def write_summary(an: Analysis, out: Path, outputs: Dict[str, List[str]], seconds: float) -> dict:
+    a = an.a
+    params = {k: v for k, v in sorted(vars(a).items()) if k not in ("selftest",)}
+    files = {name: {"path": str(p), "sha256": sha256_of(p)} for name, p in sorted(an.inputs.items())}
+    for name in ("analytics.py", "gazetteer.py"):
+        files[name] = {"path": str(HERE / name), "sha256": sha256_of(HERE / name)}
+    th = an.themes
+    insts = an.instances
+    clean = [i for i in insts if i["clean"]]
+    stream_n = Counter(e["stream_primary"] for e in an.events)
+    conc = an.concentration.get("ALL", {})
+    own = {t: sum(1 for e in an.events if e[f"{t}_own"]) for t in th}
+    anyl = {t: sum(1 for e in an.events if e[f"{t}_any"]) for t in th}
+    web = [e for e in an.events if e["has_web_text"]]
+    conf = Counter(r["max_confidence"] for r in an.authority)
+    summary = {
+        "tool": "analytics.py", "version": VERSION,
+        "made_at": dt.datetime.now(dt.timezone.utc).replace(microsecond=0).isoformat(),
+        "seconds": round(seconds, 1), "results_dir": str(an.results), "runs": [str(r) for r in an.runs],
+        "parameters": params, "versions": _versions(), "files": files,
+        "layout": {"master_network": "long" if an.long_net else "older", "master_themes": "long" if an.long_th
+                   else "older"},
+        "theme_filter": {"analytics": a.theme_filter, "make_master": an.master_filter or "unknown",
+                         **{k: {"kept": v[0], "total": v[1], "left_out": v[1] - v[0]}
+                            for k, v in an.filter_counts.items()},
+                         "excluded_sources_in_master": len(an.excluded_sources),
+                         "make_master_counts": {k: {"kept": v[0], "before_filter": v[1]}
+                                                for k, v in an.master_counts.items()}},
+        "curated": yn(an.curated), "has_web_text_method": an.web_method, "country_from": an.country_from,
+        "betweenness": getattr(an, "betweenness_method", ""),
+        "match": {"network": {k: dict(v) for k, v in an.ref_counts.items()}, "themes": dict(an.theme_ref_counts),
+                  "unmatched_names": dict(an.unmatched_names.most_common(20))},
+        "numbers": {"events": len(an.events), "events_by_stream": dict(sorted(stream_n.items())),
+                    "events_with_country": sum(1 for e in an.events if e["countries"]),
+                    "events_with_web_text": len(web), "theme_rows": len(insts), "clean_rows": len(clean),
+                    "furniture_rows": sum(1 for i in insts if i["furniture"]),
+                    "duplicate_rows": sum(1 for i in insts if i["dup"] and not i["furniture"]),
+                    "unique_passages": len({i["passage_id"] for i in clean}),
+                    "documents": conc.get("documents", 0), "eff_docs": conc.get("eff_docs"),
+                    "top1_doc": conc.get("top1_doc", ""), "top1_share": conc.get("top1_share"),
+                    "own_text_events": own, "any_layer_events": anyl,
+                    "organisations_by_max_confidence": dict(sorted(conf.items())),
+                    **{k: v for k, v in an.facts.items() if k not in ("org_theme",)}},
+        "skipped": dict(sorted(an.skipped.items())), "warnings": an.warnings, "outputs": outputs}
+    write_text(out / "summary.json", json.dumps(summary, ensure_ascii=False, indent=2, default=str))
+    write_text(out / "summary.md", summary_md(an, summary))
+    return summary
+
+
+def summary_md(an: Analysis, sm: dict) -> str:
+    a, n = an.a, sm["numbers"]
+    ne = n["events"]
+    th = an.themes
+    fc = an.filter_counts
+    streams = ", ".join(f"{k} {v}" for k, v in n["events_by_stream"].items())
+    dg = an.facts.get("default_graph", {})
+    L = [f"# Analysis summary ({sm['made_at'][:10]})", "",
+         f"Results folder: `{an.results}`. analytics.py {VERSION}; parameters and file checksums are in "
+         "summary.json.", "", "## Methods (numbers filled in from this run)", ""]
+    para = [f"The event list holds {ne} events ({streams}).",
+            f"A country was assigned to {_pct(n['events_with_country'], ne)} events (from {an.country_from}).",
+            f"For {_pct(n['events_with_web_text'], ne)} events the linked website was read "
+            f"(method: {an.web_method}); web-layer shares use only these events as denominator.",
+            f"The theme search produced {n['theme_rows']} rows; after removing {n['furniture_rows']} rows in "
+            f"menus, footers or boilerplate and {n['duplicate_rows']} repeated rows, {n['clean_rows']} clean rows "
+            f"remain, forming {n['unique_passages']} distinct passages in {n['documents']} documents (one agenda "
+            "entry counts as one document)."]
+    if n.get("eff_docs"):
+        para.append(f"The material is concentrated: the effective number of documents is {n['eff_docs']}, and "
+                    f"the largest document (`{pdf_display(n['top1_doc'])}`) gives "
+                    f"{100 * (n['top1_share'] or 0):.0f} % of the clean rows.")
+    para.append("Events with a theme in their own listing text: " + ", ".join(
+        f"{t} {n['own_text_events'][t]}" for t in th) + "; on any layer: " + ", ".join(
+        f"{t} {n['any_layer_events'][t]}" for t in th) + f" (of {ne}).")
+    mf_label = f"'{an.master_filter or 'unknown'}'"
+    if an.master_filter == "none" and not an.master_about:
+        mf_label += " (older masters, built before the filter existed)"
+    para.append(f"Inclusion criterion: only sources with a theme hit count for the network (theme filter "
+                f"'{a.theme_filter}'; make_master.py applied {mf_label}). This kept "
+                f"{fc['rows'][0]} of {fc['rows'][1]} network rows, {fc['organisations'][0]} of "
+                f"{fc['organisations'][1]} organisations, {fc['events'][0]} of {fc['events'][1]} events and "
+                f"{fc['sources'][0]} of {fc['sources'][1]} sources"
+                + (f"; {len(an.excluded_sources)} sources were already left out by make_master.py"
+                   if an.excluded_sources else "") + ".")
+    # Kept rows that cannot enter the event network: no event (pseudo rows such as
+    # "(not tied to an event)") or the organisation was seen only in menus and footers.
+    kept = [t for t in an.ties if t["sheet"] == "event_organisations" and t["pass"][a.theme_filter]]
+    no_ev = sum(1 for t in kept if not t["event_id"])
+    menus = sum(1 for t in kept if t["event_id"] and t["in_menus"])
+    if no_ev or menus:
+        para.append(f"Of the kept rows, {no_ev} are not tied to an event and {menus} name an organisation "
+                    "found only in menus or footers; neither enters the event network.")
+    mc = an.master_counts
+    if mc:
+        para.append("make_master.py's filter had already kept " + ", ".join(
+            f"{v[0]} of {v[1]} {k.replace('_', ' ')}" for k, v in mc.items()) + " before this analysis.")
+    conf = n["organisations_by_max_confidence"]
+    para.append("Organisations in the authority list (org_codes_template.xlsx, after the theme filter, "
+                "including those without an event or only in menus) by highest confidence: " + ", ".join(f"{k} {v}" for k, v in conf.items()) + ".")
+    if dg:
+        para.append(f"The default network (scenario {dg['scenario']}, series level, all layers) has "
+                    f"{dg['series']} event series, {dg['orgs']} organisations and {dg['edges']} ties; its "
+                    f"projection has {dg['proj_edges']} organisation pairs, of which the disparity backbone "
+                    f"(alpha {a.backbone_alpha}) keeps {dg['backbone_edges']} between {dg['backbone_nodes']} "
+                    f"organisations. Betweenness: {sm['betweenness']}.")
+    prec = an.facts.get("precision")
+    if prec:
+        para.append(f"Coded organisation precision (stratified estimate): strict {prec['precision']}, lenient "
+                    f"{prec['precision_lenient']} (n = {prec['n']}).")
+    else:
+        para.append("Organisation names are not yet coded for precision (see org_codes_template.xlsx).")
+    L += [" ".join(para), ""]
+    # ---- caveats
+    leak = an.facts.get("seed_context_leak", (0, 0))
+    top_share = next((r["top_event_share_of_proj_edges"] for r in an.sensitivity
+                      if r["scenario"] == "A" and r["layers"] == "L1-L3" and r["node_level"] == "edition"
+                      and r["theme_filter"] == a.theme_filter), None)
+    web_k = sum(1 for e in an.events if e["has_web_text"] and e["any_any"])
+    noweb_k = sum(1 for e in an.events if not e["has_web_text"] and e["any_any"])
+    nweb = n["events_with_web_text"]
+    racism = conc_r = None
+    if "racism" in th:
+        racism = n["own_text_events"]["racism"]
+        conc_r = an.concentration.get("racism", {}).get("top1_share")
+    years = defaultdict(list)
+    for e in an.events:
+        if e["year"]:
+            years[e["stream_primary"]].append(e["year"])
+    frame = "; ".join(f"{k} {min(v)}-{max(v)}" for k, v in sorted(years.items()))
+    caveats = [
+        ("C1 Coverage, not framing", f"Web-layer theme shares apply only to events whose links were read "
+         f"({nweb}/{ne}). {web_k} of those {nweb} events have a theme on any layer, against {noweb_k} of the "
+         f"{ne - nweb} others. Never compare web-layer prevalence across groups with different crawl coverage."),
+        ("C2 Changing sampling frame", f"Years covered per stream: {frame}. Trends must be read within a "
+         "stream; the agendas change language and entry length over time."),
+        ("C3 Document concentration", f"The top document gives {100 * (n.get('top1_share') or 0):.0f} % of clean "
+         "rows" + (f" and {100 * conc_r:.0f} % of racism rows" if conc_r is not None else "") +
+         ". Headline figures use events or documents, and the coding workbook caps passages per document."),
+        ("C4 Snapshot dating", "Landing and linked pages were read at crawl time and are attached to past "
+         "editions; trend tables should use own listing text (L1) or the document year."),
+        ("C5 Organisation precision", "Names come from automatic extraction. " + (
+            "They are curated (org_codes)." if an.curated else
+            "They are not curated: top betweenness and backbone nodes can be places, targets or site menus. "
+            "Report network results only after curation, and always with the sensitivity table.")),
+        ("C6 Seed context leakage", f"{leak[0]} of {leak[1]} seed theme rows have context that names another "
+         "event; coders must use the sentence column for attribution."),
+        ("C7 Hub events", "One large event can make most projection edges" + (
+            f" (here {100 * top_share:.0f} % in scenario A)" if top_share is not None else "") +
+         ". Use the backbone, series nodes and hub_dependence, not eigenvector centrality on the raw projection."),
+        ("C8 Country inference", f"Countries come from names, entry text and page locations (method per event "
+         f"in events_enriched); {ne - n['events_with_country']} events stay unresolved, and a country named as a "
+         "topic can be mistaken for the venue."),
+        ("C9 Small numbers", ("Racism appears in own text for " + str(racism) + " events. " if racism is not None
+                              else "") + "Groups below the thresholds are pooled, and every share is printed "
+         "with k/n and a Wilson interval."),
+        ("C10 Term list", "False matches exist (handles, place names, words from other languages). in_handle and "
+         "in_event_title are flagged; per-family precision follows from coding."),
+    ]
+    if an.master_filter not in ("", "none"):
+        caveats.append(("C11 Inclusion criterion", "The masters were built with a theme filter, so the 'none' "
+                        "rows of the sensitivity table equal the filtered ones. Rebuild with make_master.py "
+                        "--theme-filter none to compare."))
+    L += ["## Caveats", ""] + [f"- **{h}.** {txt}" for h, txt in caveats] + [""]
+    if sm["skipped"]:
+        L += ["## Skipped", ""] + [f"- {k}: {v}" for k, v in sm["skipped"].items()] + [""]
+    if sm["warnings"]:
+        L += ["## Warnings", ""] + [f"- {w}" for w in sm["warnings"]] + [""]
+    L += ["## Files", "", "- analytics.xlsx and tables/*.csv: all tables (README sheet first)",
+          "- org_codes_template.xlsx: organisations to curate, merge candidates, precision sample",
+          "- kwic_for_coding.xlsx: theme passages for coding", "- network/: Gephi files and node/edge CSVs",
+          "- charts/: PNG charts", ""]
+    return "\n".join(L)
+
+
+# ==========================================================================
+# Command line
+# ==========================================================================
+def build_parser() -> argparse.ArgumentParser:
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("results", nargs="?", help="results folder with master_network, master_themes and events.csv")
+    ap.add_argument("-o", "--out", help="output folder (must differ from the results folder)")
+    ap.add_argument("--run", nargs="+", action="extend", default=[], metavar="DIR",
+                    help="raw run folders to look in for seed_links.json, pages.csv, sites.csv, sources.csv")
+    ap.add_argument("--themes-file", help="theme file (default: themes_colonialism_racism_fascism.txt here)")
+    ap.add_argument("--org-codes", help="curated org_codes.csv or .xlsx (read only)")
+    ap.add_argument("--event-codes", help="curated event_codes.csv (read only)")
+    ap.add_argument("--theme-filter", choices=THEME_FILTERS, default="source",
+                    help="inclusion criterion for the network: only sources with a theme hit (source, default), "
+                         "every source of a site / event with a hit, or none (all sources)")
+    ap.add_argument("--min-confidence", choices=list(CONF_RANK), default="medium",
+                    help="confidence for the default network scenario C (default medium)")
+    ap.add_argument("--backbone-alpha", type=float, default=0.05, help="disparity filter alpha (default 0.05)")
+    ap.add_argument("--doc-cap", type=int, default=8, help="most passages per document in the KWIC theme sheets")
+    ap.add_argument("--sample-size", type=int, default=120, help="KWIC coding sample size")
+    ap.add_argument("--precision-per-stratum", type=int, default=25, help="names per precision stratum")
+    ap.add_argument("--seed", type=int, default=20261017, help="random seed (samples, layouts, betweenness)")
+    ap.add_argument("--betweenness-k", default="auto",
+                    help="'auto' (exact up to 5,000 nodes, else 500 sampled sources), 'exact' or a number")
+    ap.add_argument("--no-charts", action="store_true", help="do not draw the PNG charts")
+    ap.add_argument("--no-graphs", action="store_true", help="do not write the Gephi network files")
+    ap.add_argument("--selftest", action="store_true", help="run the built-in checks on a small synthetic folder")
+    ap.add_argument("-q", "--quiet", action="store_true", help="warnings only")
+    return ap
+
+
+def run(args) -> Analysis:
+    t0 = time.time()
+    results, out = Path(args.results), Path(args.out)
+    if not results.is_dir():
+        raise InputError(f"results folder {results} not found")
+    if out.resolve() == results.resolve():
+        raise InputError("-o must not be the results folder (analytics never writes into it)")
+    out.mkdir(parents=True, exist_ok=True)
+    fh = logging.FileHandler(out / "analytics.log", mode="w", encoding="utf-8")
+    fh.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
+    log.addHandler(fh)
+    try:
+        an = Analysis(args, Project())
+        log.info("Reading %s", results)
+        an.load()
+        an.build_events()
+        an.build_refs()
+        _derive(an)
+        core_tables(an)
+        a2_coverage(an)
+        a3_ladder(an)
+        a4_prevalence(an)
+        log.info("Networks (%s)", "betweenness, projections, backbones")
+        a5_network(an)
+        a7_org_theme(an)
+        log.info("Organisation authority list and coding workbook")
+        a1_authority(an)
+        kw = a8_kwic(an)
+        outputs: Dict[str, List[str]] = {}
+        write_org_template(an, out)
+        write_kwic(an, out, kw)
+        write_analytics_workbook(an, out)
+        outputs["workbooks"] = ["analytics.xlsx", "org_codes_template.xlsx", "kwic_for_coding.xlsx"]
+        outputs["tables"] = sorted(f"tables/{k}.csv" for k in ["README", "diagnostics"] + list(an.tables))
+        if args.no_graphs:
+            an.skipped["network files"] = "--no-graphs"
+        else:
+            outputs["network"] = write_networks(an, out)
+        if args.no_charts:
+            an.skipped["charts"] = "--no-charts"
+        else:
+            outputs["charts"] = write_charts(an, out)
+        an.summary = write_summary(an, out, outputs, time.time() - t0)
+        log.info("Done in %.1f s: %s", time.time() - t0, out)
+        return an
+    finally:
+        log.removeHandler(fh)
+        fh.close()
+
+
+def main(argv: Optional[List[str]] = None) -> int:
+    argv = list(sys.argv[1:] if argv is None else argv)
+    if argv[:1] == ["agreement"]:
+        print("analytics.py agreement: coder agreement (kappa, alpha) is planned for phase 2 and not available yet.",
+              file=sys.stderr)
+        return 2
+    args = build_parser().parse_args(argv)
+    logging.basicConfig(level=logging.WARNING if args.quiet else logging.INFO,
+                        format="%(asctime)s %(levelname)s %(message)s", datefmt="%H:%M:%S")
+    if args.selftest:
+        return selftest()
+    if not args.results or not args.out:
+        build_parser().print_usage(sys.stderr)
+        print("analytics.py: RESULTS_DIR and -o OUT are required", file=sys.stderr)
+        return 2
+    try:
+        run(args)
+    except InputError as exc:
+        log.error("%s", exc)
+        return 2
+    return 0
+
+
+# ==========================================================================
+# Self-test: a tiny synthetic results folder, in the older and the long layout
+# ==========================================================================
+_ST_EVENTS = [  # name, date, link, listed_on
+    ("Climate camp Berlin [DE]", "2024-07-01", "https://camp.example.org/2024/", "pdf:CJA-campaction-dates.pdf"),
+    ("Climate camp Berlin [DE]", "2025-07-01", "https://camp.example.org/2024/", "pdf:CJA-campaction-dates.pdf"),
+    ("Antifascist week Paris", "2023-03-10", "https://antifa.example.fr/", "pdf:Agenda_Les_echos_du_vent.pdf"),
+    ("Shell must fall", "2024-05-20", "https://shellmustfall.example.org/", "https://themovementhub.org/events/"),
+    ("Online workshop", "2025-01-15", "", "pdf:Agenda_Les_echos_du_vent.pdf"),
+]
+_ST_ECHOS = "pdf:Agenda_Les_echos_du_vent.pdf"
+_ST_NET = [  # event index (None = pseudo), organisation, confidence, source_link, site, site_role, title
+    (0, "Ende Gelände", "high", "https://camp.example.org/2024/", "camp.example.org", "linked", "no"),
+    (0, "Attac", "medium", "https://camp.example.org/2024/", "camp.example.org", "linked", "no"),
+    (0, "FAQ", "low", "https://camp.example.org/2024/", "camp.example.org", "linked", "no"),
+    (0, "Bakery Ltd", "medium", "https://camp.example.org/about/", "camp.example.org", "linked", "no"),
+    (1, "Ende Gelaende", "medium", "https://camp.example.org/2024/", "camp.example.org", "linked", "no"),
+    (1, "Attac", "medium", "https://camp.example.org/2024/", "camp.example.org", "linked", "no"),
+    (3, "Shell", "high", "https://shellmustfall.example.org/", "shellmustfall.example.org", "linked", "yes"),
+    (3, "Ende Gelände", "medium", "https://shellmustfall.example.org/", "shellmustfall.example.org", "linked", "no"),
+    (3, "Attac", "low", "https://shellmustfall.example.org/", "shellmustfall.example.org", "linked", "no"),
+    (3, "Extinction Rebellion", "medium", "https://shellmustfall.example.org/", "shellmustfall.example.org",
+     "linked", "no"),
+    (2, "Antifa Ost", "medium", _ST_ECHOS, _ST_ECHOS, "seed", "no"),
+    (None, "Radio\x0b Orange", "medium", "https://camp.example.org/imprint/", "camp.example.org", "linked", "no"),
+]
+_ST_S1 = "We fight racism and colonialism together with Ende Gelände and Attac."
+_ST_THEMES = [  # theme, term, event indexes, source_link, site, site_role, sentence, orgs, region, duplicate_of
+    ("racism", "racism", [0, 1], "https://camp.example.org/2024/", "camp.example.org", "linked", _ST_S1,
+     "Ende Gelände; Attac", "", ""),
+    ("colonialism", "colonialism", [0, 1], "https://camp.example.org/2024/", "camp.example.org", "linked", _ST_S1,
+     "Ende Gelände; Attac", "", ""),
+    ("racism", "racism", [0, 1], "https://camp.example.org/2024/", "camp.example.org", "linked", _ST_S1,
+     "Ende Gelände; Attac", "", "https://camp.example.org/2024/"),
+    ("fascism", "Antifascist", [2], _ST_ECHOS, _ST_ECHOS, "seed", "Antifascist week against fascism in Paris.",
+     "Antifa Ost", "", ""),
+    ("fascism", "fascism", [2], _ST_ECHOS, _ST_ECHOS, "seed", "Antifascist week against fascism in Paris.",
+     "Antifa Ost", "", ""),
+    ("colonialism", "neocolonial", [3], "https://shellmustfall.example.org/", "shellmustfall.example.org", "linked",
+     "Shell profits from neocolonial extraction.", "Shell", "", ""),
+    ("racism", "racism", [3], "https://shellmustfall.example.org/", "shellmustfall.example.org", "linked",
+     "Footer: no racism here.", "", "footer", ""),
+]
+
+
+def _selftest_folder(folder: Path, long_format: bool) -> None:
+    folder.mkdir(parents=True, exist_ok=True)
+    ev_fields = ["event", "date", "event_link", "listed_on"] + (["event_key", "country_iso", "country_source",
+                                                                 "location_text"] if long_format else [])
+    key = lambda e: f"{e[2] or 'pdf:x'}#{e[1]}"  # noqa: E731
+    rows = []
+    for e in _ST_EVENTS:
+        r = dict(zip(["event", "date", "event_link", "listed_on"], e))
+        if long_format:
+            r.update(event_key=key(e), country_iso="FR" if "Paris" in e[0] else "DE", country_source="tag",
+                     location_text="x")
+        rows.append(r)
+    write_csv(folder / "events.csv", rows, ev_fields)
+    nf = ["event", "event_date", "event_link", "organisation", "confidence", "source_link", "site", "site_role",
+          "named_in_event_title", "found_by", "mentions_on_source", "example_context"]
+    if long_format:
+        nf += ["event_key", "layer", "source_unit", "source_has_theme"]
+    rows = []
+    for i, org, conf, src, site, role, title in _ST_NET:
+        e = _ST_EVENTS[i] if i is not None else (NO_EVENT, "", "", "")
+        r = {"event": e[0], "event_date": e[1], "event_link": e[2], "organisation": org, "confidence": conf,
+             "source_link": src, "site": site, "site_role": role, "named_in_event_title": title,
+             "found_by": "ner" if conf == "low" else "watchlist", "mentions_on_source": 1,
+             "example_context": f"... {org} ..."}
+        if long_format:
+            seed = role == "seed"
+            unit = f"{src}#entry-{i + 1}" if seed else src
+            r.update(event_key=key(e) if i is not None else "", source_unit=unit,
+                     layer="listing_seed" if seed else ("landing" if norm_link(src) == norm_link(e[2]) else
+                                                        "linked_page"),
+                     source_has_theme=yn(src in ("https://camp.example.org/2024/",
+                                                 "https://shellmustfall.example.org/") or seed))
+        rows.append(r)
+    write_csv(folder / "master_network.csv", rows, nf)
+    tf = ["theme", "term", "event", "event_date", "event_link", "source_link", "sentence", "context_before",
+          "context_after", "organisations_in_paragraph", "site", "site_role", "is_pdf", "region", "boilerplate",
+          "duplicate_of"] + (["event_key", "layer", "source_unit"] if long_format else [])
+    rows = []
+    for theme, term, evs, src, site, role, sent, orgs, region, dup in _ST_THEMES:
+        base = {"theme": theme, "term": term, "source_link": src, "sentence": sent, "context_before": "Before.",
+                "context_after": "After.", "organisations_in_paragraph": orgs, "site": site, "site_role": role,
+                "is_pdf": "no", "region": region, "boilerplate": "no", "duplicate_of": dup}
+        if long_format:
+            for i in evs:
+                e = _ST_EVENTS[i]
+                seed = role == "seed"
+                rows.append({**base, "event": e[0], "event_date": e[1], "event_link": e[2], "event_key": key(e),
+                             "layer": "listing_seed" if seed else "landing",
+                             "source_unit": f"{src}#entry-{i + 1}" if seed else src})
+        else:
+            rows.append({**base, "event": " | ".join(_ST_EVENTS[i][0] for i in evs),
+                         "event_date": " | ".join(_ST_EVENTS[i][1] for i in evs),
+                         "event_link": " | ".join(_ST_EVENTS[i][2] for i in evs)})
+    write_csv(folder / "master_themes.csv", rows, tf)
+
+
+def selftest() -> int:
+    import shutil
+    import tempfile
+    import networkx as nx
+    fails: List[str] = []
+
+    def check(label: str, got, want) -> None:
+        ok = (abs(got - want) < 0.011) if isinstance(want, float) and got is not None else got == want
+        if not ok:
+            fails.append(f"{label}: got {got!r}, want {want!r}")
+        log.info("selftest %-55s %s", label, "ok" if ok else f"FAIL (got {got!r}, want {want!r})")
+
+    # ---- pure functions
+    check("wilson(4, 172) low", wilson(4, 172)[0], 0.0091)
+    check("wilson(4, 172) high", wilson(4, 172)[1], 0.0584)
+    check("wilson(0, 10)", wilson(0, 10), (0.0, 0.2775))
+    G = nx.Graph()
+    G.add_edges_from([("E:1", "O:a"), ("E:1", "O:b"), ("E:1", "O:c"), ("E:2", "O:a"), ("E:2", "O:b")])
+    P = project(G)
+    check("projection: Newman weight a-b (1/2 + 1)", P["O:a"]["O:b"]["weight"], 1.5)
+    check("projection: shared events a-b", P["O:a"]["O:b"]["shared"], 2)
+    check("projection: Newman weight a-c", P["O:a"]["O:c"]["weight"], 0.5)
+    S = nx.Graph()
+    S.add_edge("O:h", "O:x", weight=10.0)
+    for i in range(6):
+        S.add_edge("O:h", f"O:{i}", weight=0.1)
+    check("disparity keeps only the dominant tie", sorted(disparity(S, 0.05).edges), [("O:h", "O:x")])
+    check("subtheme('anticolonial')", subtheme("colonialism", "anticolonial"), "anticolonial")
+    check("stance 'against' window", stance("racism", "Demo against "), "against")
+    check("period_of(2024)", period_of(2024), "2023-24")
+    check("doc_year_of", doc_year_of("https://x.org/wp-content/uploads/2022/07/a.pdf"), 2022)
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp = Path(tmp)
+        bad = nx.Graph()
+        bad.add_node("O:a\x0bb", label=None, xs=["x", "y"])
+        bad.add_edge("O:a\x0bb", "E:1", w=float("nan"))
+        write_graph(bad, tmp / "g")
+        check("GEXF round trip with None and \\x0b", sorted(nx.read_gexf(str(tmp / "g.gexf")).nodes), ["E:1", "O:ab"])
+        check("GraphML round trip", nx.read_graphml(str(tmp / "g.graphml")).number_of_edges(), 1)
+        check("no .tmp files left", sorted(p.name for p in tmp.glob("*.tmp")), [])
+        # ---- full runs, older and long layout
+        for long_format in (False, True):
+            lab = "long" if long_format else "older"
+            res = tmp / f"res_{lab}"
+            _selftest_folder(res, long_format)
+            outs = []
+            for rep in (1, 2):
+                o = tmp / f"out_{lab}_{rep}"
+                argv = [str(res), "-o", str(o)] + (["--no-charts"] if rep == 2 or long_format else [])
+                an = run(build_parser().parse_args(argv))
+                outs.append((o, an))
+            o, an = outs[0]
+            check(f"[{lab}] events", len(an.events), 5)
+            check(f"[{lab}] unique event ids", len({e['event_id'] for e in an.events}), 5)
+            check(f"[{lab}] streams", dict(Counter(e["stream_primary"] for e in an.events)),
+                  {"cja": 2, "echos": 2, "hub": 1})
+            check(f"[{lab}] series: two editions share one series", an.events[0]["series_id"] ==
+                  an.events[1]["series_id"], True)
+            check(f"[{lab}] theme refs matched", an.theme_ref_counts.get("unmatched", 0), 0)
+            check(f"[{lab}] theme instances", len(an.instances), 7)
+            check(f"[{lab}] clean instances", sum(i["clean"] for i in an.instances), 5)
+            check(f"[{lab}] unique clean passages", len({i["passage_id"] for i in an.instances if i["clean"]}), 3)
+            check(f"[{lab}] eff_docs (shares .4/.4/.2)", an.concentration["ALL"]["eff_docs"], 2.78)
+            check(f"[{lab}] umlaut variant merged", len({t["org_key"] for t in an.ties
+                                                         if "ende" in t["org_key"]}), 1)
+            check(f"[{lab}] R1: rows kept / total", an.filter_counts["rows"], (10, 12))
+            check(f"[{lab}] R1: Bakery Ltd left out", any(t["organisation"] == "Bakery Ltd" and t["pass"]["source"]
+                                                          for t in an.ties), False)
+            sens = {(r["theme_filter"], r["scenario"], r["layers"], r["node_level"]): r for r in an.sensitivity}
+            check(f"[{lab}] scenario A orgs (filter source)", sens[("source", "A", "L1-L3", "edition")]["orgs"], 6)
+            check(f"[{lab}] scenario A orgs (filter none)", sens[("none", "A", "L1-L3", "edition")]["orgs"], 7)
+            check(f"[{lab}] scenario C orgs (medium+)", sens[("source", "C", "L1-L3", "edition")]["orgs"], 5)
+            check(f"[{lab}] scenario B drops title-named Shell", sens[("source", "B", "L1-L3", "edition")]["orgs"], 5)
+            check(f"[{lab}] Ende Gelande in 2+ series (C, series)",
+                  sens[("source", "C", "L1-L3", "series")]["orgs_in_2plus"], 2)
+            cen = {r["org_key"]: r for r in an.org_centrality}
+            check(f"[{lab}] FAQ (low) not in default network", "faq" in cen, False)
+            check(f"[{lab}] Attac n_series in C", cen.get("attac", {}).get("n_series"), 2)
+            own = {t: sum(1 for e in an.events if e[f"{t}_own"]) for t in an.themes}
+            check(f"[{lab}] own-text events (fascism)", own.get("fascism"), 1)
+            check(f"[{lab}] landing colonialism events", sum(1 for e in an.events if e["colonialism_landing"]), 3)
+            check(f"[{lab}] country of Paris event", an.events[2]["countries"][:1], ["FR"])
+            check(f"[{lab}] KWIC units (passage x theme)", an.facts["kwic"]["units"], 4)
+            for name in ("analytics.xlsx", "kwic_for_coding.xlsx", "org_codes_template.xlsx", "summary.json",
+                         "summary.md", "network/bipartite_C.gexf", "network/org_backbone_C.graphml"):
+                check(f"[{lab}] wrote {name}", (o / name).exists() and (o / name).stat().st_size > 0, True)
+            if not long_format:
+                check("[older] six charts or a skip note", len(list((o / "charts").glob("*.png"))) +
+                      sum(1 for k in an.skipped if k.startswith("chart ")), 6)
+            o2 = outs[1][0]
+            diff = [p.name for p in sorted((o / "tables").glob("*.csv"))
+                    if p.read_bytes() != (o2 / "tables" / p.name).read_bytes()]
+            check(f"[{lab}] re-run gives byte-identical tables", diff, [])
+        # ---- long layout: a term found twice in one sentence gives two identical rows
+        res2 = tmp / "res_long_twice"
+        shutil.copytree(tmp / "res_long", res2)
+        fields, th_rows = read_csv(res2 / "master_themes.csv")
+        write_csv(res2 / "master_themes.csv", th_rows + [dict(th_rows[-1])], fields)
+        an = run(build_parser().parse_args([str(res2), "-o", str(tmp / "out_twice"), "--no-charts",
+                                            "--no-graphs"]))
+        check("[long] identical row for the same event is a second instance", len(an.instances), 8)
+        # ---- curation loop
+        res = tmp / "res_older"
+        codes = tmp / "org_codes.csv"
+        write_csv(codes, [{"org_key": "attac", "organisation": "Attac", "include": "0"},
+                          {"org_key": "stale key", "organisation": "Extinction Rebellion", "include": "1",
+                           "actor_class": "movement_org", "is_organisation": "yes"},
+                          {"org_key": "shell", "organisation": "Shell", "actor_class": "company",
+                           "is_organisation": "yes"}],
+                  ["org_key", "organisation", "include", "merge_into_key", "actor_class", "is_organisation"])
+        an = run(build_parser().parse_args([str(res), "-o", str(tmp / "out_cur"), "--org-codes", str(codes),
+                                            "--no-charts", "--no-graphs"]))
+        cen = {r["org_key"]: r for r in an.org_centrality}
+        check("[codes] include=0 drops Attac", "attac" in cen, False)
+        check("[codes] curated scenario is the default", an.default_sc, "C_curated")
+        check("[codes] stale org_key gives a warning", any("org_key" in w for w in an.warnings), True)
+        check("[codes] precision read back", bool(an.precision_rows), True)
+        # ---- missing required input
+        empty = tmp / "empty"
+        empty.mkdir()
+        try:
+            run(build_parser().parse_args([str(empty), "-o", str(tmp / "out_empty")]))
+            check("missing master gives InputError", False, True)
+        except InputError:
+            check("missing master gives InputError", True, True)
+    print(("SELFTEST FAILED:\n  " + "\n  ".join(fails)) if fails else "selftest: all checks passed")
+    return 1 if fails else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

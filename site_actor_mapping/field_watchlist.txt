@@ -1,0 +1,35 @@
+# Field watchlist: central groups of the European climate-justice field that the
+# agenda PDFs name in their entry titles, where the small spaCy models often tag
+# them as people, places or "MISC" and so miss them.
+#
+# This file is OPT-IN: it is never loaded on its own. Use it with
+#     python site_actors.py ... --watchlist field_watchlist.txt
+# Names found through a watchlist are rated high confidence and override the stop
+# list, so check that the list fits your research question before you use it, and
+# say in your methods section that you did (it adds prior knowledge to the network).
+#
+# Format: one organisation per line, "Canonical Name | alias | alias ...".
+# - Matching ignores case, accents and umlaut spellings ("Ende Gelaende", "Ende
+#   Gëlande" and "ende gelände" all match "Ende Gelände"), and the words may be
+#   joined by spaces, hyphens or nothing ("Code-Rood", "CodeRood").
+# - Acronyms (six characters or fewer in capitals, or four or fewer with a capital
+#   inside, such as "FoE") are matched case-sensitively.
+# - A leading "=" means the name must start with a capital letter in the text: use
+#   it for names that are also ordinary phrases ("we must stay grounded").
+# Ambiguous short forms are left out on purpose ("EG", "SR", "Code Red").
+
+Alternatiba
+ANV-COP21 | Action Non-Violente COP21 | Action Non Violente COP21
+Les Amis de la Terre | Amis de la Terre | Friends of the Earth | FoE
+Ende Gelände | Ende Gelaende | Ende Gelande
+Code Rood | Code Rouge | Code Rood-Rouge | Code Rood / Rouge
+Extinction Rebellion | XR
+Les Soulèvements de la Terre | Soulèvements de la Terre
+=Reclaim the Power
+=Stay Grounded
+Attac | ATTAC
+Greenpeace
+Fridays for Future | FFF
+Scientist Rebellion
+Climate Justice Action | Climat Justice Action | CJA
+=Shell Must Fall

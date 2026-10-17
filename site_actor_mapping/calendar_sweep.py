@@ -29,7 +29,7 @@ import hashlib
 import logging
 import re
 from dataclasses import dataclass
-from typing import Callable, Iterator, List, Optional, Tuple
+from typing import Callable, Iterable, Iterator, List, Optional, Set, Tuple
 from urllib.parse import quote, urlparse
 
 import requests
@@ -251,3 +251,30 @@ def month_window(calendar_from: Optional[str], calendar_to: Optional[str]
         ym = (int(m.group(1)), int(m.group(2)))
         return (not lo or ym >= lo) and (not hi or ym <= hi)
     return keep
+
+
+_PAGINATED = re.compile(r"/page/\d+/?(?=[?#]|$)")
+
+
+def duplicate_calendar_months(pages: Iterable[object]) -> Set[str]:
+    """URLs of cached calendar months that repeat a month already loaded from another
+    page of the same calendar (finding 28). Earlier versions swept the calendar again
+    from every paginated archive page (/events/page/2/), so an old cache can hold
+    /events/page/2/?calendar_month=2026-04 next to /events/?calendar_month=2026-04.
+
+    Pages are visited shortest referrer first; a month page is a duplicate when the
+    same label has already been seen with the same body, or at the same URL without
+    the /page/N/ part. Pages that are not calendar months are ignored."""
+    cal = [p for p in pages if getattr(p, "kind", "") == "calendar"]
+    cal.sort(key=lambda p: (len(getattr(p, "referrer", "") or ""), p.url))
+    seen: Set[tuple] = set()
+    dup: Set[str] = set()
+    for p in cal:
+        label = getattr(p, "label", "") or ""
+        body = hashlib.sha1((getattr(p, "body", "") or "").encode("utf-8", "replace")).hexdigest()
+        keys = {("body", label, body), ("url", label, _PAGINATED.sub("/", p.url))}
+        if keys & seen:
+            dup.add(p.url)
+        else:
+            seen |= keys
+    return dup
