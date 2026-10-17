@@ -404,6 +404,9 @@ _ENTRY_DATE_PATTERNS = [
     # 11.12th April (the 11th and 12th of April, not 11 December)
     re.compile(rf"^\(?\s*(?P<d1>\d{{1,2}})(?!\d)\.(?P<d2>\d{{1,2}})(?!\d){_ORD}\s+(?P<mon2>{_MON})\.?,?\s*(?P<y2>20\d\d)?",
                re.I),
+    # 29.03 - 12. April (day.month to day and month name)
+    re.compile(rf"^\(?\s*(?P<d1>\d{{1,2}})(?!\d)\.(?P<m1>\d{{1,2}})(?!\d)\.?\s*{_RANGE_SEP}\s*"
+               rf"(?P<d2>\d{{1,2}})(?!\d){_ORD}\.?\s*(?P<mon2>{_MON})\.?,?\s*(?P<y2>20\d\d)?", re.I),
     # (24.05)  20.06.2026
     re.compile(r"^\(?\s*(?P<d1>\d{1,2})(?!\d)\.(?P<m1>\d{1,2})(?!\d)\.?(?:(?P<y1>20\d\d|\d\d)(?!\d))?"),
     # 24 of may – 1st of june / 29 juillet au 1er août / 15 au 18 juillet / 1 Aug - 8 Aug 2025

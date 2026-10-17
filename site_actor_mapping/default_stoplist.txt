@@ -47,6 +47,26 @@ Loading
 Laden
 Caricamento
 Cargando
+# Legal-form words on their own ("in the case of NV there is no..."); "Shell plc" is kept
+NV
+BV
+GmbH
+gGmbH
+AG
+SA
+SAS
+SARL
+SpA
+Srl
+Ltd
+Inc
+LLC
+plc
+e.V.
+Oy
+A/S
+# Comment authors on blogs ("RÉPONDRE 11. Anonyme 27 SEPTEMBRE")
+re:^(?:anonym\w*|anonimo|anónimo)(?:\s+\d+)?$
 
 re:^(?:all )?rights reserved
 re:^copyright\b
@@ -56,3 +76,4 @@ re:^\W*\d[\d\s./-]*$
 # clock times and road numbers that NER tags as organisations ("14 H 51 MIN", "A10")
 re:^\W*(?:\d{1,2}\s*)?h\s*\d{1,2}(?:\s*min)?\b
 re:^[ABDEMN]-?\d{1,3}$
+re:^(?:min|mins|h|hrs?|uhr)\.?$

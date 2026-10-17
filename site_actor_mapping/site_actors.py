@@ -110,7 +110,8 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     g.add_argument("--follow-links", choices=["none", "events", "all"], default="none",
                    help="Also crawl websites linked from calendar events ('events') or from any "
                         "page's main content ('all'), and analyse them too")
-    g.add_argument("--follow-max-sites", type=int, default=60, help="At most this many linked sites")
+    g.add_argument("--follow-max-sites", type=int, default=60,
+                   help="At most this many linked sites, most-linked first (0 = no limit)")
     g.add_argument("--follow-max-pages", type=int, default=25, help="Pages per linked site")
     g.add_argument("--follow-max-depth", type=int, default=1,
                    help="Clicks from the linked page within each linked site")
@@ -230,7 +231,8 @@ def input_files(args: argparse.Namespace) -> Dict[str, object]:
         p = Path(p).expanduser() if p else None
         if p is None:
             return {}
-        return {"path": str(p), "name": p.name, "sha256": file_sha256(p) if p.exists() else "missing"}
+        return {"path": str(p.resolve()) if p.exists() else str(p), "name": p.name,
+                "sha256": file_sha256(p) if p.exists() else "missing"}
     files: Dict[str, object] = {"themes": rec(args.themes), "watchlist": rec(args.watchlist),
                                 "stoplist": rec(args.stoplist)}
     files["seed_pdfs"] = [rec(s) if not re.match(r"https?://", s) else {"url": s} for s in args.seed_pdf]
@@ -413,7 +415,15 @@ def load_pages(cache_pages: Iterable[CachedPage], registry: SiteRegistry, strip_
                 moved.setdefault(host, site)     # a linked site that moved to another domain
         key = cp.final_url
         if key in pages:          # redirects: several requested URLs, one final page
-            pages[key].requested_urls.add(cp.url)
+            pg = pages[key]
+            pg.requested_urls.add(cp.url)
+            if pg.site_role == "linked" and site.role == "linked":
+                # via_event: the events linking any of the URLs that end here
+                names = list(dict.fromkeys(v.event for v in site.via
+                                           if v.target in pg.requested_urls and v.event))
+                if names:
+                    pg.via_event = "; ".join(names[:5]) + (f" (+{len(names) - 5} more)"
+                                                          if len(names) > 5 else "")
             continue
         try:
             pages[key] = tag(parse_html(cp.body, cp.final_url, cp.depth, strip_regions), site, cp)
@@ -841,11 +851,31 @@ def run(args: argparse.Namespace, out: Path, info: dict) -> int:
                 index.add_calendar_page(cp)
                 calendar_hosts.add(referrer)
     by_final = {m[0]: u for u, m in meta.items()}
+    outside = EventIndex()       # events shown on the calendar page but outside the window
     for url in calendar_hosts:   # the months shown on the calendar page when it loads
         hurl = url if url in meta else by_final.get(url)
         host = cache.get(hurl) if hurl else None
-        if host is not None and (in_window is None):
-            index.add_calendar_page(host)
+        if host is not None:
+            (index if in_window is None else outside).add_calendar_page(host)
+    if outside.events:
+        # With --calendar-from/--calendar-to, the paragraphs of the calendar page that
+        # name only events outside the window are not analysed (they would otherwise
+        # give organisations tied to no event).
+        for k in [k for k in outside.events if k in index.events]:
+            del outside.events[k]
+        n_out = 0
+        for p in pages:
+            if p.url in calendar_hosts or getattr(p, "requested_urls", set()) & calendar_hosts:
+                for b in p.blocks:
+                    if b.text and outside.named_in(b.text) and not index.named_in(b.text):
+                        b.text, b.links = "", []
+                        n_out += 1
+                    elif not b.text and b.links and all(
+                            (normalise_url(lk.href) or lk.href) in outside.events for lk in b.links):
+                        b.links = []      # the link around an event title
+        if n_out:
+            log.info("%d paragraphs of the calendar page name only events outside "
+                     "--calendar-from/--calendar-to and are not analysed", n_out)
     for url, (final_url, is_pdf, kind, referrer) in meta.items():
         if not is_pdf and (final_url in index.events or url in index.events):
             cp = cache.get(url)
@@ -914,7 +944,7 @@ def run(args: argparse.Namespace, out: Path, info: dict) -> int:
             urls = {page.url} | set(getattr(page, "requested_urls", ()) or ())
             nurls = urls | {normalise_url(u) for u in urls if normalise_url(u)}
             # The page is an event page itself (also when reached through a redirect).
-            refs = [index.ref(k) for k in dict.fromkeys(u for u in nurls if u in index.events)]
+            refs = [index.ref(k) for k in sorted(u for u in nurls if u in index.events)]
             site = sites_by_key.get(page.site) or registry.site_of(page.url)
             linked = site is not None and site.role == "linked"
             if linked:

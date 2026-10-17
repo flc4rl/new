@@ -13,6 +13,9 @@ every mention so precision can be judged afterwards:
   ner         spaCy named-entity recogniser, label ORG (optional)
   link        anchor text / logo alt text of links to *other* websites
               (partner lists, "supported by" logos)
+  website     a name written in the same paragraph as a web address whose
+              domain spells it ("Code Rood, camp action climat …
+              https://code-rood.org", "Ende Gelände … ende-gelaende.org")
 
 Acronyms defined in the text ("Black Lives Matter (BLM)") are merged with
 their long form.
@@ -238,6 +241,8 @@ CONNECTORS = {
     "проти", "против", "для", "з", "с",
     # French / German / Portuguese contracted prepositions: "Droit au Logement", "Soutien aux Exilés"
     "au", "aux", "vom", "im", "beim", "ao", "pela", "pelo", "sem",
+    # "Mouvement contre le Racisme et pour l'Amitié entre les Peuples"
+    "entre",
 }
 CONJUNCTIONS = {"and", "&", "e", "y", "et", "und", "og", "och", "și", "si", "ja",
                 "és", "ir", "και", "та", "і", "и", "eta"}
@@ -267,7 +272,12 @@ EVENT_WORDS = {
     "conferência", "cimeira", "encontro", "conferentie", "congres", "top", "bijeenkomst", "konference",
     "kongres", "szczyt", "konferencja", "rassemblement", "manifestation", "kundgebung", "presidio",
     "demonstration", "demo", "week", "weekend", "days", "aktionswoche",
+    "blockade", "blockades", "blocage", "blokkade", "blockaden", "bloqueo", "blocco",
 }
+# Event words that end an event's name but may begin an organiser's ("AMS camp", "Bonn
+# Climate Camp", "Anarchist Bookfair", "Alter tour"; but "Camp Climat Grenoble" is a group).
+EVENT_LAST_WORDS = {"camp", "camps", "tour", "biketour", "fair", "bookfair", "march", "marche", "day",
+                    "actionday", "aktionstag"}
 CONFERENCE_WORDS = {"conference", "conferences", "congress", "summit", "festival", "agm", "konferenz",
                     "kongress", "gipfel", "conférence", "congrès", "sommet", "conferenza", "congresso",
                     "vertice", "conferencia", "congreso", "cumbre", "conferência", "cimeira",
@@ -321,7 +331,7 @@ LEADING_STRIP = {
 # LEADING_STRIP words that also begin real names: dropped only at the start of a sentence
 # or line (see OrgExtractor._trim). NAV_OPENERS are menu and caption words, which may be
 # dropped even when a single name word is left ("Home Greenpeace" -> "Greenpeace").
-NAME_OPENERS = {"via", "new", "home", "more", "il", "la", "le", "les", "el", "lo", "los", "las",
+NAME_OPENERS = {"via", "new", "home", "more", "we", "il", "la", "le", "les", "el", "lo", "los", "las",
                 "atelier", "visit", "visite", "press", "news"}
 NAV_OPENERS = {"home", "news", "press", "visit", "visite", "more"}
 ACTIVITY_OPENERS = {"atelier", "visit", "visite"}
@@ -329,7 +339,8 @@ ACTIVITY_OPENERS = {"atelier", "visit", "visite"}
 GENERIC = {
     "partner", "partners", "member", "members", "main", "other", "related", "local",
     "national", "international", "regional", "global", "european", "our", "contact",
-    "about", "home", "menu", "more", "new", "all", "general", "annual", "public",
+    # not "home": "Home Office" (a lone "Home" is still rejected as a menu word)
+    "about", "menu", "more", "new", "all", "general", "annual", "public",
     "private", "working", "affiliated",
     # document / event furniture that NER tags as ORG, notably in PDFs
     "workshop", "workshops", "session", "sessions", "programme", "program", "call-out",
@@ -339,6 +350,9 @@ GENERIC = {
     "summer", "winter", "spring", "autumn", "faq", "navigation", "newsletter", "kontakt", "impressum",
     "press", "release", "media", "team", "guide", "handbook", "toolkit", "policy", "values",
     "webinar", "webinars", "recording", "recordings", "video", "videos", "resource", "resources",
+    # German nouns are always capitalised, so these never show up as lower-case words
+    "aktion", "aktionen", "veranstaltung", "veranstaltungen", "termine", "upcoming",
+    "external", "useful", "further", "additional",
 }
 # Generic words in other languages, used when deciding whether a name with a head word
 # has anything distinctive ("Assemblée Générale", "Lokale Gruppen", "Groupe de Travail").
@@ -350,6 +364,8 @@ GENERIC_MULTI = {
     "homogenen", "offene", "offenes", "offenen", "neue", "neuen", "erste", "ersten", "andere",
     "anderen", "autres", "altri", "otros", "outros", "nuestra", "notre", "unsere", "unser",
     "legal", "awareness", "care", "support", "info", "welcome", "matters",
+    # camp roles: "Arrestee Group", "Affinity Group", "Buddy Group"
+    "arrestee", "arrestees", "affinity", "buddy", "buddies", "bezugsgruppe",
     "politique", "political", "politico", "político", "politisch", "politische", "politiek",
     # identity words that NER tags as organisations ("Black, Indigenous and People of Color")
     "black", "white", "indigenous", "intersex", "agender", "binary",
@@ -360,6 +376,13 @@ MONTHS = {
     "january", "february", "march", "april", "may", "june", "july", "august", "september",
     "october", "november", "december", "monday", "tuesday", "wednesday", "thursday",
     "friday", "saturday", "sunday",
+    # abbreviations and other languages, as calendar cells write them ("DEC 2024", "JUIL")
+    "jan", "feb", "apr", "jun", "jul", "aug", "sep", "sept", "oct", "nov", "dec", "janv", "févr",
+    "avr", "juil", "déc", "janvier", "février", "avril", "juin", "juillet", "août", "septembre",
+    "octobre", "novembre", "décembre", "januar", "februar", "märz", "juni", "juli", "oktober",
+    "dezember", "gennaio", "febbraio", "aprile", "maggio", "giugno", "luglio", "settembre", "ottobre",
+    "dicembre", "enero", "febrero", "junio", "julio", "agosto", "septiembre", "octubre", "noviembre",
+    "diciembre",
 }
 LINK_TEXT_JUNK = re.compile(
     r"^(?:here|click|read|more|link|website|site|homepage|home|this|download|pdf|"
@@ -469,9 +492,23 @@ REGION_TAGS = ("nav", "header", "footer", "aside")
 TITLE_SEPARATOR = re.compile(r"\s[-–—|]\s|:\s|\s/\s")
 # Prepositions of place right before a name: "in Lingen", "à Bure", "bei Rügen", "near Brunsbüttel".
 LOCATIVE_BEFORE = re.compile(
-    r"(?<!\w)(?:in|at|near|around|outside|from|to|à|au|aux|en|près\s+de|près\s+d['’]|vers|sur|"
+    r"(?<!\w)(?:in|at|near|around|outside|à|au|aux|en|près\s+de|près\s+d['’]|vers|sur|"
     r"nach|bei|im|am|aus|nahe|vor|auf|bij|te|op|nabij|naar|på|vid|nära|ved|nær|cerca\s+de|"
     r"vicino\s+a|presso|em|perto\s+de)\s+(?:the\s+|der\s+|den\s+|la\s+|le\s+|l['’])?$", re.I)
+# "from" and "to" are place prepositions too ("1 mile from Kinneil", "direct to Falkirk"),
+# but not after people, messages or giving: "activists from Greenpeace", "support from
+# Attac", "donate to Sea-Watch", "bedankt sich bei X".
+LOCATIVE_WEAK = re.compile(r"(?<!\w)(?:from|to)\s+(?:the\s+)?$", re.I)
+ACTOR_PREPOSITION = re.compile(
+    r"(?<!\w)(?:(?:activists?|members?|people|comrades|support|statements?|messages?|letters?|speakers?|"
+    r"delegat\w*|representatives?|solidarity|calls?|invitations?|friends|volunteers?|organi[sz]ers?|"
+    r"campaigners?|staff|team|groups?|donations?|funding|grants?|colleagues|allies|someone|"
+    r"anyone|contributions?)\s+from"
+    r"|(?:donate|donating|give|giving|send|sending|write|writing|join|joining|belong|belongs|"
+    r"thanks?|grateful|solidarity|support|talk|speak|letters?|messages?|donations?|apply|"
+    r"complaint|petition|open\s+letter|membership)\s+to"
+    r"|(?:sich|danke|dank|bedanken|arbeite[nt]?|engagier\w*|aktiv|mitglied|spenden?)\s+bei)"
+    r"\s+(?:the\s+)?$", re.I)
 # "a" (Italian / Spanish / Portuguese / Catalan "to, at") and "i" (Scandinavian "in") are
 # English and Italian articles too: locative only on paragraphs in those languages.
 LOCATIVE_BY_LANG = {
@@ -587,10 +624,14 @@ _KEEP_S = {"news", "always", "towards", "perhaps", "texas", "paris", "athens", "
 _ELISIONS = r"(?:[dlnmstcj]|qu|jusqu|lorsqu|puisqu|quoiqu|un|quell|dell|dall|nell|sull|all|coll|degl|dagl|sugl|negl)"
 ELIDED_PREFIX = re.compile(_ELISIONS + r"['’](?=[^\W\d_])", re.I)
 _ELIDED_IN_KEY = re.compile(r"(?<![\w'])" + _ELISIONS + r"'(?=[^\W\d_])")
-# German umlauts written as ae / oe / ue ("Ende Gelaende", "Gruene") are folded to the
-# plain vowel, as "Gelände" becomes "gelande" when accents are removed. Only between
-# consonants and not near the end of a word, so "queer", "blue", "fuel" and "Michael" keep theirs.
-_UMLAUT_VARIANT = re.compile(r"(?<=[bcdfghjklmnprstvwxz])(?<![qg])([aou])e(?=[bcdfghjklmnprstvwxz][a-z])")
+# German umlauts written as ae / oe / ue ("Ende Gelaende", "Gruene", "Koeln") are folded
+# to the plain vowel, as "Gelände" becomes "gelande" when accents are removed. Only in the
+# umlaut sense: between consonants and not near the end of a word, so "queer", "blue",
+# "fuel" and "Michael" keep theirs, and not in the Romance "-uell-" ("actuelle", "manuell").
+# On the user's real outputs (11,652 names and words) every merge this makes is a true
+# umlaut pair (Gelaende/Gelände, Koeln/Köln, foerdern/fördern, Fruehling/Frühling).
+_UMLAUT_VARIANT = re.compile(r"(?<=[bcdfghjklmnprstvwxz])(?<![qg])(?:([ao])e|(u)e(?!ll))"
+                             r"(?=[bcdfghjklmnprstvwxz][a-z])")
 
 
 def strip_elision(token: str) -> str:
@@ -598,7 +639,18 @@ def strip_elision(token: str) -> str:
     return ELIDED_PREFIX.sub("", token, count=1)
 
 
+_CAMEL_BOUNDARY = re.compile(r"(?<=[a-zß-ÿ])(?=[A-ZÀ-Þ])")
+
+
+def _split_camel(token: str) -> str:
+    """"ShellMustFall" -> "Shell Must Fall", "ClimateCampScotland" -> "Climate Camp Scotland":
+    a word with two or more lower-to-upper-case changes is several words run together.
+    One change is left alone ("GroenFront", "TotalEnergies", "KontraIAA")."""
+    return _CAMEL_BOUNDARY.sub(" ", token) if len(_CAMEL_BOUNDARY.findall(token)) >= 2 else token
+
+
 def canonical_key(name: str) -> str:
+    name = " ".join(_split_camel(t) for t in name.split()) if _CAMEL_BOUNDARY.search(name) else name
     n = unicodedata.normalize("NFKD", name)
     n = "".join(c for c in n if not unicodedata.combining(c)).casefold()
     n = n.replace("&", " and ").replace("’", "'")
@@ -607,7 +659,7 @@ def canonical_key(name: str) -> str:
     n = re.sub(r"[^\w\s-]", " ", n)
     toks = [t[:-1] if len(t) > 3 and t.endswith("s") and not t.endswith(("ss", "us", "is", "gas"))
             and t not in _KEEP_S else t for t in n.split()]
-    toks = [_UMLAUT_VARIANT.sub(r"\1", t) if len(t) >= 5 else t for t in toks]
+    toks = [_UMLAUT_VARIANT.sub(lambda m: m.group(1) or m.group(2), t) if len(t) >= 5 else t for t in toks]
     while toks and toks[0] in {"the", "il", "lo", "la", "le", "gli", "l", "el", "los", "las",
                                "les", "der", "die", "das", "o", "a", "os", "as", "η", "ο", "το", "οι", "τα"}:
         toks = toks[1:]
@@ -616,6 +668,7 @@ def canonical_key(name: str) -> str:
 
 def tidy_surface(name: str) -> str:
     name = clean_ws(name).strip(" \t\"'“”‘’«»()[]{}:;,.-–—|/")
+    name = re.sub(r"(?<=[^\W\d_])-\s+(?=[^\W\d_])", "-", name)   # a PDF line break: "SOUS-LES- COTES"
     name = re.sub(r"\s*[\[(][^\])]*$", "", name)          # unclosed "[DE" / "(UK"
     name = re.sub(r"^[^\[\]()]*[\])]\s*/?\s*(?=\w)", "", name)  # "France]/ Transnational": a fragment
     name = re.sub(r"^[^\w\"“«(]+|[^\w.)\"”»]+$", "", name).strip()  # emoji, bullets, "!"
@@ -624,7 +677,8 @@ def tidy_surface(name: str) -> str:
     name = re.sub(r"^(?:the|The|THE|De|Het|Den|Det|Die|Der|Das)\s+(?=\S+\s+\S)", "", name)
     # a trailing lower-case connector picked up from the next phrase: "ZAD de", "Friends of"
     name = re.sub(r"(?:\s+(?:de|des|du|d|of|and|et|und|di|del|della|la|le|les|von|van|der|for|"
-                  r"pour|für|à|a|au|aux|en|in|on|at|or|ou|oder|y|e|the|die|das|el|il))+$", "", name)
+                  r"pour|für|à|a|au|aux|en|in|on|at|or|ou|oder|y|e|the|die|das|el|il|between|entre|"
+                  r"zwischen|tra|fra|with|avec|mit|con|by|par|from))+$", "", name)
     # a trailing article picked up from the next phrase: "GROUPE ÉCOUTE Le", "Kollektiv X Die"
     name = re.sub(r"\s+(?:Le|La|Les|L|The|Die|Der|Das|De|Het|El|Il|Lo|Los|Las)$", "", name)
     # an agenda status word after the name: "Allemagne ANNULÉ", "Climate Camp CANCELLED"
@@ -632,6 +686,11 @@ def tidy_surface(name: str) -> str:
                   r"ANNULLATO|CANCELADO|AFLYST|INSTÄLLT|GEANNULEERD)$", "", name)
     name = re.sub(r"[’']s$", "", name)
     name = re.sub(r"(?<=\D)\s+(?:19|20)\d\d$", "", name)   # "Pinksterlanddagen 2022", "Ende Gelände 2019"
+    # an ALL-CAPS event label after a name: "Nordic Climate Justice Coalition ACTION CAMPS"
+    caps = re.search(r"(?:\s+[^\W\d_a-zß-ÿ][^\W\da-zß-ÿ\-]+)+$", name)
+    if caps and re.search(r"[a-zß-ÿ]", name[:caps.start()]) and any(
+            w.casefold() in EVENT_WORDS or w.casefold() in EVENT_LAST_WORDS for w in caps.group(0).split()):
+        name = name[:caps.start()]
     return name
 
 
@@ -1152,10 +1211,22 @@ def _installed(model: str) -> bool:
 _LANG_NOISE = re.compile(r"https?://\S+|www\.\S+|\S+@\S+|\b\d+(?:er|ère|e|ème|st|nd|rd|th|°)\b", re.I)
 
 
+# Letters used by only one or two of the supported languages; a word containing one
+# counts as two more hits for those languages ("Obóz klimatyczny odbędzie się w sierpniu").
+_LANG_LETTERS = {"pl": "łśźżęąń", "ro": "șțăşţ", "cs": "řůě", "sk": "ľĺŕ", "hu": "őű", "hr": "đ",
+                 "da": "øæ", "nb": "øæ", "lt": "ėįųū"}
+
+
 def language_scores(text: str) -> Counter:
-    """Function-word hits per language (web addresses and ordinals such as "1er" removed)."""
+    """Function-word hits per language (web addresses and ordinals such as "1er" removed),
+    plus two for a language whose own letters appear in a word."""
     words = re.findall(r"[^\W\d_]+", _LANG_NOISE.sub(" ", text).lower())[:3000]
-    return Counter({lang: sum(w in hints for w in words) for lang, hints in _LANG_HINTS.items()})
+    scores = Counter({lang: sum(w in hints for w in words) for lang, hints in _LANG_HINTS.items()})
+    letters = set("".join(words))
+    for lang, own in _LANG_LETTERS.items():
+        if letters.intersection(own):
+            scores[lang] += 2
+    return scores
 
 
 def detect_language(text: str, declared: str = "", prior: str = "") -> str:
@@ -1226,6 +1297,9 @@ class OrgExtractor:
         self.common_words: Set[str] = set()
         self.mid_caps: Optional[Set[str]] = None   # None until prepare_corpus() runs
         self._corpus_text = ""                      # distinct paragraphs, for phrase case counts
+        self._corpus_low = ""
+        self._corpus_sites: Dict[str, str] = {}
+        self._corpus_prefixes: Set[str] = set()
         self._phrase_case: Dict[str, bool] = {}
         self.missing_models: Set[str] = set()
         self.broken_models: Set[str] = set()       # installed but failed to load or run
@@ -1342,14 +1416,11 @@ class OrgExtractor:
             top, n = votes.most_common(1)[0]
             if top != lang and n >= 3 and n >= 0.6 * sum(votes.values()):
                 fallback = top
-        out = []
-        for t, c in zip(texts, own):
-            if c:
-                c = confident_language(t, fallback)
-                if c != fallback and votes[c] < 2 and language_scores(t)[c] < 4:
-                    c = fallback
-            out.append(c or fallback)
-        return out
+        out = [(confident_language(t, fallback) if c else "") or fallback for t, c in zip(texts, own)]
+        # a language given to only one paragraph needs strong evidence of its own
+        routed = Counter(out)
+        return [fallback if (c != fallback and routed[c] < 2 and language_scores(t)[c] < 4) else c
+                for t, c in zip(texts, out)]
 
     def _model_id(self, name: str) -> str:
         """Model name + versions: a persistent cache entry is reused only for the same model."""
@@ -1463,7 +1534,17 @@ class OrgExtractor:
         self.common_words = {w for w, n in lower.items() if n >= 2 and n >= 0.5 * upper.get(w, 0)}
         self.mid_caps = set(upper)
         self._corpus_text = "\n".join(seen)
+        # A lower-case copy of the same length, so phrase positions found in it are valid
+        # in the original ("İ" and a few other characters change length when lowered).
+        low = self._corpus_text.lower()
+        if len(low) != len(self._corpus_text):
+            low = "".join(c if len(c.lower()) != 1 else c.lower() for c in self._corpus_text)
+        self._corpus_low = low
         self._phrase_case = {}
+        # Websites given anywhere in the corpus ("https://alternatiba.eu" in one agenda
+        # entry): a name that spells one is that site's organisation in other paragraphs too.
+        self._corpus_sites = _sites_of(m.group(1) for m in _URL_HOST.finditer(self._corpus_text))
+        self._corpus_prefixes = {n[:k] for n in self._corpus_sites for k in range(1, len(n) + 1)}
 
     def capitalised_in_running_text(self, surface: str) -> bool:
         """Does the name have a word the site capitalises mid-sentence (a proper
@@ -1549,6 +1630,8 @@ class OrgExtractor:
                 if not re.fullmatch(r"\s{1,3}|-|[’']\s?", gap):
                     break
                 nxt = toks[j + 1].group(0)
+                if nxt in _CAP_INDEFINITES:
+                    break   # "Kraftwerk Eine Gruppe vorm Tor": a capitalised article starts a new phrase
                 if _is_cap(nxt):
                     j += 1
                     last_cap = j
@@ -1646,6 +1729,14 @@ class OrgExtractor:
         # Need at least one distinctive word: not a head, not generic, not a connector.
         distinctive = [t for t in content
                        if t not in HEAD_TO_TYPE and not generic(t) and t not in TRAILING_TO_TYPE]
+        if not distinctive and not acronym:
+            # two organisational words of different kinds joined by a preposition are a
+            # name: "Colectivo en Resistencia", "Collectif en Lutte" (not "Working Group")
+            heads = [k for k, t in enumerate(low) if t in HEAD_TO_TYPE]
+            if (len(heads) >= 2 and heads[1] - heads[0] >= 2 and all(t in HEAD_TO_TYPE for t in content)
+                    and HEAD_TO_TYPE[low[heads[0]]] != HEAD_TO_TYPE[low[heads[1]]]
+                    and all(t in CONNECTORS for t in low[heads[0] + 1:heads[1]])):
+                return typ
         return typ if (distinctive or acronym) else None
 
     # ---------------------------------------------------------------- extract
@@ -1656,6 +1747,87 @@ class OrgExtractor:
         if w and (w in self._appos_last or w.startswith(_APPOS_STEMS)):
             return self.pre_appos.search(before)
         return None
+
+    @staticmethod
+    def _website_names(text: str, sites: Dict[str, str], prefixes: Set[str]) -> List[Tuple[int, int, str]]:
+        """Runs of up to 6 words, starting with a capitalised word (or an article before
+        one) and joined only by spaces or hyphens, that spell a website name in `sites`
+        ("Shell must fall" for shellmustfall.org, "Stay grounded" for stay-grounded.org,
+        "Les soulèvements de la terre" for lessoulevementsdelaterre.org). `prefixes` holds
+        every prefix of every name, so a run is extended only while it can still match."""
+        toks = list(TOKEN_RE.finditer(text))
+        squashed: Dict[int, str] = {}
+
+        def sq(k: int) -> str:
+            if k not in squashed:
+                squashed[k] = _plain_squash(strip_elision(toks[k].group(0)))
+            return squashed[k]
+        out = []
+        i = 0
+        while i < len(toks):
+            a = toks[i]
+            word = a.group(0)
+            article = word.casefold() in ARTICLES and i + 1 < len(toks)
+            if not (article or _is_cap(word)):
+                i += 1
+                continue
+            # quick test: can a site name begin here (this word, or an article and the next)?
+            start = (strip_elision(word) if "'" in word or "’" in word else word).casefold()
+            if article:
+                start += toks[i + 1].group(0).casefold()
+            start3 = start[:3].translate(_ACCENT_FOLD)
+            if len(start3) == 3 and start3.isalpha() and start3 not in prefixes:
+                if not article or toks[i + 1].group(0)[:3].casefold().translate(_ACCENT_FOLD) not in prefixes:
+                    i += 1
+                    continue
+            prev = toks[i - 1].group(0) if i > 0 else ""
+            if (prev and _is_cap(prev) and re.fullmatch(r"\s{1,3}", text[toks[i - 1].end():a.start()])
+                    and not {prev.casefold()} & (ARTICLES | EVENT_WORDS | EVENT_LAST_WORDS | LEADING_STRIP)):
+                i += 1     # "Scottish Parliament" (parliament.scot): part of a longer name
+                continue   # (but "Tour Alternatiba", "Camp Code Rood" name the organiser)
+            best, joined, j = None, "", i
+            while j < len(toks) and j < i + 6:
+                if j > i and not re.fullmatch(r"\s{1,3}|-|[’']\s?", text[toks[j - 1].end():toks[j].start()]):
+                    break
+                joined += sq(j)
+                if joined not in prefixes:
+                    break
+                if joined in sites and toks[j].group(0).casefold() not in CONNECTORS:
+                    best = (j, joined)
+                j += 1
+            if best is None:
+                i += 1     # (after an article: "les Amis de la Terre" is tried from "Amis")
+                continue
+            if _is_cap(word) or _is_cap(toks[i + 1].group(0)):
+                b = toks[best[0]]
+                ws = a.start() + (len(a.group(0)) - len(strip_elision(a.group(0))))
+                if not is_place_key(canonical_key(text[ws:b.end()])):
+                    out.append((ws, b.end(), sites[best[1]]))
+                    i = best[0] + 1
+                    continue
+            i += 1
+        return out
+
+    def _split_known_left(self, text: str, start: int, end: int, conjunctions: Set[str]) -> List[Tuple[int, int]]:
+        """Split an entity "X and Y" when spaCy tags X alone as an organisation elsewhere
+        ("Greenpeace and Civil Rights Defenders", "Exxon & Shell") and Y starts with a
+        capitalised word. Names whose coordination follows "for / für / pour / against …"
+        ("Bund für Umwelt und Naturschutz") or continues in lower case ("Ligue des Droits
+        de l'Homme et du Citoyen") stay whole."""
+        toks = list(TOKEN_RE.finditer(text, start, end))
+        for k in range(1, len(toks) - 1):
+            if toks[k].group(0).casefold() not in conjunctions:
+                continue
+            left_low = [t.group(0).casefold() for t in toks[:k] if not _is_cap(t.group(0))]
+            if any(w in PURPOSE_PREPOSITIONS for w in left_low):
+                return [(start, end)]
+            j = k + 1
+            while j < len(toks) - 1 and toks[j].group(0).casefold() in ARTICLES:
+                j += 1
+            if not _is_cap(toks[j].group(0)) or not self._org_elsewhere(text[start:toks[k - 1].end()]):
+                continue
+            return [(start, toks[k - 1].end())] + self._split_known_left(text, toks[j].start(), end, conjunctions)
+        return [(start, end)]
 
     def _org_elsewhere(self, surface: str) -> bool:
         """Has spaCy labelled this exact name ORG at least twice in the paragraphs seen so
@@ -1681,11 +1853,31 @@ class OrgExtractor:
         if key not in self._phrase_case:
             body = " ".join(TOKEN_RE.findall(surface))
             body = re.sub(r"^(?:the|les|la|le|die|der|das|el|il)\s+", "", body, flags=re.I)
-            pat = r"(?<!\w)" + r"\s+".join(re.escape(w) for w in body.split()) + r"(?!\w)"
-            lower = len(re.findall(pat.lower(), self._corpus_text))
-            upper = len(re.findall(pat, self._corpus_text, re.I)) - lower
-            self._phrase_case[key] = upper >= lower
+            self._phrase_case[key] = self._phrase_case_counts(body)
         return self._phrase_case[key]
+
+    def _phrase_case_counts(self, body: str) -> bool:
+        """Is `body` written capitalised, as a name of its own, at least as often as in
+        lower case in the corpus? Capitalised uses inside a longer capitalised name
+        ("Nordic Climate Justice Coalition" for "Climate Justice") do not count.
+        Uses str.find on a lower-case copy: a regular expression over the whole corpus
+        took seconds per name on large runs."""
+        text, low, needle = self._corpus_text, self._corpus_low, body.lower()
+        n, lower, upper, i = len(needle), 0, 0, low.find(needle)
+        while i >= 0 and n:
+            j = i + n
+            if not (i > 0 and (low[i - 1].isalnum() or low[i - 1] == "_")) and not (
+                    j < len(low) and (low[j].isalnum() or low[j] == "_")):
+                found = text[i:j]
+                if found == needle:
+                    lower += 1
+                else:
+                    prev = re.search(r"([^\W\d_][\w’'\-]*)[ ]$", text[max(0, i - 40):i])
+                    nxt = re.match(r" ([^\W\d_])", text[j:j + 3])
+                    if not ((prev and prev.group(1)[:1].isupper()) or (nxt and nxt.group(1).isupper())):
+                        upper += 1
+            i = low.find(needle, i + 1)
+        return upper >= lower
 
     def _name_before_head(self, surface: str, toks: Sequence[str], before: str) -> bool:
         """For "the Abolitionist Futures collective" (a lower-case head after the name):
@@ -1754,6 +1946,23 @@ class OrgExtractor:
         ents = [(e.start_char, e.end_char, e.label_) for e in doc.ents] if doc is not None else []
         # A table of ticks and "N. A." marks: its capitalised cells are not names.
         table = len(_TABLE_MARKS.findall(text)) >= 2
+        # Names of the websites this paragraph gives or links to: a capitalised phrase that
+        # spells one of them is that site's organisation ("Code Rood … code-rood.org").
+        sites = _sites_of([m.group(1) for m in _URL_HOST.finditer(text)] + [ln.domain for ln in links if ln.domain])
+        corpus_only: Set[int] = set()    # website names known only from other paragraphs
+        if not table:
+            here = (self._website_names(text, sites, {n[:k] for n in sites for k in range(1, len(n) + 1)})
+                    if sites else [])
+            found = [(w, True) for w in here]
+            if self._corpus_sites:
+                found += [(w, False) for w in self._website_names(text, self._corpus_sites, self._corpus_prefixes)
+                          if not any(a < w[1] and w[0] < b for a, b, _ in here)]
+            for (ws, we, host), local in found:
+                m = Mention(text[ws:we], "", {"website"}, self._head_type(TOKEN_RE.findall(text[ws:we])) or "",
+                            ws, we, link_domain=host)
+                if not local:
+                    corpus_only.add(id(m))
+                cands.append((2, m))
 
         for s, e, _ in ([] if table else self._spans(text, lang)):
             s, e = self._trim(text, s, e)
@@ -1771,8 +1980,9 @@ class OrgExtractor:
                 post = None
             head_typ = self._head_type(toks)
             after_head = False
-            if not head_typ and not pre and not post:
+            if not head_typ and not pre and not post and lang not in _ADJ_AFTER_NOUN_LANGS:
                 # "the Abolitionist Futures collective": lowercase head right after the name
+                # (not in French, Italian, Spanish...: "Ferme collective" is "collective farm")
                 nxt = re.match(r"\s+([\w\-]+)", after)
                 if (nxt and nxt.group(1) in HEAD_TO_TYPE and nxt.group(1).islower()
                         and nxt.group(1) not in WEAK_TRAILING and self._name_before_head(surface, toks, before)):
@@ -1814,15 +2024,18 @@ class OrgExtractor:
             for ent in doc.ents:
                 if ent.label_ not in ("ORG", "NORP_ORG"):
                     continue
-                if (german and len(ent) == 1 and ent[0].pos_ in {"NOUN", "ADJ", "VERB", "ADV", "PRON"}
-                        and not ent.text.isupper()):
+                if (german and len(TOKEN_RE.findall(ent.text)) == 1
+                        and ent[0].pos_ in {"NOUN", "ADJ", "VERB", "ADV", "PRON"} and not ent.text.isupper()):
                     continue   # a common German noun ("Gemeinschaft", "Küche"), not a name
-                # "General Election, Reform UK", "Climáximo, Lisbon": one name per comma part
+                # "General Election, Reform UK", "Climáximo, Lisbon": one name per comma part;
+                # "IPPNW and ICAN": two acronyms joined by a conjunction are two names
                 parts, pos = [], ent.start_char
-                for piece in re.split(r"(,\s+)", text[ent.start_char:ent.end_char]):
-                    if piece and not re.fullmatch(r",\s+", piece):
+                for piece in re.split(r"(,\s+|(?<=[A-Z0-9])\s+(?:and|et|und|y|e|en|og|och|&)\s+(?=[A-Z0-9]{2,10}\b))",
+                                      text[ent.start_char:ent.end_char]):
+                    if piece and not re.fullmatch(r",\s+|\s+(?:and|et|und|y|e|en|og|och|&)\s+", piece):
                         parts.append((pos, pos + len(piece)))
                     pos += len(piece)
+                parts = [q for ps, pe in parts for q in self._split_known_left(text, ps, pe, conjunctions)]
                 for ps, pe in parts:
                     s, e = self._trim(text, ps, pe)
                     surface = text[s:e]
@@ -1841,7 +2054,10 @@ class OrgExtractor:
                     toks = [t.group(0) for t in TOKEN_RE.finditer(surface)]
                     stats = self.locative[canonical_key(tidy_surface(surface))]
                     stats[1] += 1
-                    if LOCATIVE_BEFORE.search(pre_text) or (locative_lang and locative_lang.search(pre_text)):
+                    if ACTOR_PREPOSITION.search(text[max(0, s - 60):s]):
+                        pass   # "activists from X", "donate to X": an organisation's context
+                    elif (LOCATIVE_BEFORE.search(pre_text) or LOCATIVE_WEAK.search(pre_text)
+                          or (locative_lang and locative_lang.search(pre_text))):
                         stats[0] += 1
                     cands.append((3, Mention(surface, "", {"ner"}, self._head_type(toks) or "", s, e)))
 
@@ -1866,7 +2082,7 @@ class OrgExtractor:
                     m.end = m.start + cut.start()
                 m.surface = m.surface[:cut.start()]
             m.surface = tidy_surface(m.surface)
-            if starts_with_cta(m.surface.split()) and "watchlist" not in m.methods:
+            if starts_with_cta(m.surface.split()) and not m.methods & {"watchlist", "website"}:
                 continue   # "Sign Up Now", "Join the ...": an instruction
             if not m.key:
                 m.key = canonical_key(m.surface)
@@ -1881,7 +2097,18 @@ class OrgExtractor:
                     continue   # a bare place name: "Genève", "Hambach", "Suisse", "In Germany the movement"
                 if _is_generic_name(m.surface) or _is_event_name(m.surface):
                     continue   # "Working Group", "Media Team"; "International Anti-War Conference"
-                if ("pattern" not in m.methods and not self._head_type(TOKEN_RE.findall(m.surface))
+                # A name that spells a website needs nothing more, unless it is made of
+                # ordinary words: then it must be written capitalised at least as often as
+                # in lower case ("Climate justice" for climatejustice.org is not a name), and,
+                # when the website is only given in another paragraph, have two words or more
+                # ("Signal", "Matrix", "Files").
+                site_named = "website" in m.methods
+                if (site_named and "pattern" not in m.methods and self.mid_caps is not None
+                        and self.is_ordinary_words(m.surface)):
+                    if ((id(m) in corpus_only and len(TOKEN_RE.findall(m.surface)) < 2)
+                            or not self._phrase_case_counts(" ".join(TOKEN_RE.findall(m.surface)))):
+                        continue
+                if ("pattern" not in m.methods and not site_named and not self._head_type(TOKEN_RE.findall(m.surface))
                         and not self._ordinary_but_named(m.surface)):
                     if self.is_ordinary_words(m.surface):
                         continue
@@ -1981,6 +2208,12 @@ def _starts_named_org(toks: list, k: int) -> bool:
     return len(caps) >= 2 and any(_is_head_word(c) for c in caps) and not all(_is_head_word(c) for c in caps)
 
 
+# Capitalised German indefinite articles (German nouns and titles are capitalised, so these
+# often follow a name without being part of it).
+_CAP_INDEFINITES = {"Eine", "Ein", "Einer", "Einem", "Einen", "Eines"}
+# Languages whose adjectives follow the noun, so a lower-case "collective", "populaire" or
+# "solidaire" after a capitalised word describes it rather than naming a group.
+_ADJ_AFTER_NOUN_LANGS = {"fr", "it", "es", "pt", "ca", "ro"}
 _INTO_PREPOSITIONS = {"in", "into", "an", "auf", "zu", "nach", "ins", "dans", "nel", "à", "a", "en", "naar", "op"}
 _APPOS_TAIL = re.compile(r"([^\W\d_]+)[\s\"“«‘]*$")
 _APPOS_STEMS = ("chiamat", "denominat", "llamad", "denominad", "appel", "nomm")
@@ -1990,6 +2223,72 @@ def _place_follows(text: str, end: int) -> bool:
     """", Edinburgh" / ", Paris": a comma and a place right after position `end`."""
     m = re.match(r"\s*,\s*([^\W\d_][\w’'\-]*)", text[end:end + 40])
     return bool(m) and canonical_key(m.group(1)) in PLACES_KEYS
+
+
+# Hosting platforms whose sub-domain is the site's own name ("nominesland.wordpress.com").
+_SUBDOMAIN_PLATFORMS = ("wordpress.com", "blogspot.com", "noblogs.org", "blackblogs.org", "wixsite.com",
+                        "github.io", "over-blog.com", "canalblog.com", "squarespace.com", "weebly.com",
+                        "jimdofree.com", "home.blog", "substack.com", "carrd.co", "netlify.app",
+                        "webnode.page", "tumblr.com", "riseup.net", "framasite.org")
+_URL_HOST = re.compile(r"(?:https?://|(?<![\w.@/])www\.)([\w.-]+\.[a-z]{2,})", re.I)
+
+
+def _sites_of(hosts: Iterable[str]) -> Dict[str, str]:
+    """Website names (see site_names) -> host, leaving out social media and similar hosts."""
+    sites: Dict[str, str] = {}
+    for host in hosts:
+        h = host.lower().removeprefix("www.")
+        if not any(h == d or (h.endswith("." + d) and d not in _SUBDOMAIN_PLATFORMS) for d in LINK_SKIP_DOMAINS):
+            for n in site_names(h):
+                sites.setdefault(n, h)
+    return sites
+
+
+def squash_key(name: str) -> str:
+    """canonical_key without spaces, hyphens or punctuation: "ShellMustFall" and "Shell
+    Must Fall" both give "shellmustfall", "ende-gelaende" gives "endegelande". Use it to
+    compare spellings that differ only in spacing (it is not the organisation key)."""
+    return re.sub(r"[\W_]+", "", canonical_key(name))
+
+
+def site_names(host: str) -> Set[str]:
+    """Squashed names a web host spells: "www.code-rood.org" -> {"coderood"},
+    "reclaimthepower.org.uk" -> {"reclaimthepower"}, "nominesland2025.wordpress.com" ->
+    {"nominesland2025", "nominesland"}."""
+    host = host.lower().removeprefix("www.")
+    labels = [x for x in host.split(".") if x]
+    if len(labels) < 2 or set(labels) & {"gov", "gouv", "gob", "govt", "gv", "admin", "mil", "bund"}:
+        return set()   # a council or ministry site is named after its place ("falkirk.gov.uk")
+    if len(labels) >= 3 and ".".join(labels[-2:]) in _SUBDOMAIN_PLATFORMS:
+        label = labels[-3]
+    elif (len(labels) >= 3 and len(labels[-1]) == 2
+          and labels[-2] in {"co", "org", "ac", "gov", "com", "net", "or", "ltd", "me"}):
+        label = labels[-3]       # "reclaimthepower.org.uk"
+    else:
+        label = labels[-2]
+    name = _plain_squash(label)
+    out = {name, re.sub(r"\d+$", "", name)}            # "nominesland2025" -> "nominesland"
+    out |= {re.sub(r"^(?:the|les|la|le|die|der|das|het|el|il)(?=\w{5})", "", n) for n in out}   # "themovementhub"
+    return {n for n in out if len(n) >= 4}
+
+
+# Accented Latin letters -> plain letters (a fast str.translate table)
+_ACCENT_FOLD = {ord(c): unicodedata.normalize("NFKD", c)[0] for c in map(chr, range(0xC0, 0x250))
+                if unicodedata.normalize("NFKD", c)[0] != c and unicodedata.normalize("NFKD", c)[0].isascii()}
+_LEADING_ARTICLE = re.compile(r"^(?:the|les?|la|l['’]|die|der|das|de|het|el|il|lo|los|las|o|os)\s*", re.I)
+
+
+def _plain_squash(name: str) -> str:
+    """Letters and digits only, accents and umlaut spellings folded (no plural rule)."""
+    n = "".join(c for c in unicodedata.normalize("NFKD", name) if not unicodedata.combining(c)).casefold()
+    n = re.sub(r"[\W_]+", "", n.replace("&", "and"))
+    return _UMLAUT_VARIANT.sub(lambda m: m.group(1) or m.group(2), n) if len(n) >= 5 else n
+
+
+def _name_variants(name: str) -> Set[str]:
+    """Spellings of a name as it may appear in a domain: "Les Amis de la Terre" ->
+    {"lesamisdelaterre", "amisdelaterre", ...}."""
+    return {_plain_squash(name), _plain_squash(_LEADING_ARTICLE.sub("", name)), squash_key(name)}
 
 
 def _is_generic_name(surface: str) -> bool:
@@ -2008,6 +2307,8 @@ def _is_event_name(surface: str) -> bool:
     Climate Justice")."""
     content = [w.casefold() for w in TOKEN_RE.findall(surface) if w.casefold() not in CONNECTORS]
     return bool(content) and (content[0] in EVENT_WORDS or content[-1] in EVENT_WORDS
+                              or (len(content) >= 2 and content[-1] in EVENT_LAST_WORDS
+                                  and not any(w in HEAD_TO_TYPE for w in content))   # not "Mainshill Solidarity Camp"
                               or any(w in CONFERENCE_WORDS for w in content))
 
 
@@ -2063,14 +2364,17 @@ def acronym_pairs(text: str) -> List[Tuple[str, str]]:
     for m in ACRONYM_DEF_RE.finditer(text):
         long_form, acr = m.group(1).strip(), m.group(2).replace(".", "")
         # "de l'Union Juive Française pour la Paix (UJFP)": the elided article is not part of it
-        words = [strip_elision(w) for w in re.split(r"[\s\-]+", long_form) if w]
-        letters = canonical_key(acr).replace(" ", "")
+        found = list(re.finditer(r"[^\s\-]+", long_form))
+        words = [strip_elision(w.group(0)) for w in found]
+        letters = re.sub(r"[^0-9a-z]", "", canonical_key(acr))   # "ANV-COP21" -> "anvcop21"
         for i in range(len(words) - 1, max(-1, len(words) - len(acr) - 5), -1):
             tail = words[i:]
             if len(tail) < 2 or not tail[0][:1].isupper():
                 continue
             if canonical_key(tail[0])[:1] == letters[:1] and _spells(letters, tail):
-                out.append((tidy_surface(" ".join(tail)), acr))
+                # the original spelling from that word on ("Action Non-Violente COP21")
+                start = found[i].end() - len(tail[0])
+                out.append((tidy_surface(long_form[start:]), acr))
                 break
     return out
 
