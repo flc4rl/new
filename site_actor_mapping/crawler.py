@@ -13,10 +13,14 @@ import gzip
 import hashlib
 import json
 import logging
+import os
 import re
+import tempfile
+import threading
 import time
 import xml.etree.ElementTree as ET
-from collections import deque
+import zlib
+from collections import Counter, deque
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, Iterator, List, Optional, Set, Tuple
@@ -25,8 +29,12 @@ from urllib.parse import parse_qs, quote, urldefrag, urljoin, urlparse, urlunpar
 
 import requests
 from bs4 import BeautifulSoup, UnicodeDammit
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
 log = logging.getLogger(__name__)
+# urllib3 logs every retry as a warning; the crawler reports the final outcome itself.
+logging.getLogger("urllib3.connectionpool").setLevel(logging.ERROR)
 
 SKIP_EXTENSIONS = {
     ".jpg", ".jpeg", ".png", ".gif", ".svg", ".webp", ".ico", ".bmp", ".tif", ".tiff",
@@ -40,6 +48,57 @@ SKIP_EXTENSIONS = {
 # Query parameters that only track or sort and would otherwise make the
 # crawler visit the same page many times.
 TRACKING_PARAMS = re.compile(r"^(utm_\w+|fbclid|gclid|mc_cid|mc_eid|replytocom|share|ref|amp)$", re.I)
+
+# Temporary server answers: never cached, so a resumed run asks again.
+TRANSIENT_STATUSES = {408, 425, 429}
+MAX_RETRY_AFTER = 10.0     # seconds; a server cannot make the run sleep longer per retry
+
+
+def is_transient(status: int) -> bool:
+    """True for HTTP statuses that mean 'try again later' (timeouts, rate limits, 5xx)."""
+    return status in TRANSIENT_STATUSES or status >= 500
+
+
+class _CappedRetry(Retry):
+    """urllib3 Retry that honours Retry-After, but never for longer than MAX_RETRY_AFTER."""
+
+    def get_retry_after(self, response):  # noqa: D401 - urllib3 hook
+        value = super().get_retry_after(response)
+        return None if value is None else min(value, MAX_RETRY_AFTER)
+
+
+def make_session(user_agent: str) -> requests.Session:
+    """A requests session that retries connection errors, 429 and 5xx with backoff.
+
+    POST is included because the calendar's admin-ajax month requests are reads.
+    After the last retry the final error response is returned (not raised), so
+    the caller still sees the status code.
+    """
+    kwargs = dict(total=3, connect=2, read=1, status=3, backoff_factor=1.5,
+                  status_forcelist=[429, 500, 502, 503, 504],
+                  allowed_methods=frozenset({"GET", "HEAD", "POST"}),
+                  respect_retry_after_header=True, raise_on_status=False)
+    try:
+        retry = _CappedRetry(backoff_max=60, **kwargs)     # urllib3 2.x
+    except TypeError:
+        retry = _CappedRetry(**kwargs)                     # urllib3 1.26
+    session = requests.Session()
+    adapter = HTTPAdapter(max_retries=retry)
+    session.mount("http://", adapter)
+    session.mount("https://", adapter)
+    session.headers.update({
+        "User-Agent": user_agent,
+        "Accept": "text/html,application/xhtml+xml,application/pdf;q=0.9,*/*;q=0.5",
+    })
+    return session
+
+
+def fmt_duration(seconds: float) -> str:
+    """'1h05m', '4m10s' or '12s'."""
+    seconds = max(0, int(seconds))
+    h, rest = divmod(seconds, 3600)
+    m, s = divmod(rest, 60)
+    return f"{h}h{m:02d}m" if h else f"{m}m{s:02d}s" if m else f"{s}s"
 
 
 @dataclass
@@ -66,6 +125,14 @@ class CrawlConfig:
     calendar_click: Optional[str] = None   # CSS selector of a "previous month" button
     calendar_clicks: int = 24
     calendar_url_pattern: Optional[str] = None  # only sweep calendars on matching URLs
+    # PDF budget. None: PDFs count against max_pages (the main site). A number:
+    # PDFs have their own budget and never use up the page budget (linked sites).
+    max_pdfs: Optional[int] = None
+    # If a start URL redirects to another domain, crawl that domain too (linked
+    # sites that have moved), unless it is one of blocked_hosts.
+    follow_start_redirects: bool = False
+    blocked_hosts: Set[str] = field(default_factory=set)
+    progress_every: float = 60.0           # seconds between progress/ETA lines (0: never)
 
 
 @dataclass
@@ -85,11 +152,26 @@ class CachedPage:
     label: str = ""      # for calendar pages: YYYY-MM or click number
 
 
+def safe_join(base: str, href: str) -> str:
+    """urljoin that never raises: a malformed href (e.g. 'http://x.org]') gives ""."""
+    try:
+        return urljoin(base, href)
+    except ValueError:
+        return ""
+
+
 def normalise_url(url: str) -> str:
-    """Drop fragments and tracking params, lowercase scheme/host, tidy the path."""
-    url, _ = urldefrag(url.strip())
-    p = urlparse(url)
-    if p.scheme not in ("http", "https"):
+    """Drop fragments and tracking params, lowercase scheme/host, tidy the path.
+
+    Total: anything that is not a well-formed http(s) URL gives "" (never raises).
+    """
+    try:
+        url, _ = urldefrag((url or "").strip())
+        p = urlparse(url)
+        _ = p.hostname, p.port     # validates [IPv6] brackets and the port number
+    except (ValueError, TypeError, AttributeError):
+        return ""
+    if p.scheme not in ("http", "https") or not p.netloc:
         return ""
     query = "&".join(
         kv for kv in p.query.split("&")
@@ -108,55 +190,99 @@ def cache_key(url: str) -> str:
     return hashlib.sha1(url.encode("utf-8")).hexdigest()
 
 
+# A cache file cut short (power loss, force-quit) or damaged on disk raises one of these.
+_CACHE_ERRORS = (OSError, ValueError, TypeError, EOFError, zlib.error)
+
+
 class PageCache:
+    """One gzipped JSON file per URL. Writes are atomic and safe from several threads."""
+
     def __init__(self, root: Path):
         self.root = root
         self.root.mkdir(parents=True, exist_ok=True)
+        for leftover in self.root.glob(".put-*.part"):   # from a run killed mid-write
+            try:
+                leftover.unlink()
+            except OSError:
+                pass
 
     def _path(self, url: str) -> Path:
         return self.root / f"{cache_key(url)}.json.gz"
 
-    def get(self, url: str) -> Optional[CachedPage]:
-        path = self._path(url)
-        if not path.exists():
-            return None
+    def _load(self, path: Path) -> Optional[CachedPage]:
         try:
             with gzip.open(path, "rt", encoding="utf-8") as fh:
                 return CachedPage(**json.load(fh))
-        except (OSError, ValueError, TypeError) as exc:
-            log.warning("Unreadable cache entry for %s (%s); refetching", url, exc)
+        except _CACHE_ERRORS as exc:
+            # Never fatal: move the file aside so the page is simply fetched again.
+            log.warning("Unreadable cache file %s (%s); moved aside as .bad, will be refetched",
+                        path.name, exc)
+            try:
+                path.replace(path.with_name(path.name + ".bad"))
+            except OSError:
+                pass
             return None
 
+    def get(self, url: str) -> Optional[CachedPage]:
+        path = self._path(url)
+        return self._load(path) if path.exists() else None
+
     def put(self, page: CachedPage) -> None:
-        with gzip.open(self._path(page.url), "wt", encoding="utf-8") as fh:
-            json.dump(page.__dict__, fh)
+        # Write to a unique temporary file, then rename: a reader (or a crash)
+        # never sees half a file, and two threads writing one URL do not collide.
+        fd, tmp = tempfile.mkstemp(dir=self.root, prefix=".put-", suffix=".part")
+        try:
+            with os.fdopen(fd, "wb") as raw, gzip.open(raw, "wt", encoding="utf-8") as fh:
+                json.dump(page.__dict__, fh)
+            os.replace(tmp, self._path(page.url))
+        except BaseException:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+            raise
 
     def __iter__(self) -> Iterator[CachedPage]:
-        for path in sorted(self.root.glob("*.json.gz")):
-            try:
-                with gzip.open(path, "rt", encoding="utf-8") as fh:
-                    yield CachedPage(**json.load(fh))
-            except (OSError, ValueError, TypeError):
-                log.warning("Skipping unreadable cache file %s", path.name)
+        for path in sorted(self.root.glob("*.json.gz")):   # .part / .bad files never match
+            cp = self._load(path)
+            if cp is not None:
+                yield cp
+
+
+_PAGINATED = re.compile(r"/page/\d+/?$")
+
+
+def calendar_home(url: str) -> str:
+    """The canonical page of a calendar: /events/page/2/ and ?paged=2 give /events/."""
+    p = urlparse(url)
+    path = _PAGINATED.sub("/", p.path)
+    query = "&".join(kv for kv in p.query.split("&") if kv and not re.fullmatch(r"paged?=\d+", kv))
+    return urlunparse((p.scheme, p.netloc, path, "", query, ""))
+
+
+_WRAP_HEAD, _WRAP_TAIL = "<html><body><main>", "</main></body></html>"
 
 
 class Crawler:
     def __init__(self, cfg: CrawlConfig, cache: PageCache):
         self.cfg = cfg
         self.cache = cache
-        self.session = requests.Session()
-        self.session.headers.update({
-            "User-Agent": cfg.user_agent,
-            "Accept": "text/html,application/xhtml+xml,application/pdf;q=0.9,*/*;q=0.5",
-        })
+        self.session = make_session(cfg.user_agent)
         self.hosts = {registered_host(urlparse(u).netloc) for u in cfg.start_urls}
         self.include_re = [re.compile(p) for p in cfg.include_patterns]
         self.exclude_re = [re.compile(p) for p in cfg.exclude_patterns]
         self.robots: Dict[str, Optional[robotparser.RobotFileParser]] = {}
+        self.robots_blocked: List[Tuple[str, str]] = []   # (host, reason): robots.txt unreachable
         self._last_fetch = 0.0
         self._browser = None
         self._playwright = None
-        self._swept: Set[str] = set()
+        self._swept: Set[str] = set()          # calendar identities already loaded
+        self._cal_home: Dict[str, str] = {}    # calendar identity -> canonical host page
+        # What happened to each URL: "ok", an HTTP status (int), "connection",
+        # "download", "robots", "robots-unreachable", "other type", "error".
+        self.outcomes: Counter = Counter()
+        self.aliases: Set[str] = set()         # hosts that start URLs redirected to
+        self.stop: Optional[threading.Event] = None   # set from outside to end crawl() early
 
     # ------------------------------------------------------------------ scope
     def in_scope(self, url: str) -> bool:
@@ -195,15 +321,28 @@ class Crawler:
         p = urlparse(url)
         base = f"{p.scheme}://{p.netloc}"
         if base not in self.robots:
-            rp = robotparser.RobotFileParser()
-            try:
+            rp: Optional[robotparser.RobotFileParser] = robotparser.RobotFileParser()
+            status: Optional[int] = None
+            reason = ""
+            try:   # the session already retries connection errors, 429 and 5xx
                 resp = self.session.get(base + "/robots.txt", timeout=self.cfg.timeout)
-                if resp.status_code >= 400:
-                    rp = None  # no robots.txt: everything allowed
-                else:
-                    rp.parse(resp.text.splitlines())
-            except requests.RequestException:
-                rp = None
+                status = resp.status_code
+                text = resp.text if status < 400 else ""
+            except requests.RequestException as exc:
+                reason = f"connection failed: {type(exc).__name__}"
+                log.debug("robots.txt for %s: %s", base, exc)
+            if status is not None and status < 400:
+                rp.parse(text.splitlines())
+            elif status is not None and status < 500 and status not in (401, 403, 429):
+                rp = None   # 404/410 etc.: there is no robots.txt, so everything is allowed
+            else:
+                # RFC 9309 2.3.1.4: an unreachable robots.txt (5xx, network error) means
+                # "disallow all"; 401/403 are treated the same way, as Python's own parser does.
+                rp.disallow_all = True
+                reason = reason or f"HTTP {status}"
+                log.warning("robots.txt for %s could not be read (%s); host treated as disallowed",
+                            base, reason)
+                self.robots_blocked.append((base, reason))
             self.robots[base] = rp
         rp = self.robots[base]
         return rp is None or rp.can_fetch(self.cfg.user_agent, url)
@@ -229,16 +368,17 @@ class Crawler:
 
     def fetch(self, url: str, depth: int, referrer: str = "",
               expect_pdf: bool = False) -> Optional[CachedPage]:
+        """Fetch one URL. None means nothing usable (and nothing to cache)."""
         self._wait()
         try:
             resp = self.session.get(url, timeout=self.cfg.timeout, allow_redirects=True, stream=True)
         except requests.RequestException as exc:
             log.warning("Fetch failed %s: %s", url, exc)
+            self.outcomes["connection"] += 1
             return None
         ctype = resp.headers.get("Content-Type", "").lower()
         final_url = normalise_url(resp.url) or url
         if resp.status_code >= 400:
-            log.info("HTTP %s for %s", resp.status_code, url)
             resp.close()
             return CachedPage(url, final_url, resp.status_code, ctype, depth, time.time(), "",
                               is_pdf=expect_pdf, referrer=referrer)
@@ -249,6 +389,7 @@ class Crawler:
             if data is None or not data.lstrip()[:5].startswith(b"%PDF"):
                 if expect_pdf and data is not None:
                     log.info("Not a PDF after all (%s): %s", ctype or "no type", url)
+                self.outcomes["download" if data is None else "other type"] += 1
                 return None
             text, title, date = pdf_to_text(data)
             if not text.strip():
@@ -257,12 +398,23 @@ class Crawler:
                               text, is_pdf=True, referrer=referrer, title=title, date=date)
         if "html" not in ctype and "xml" not in ctype:
             resp.close()
+            self.outcomes["other type"] += 1
             return None
 
-        if "charset=" in ctype:
-            body = resp.text
-        else:  # no declared charset: sniff <meta charset> / BOM rather than assume Latin-1
-            body = UnicodeDammit(resp.content, is_html=True).unicode_markup or resp.text
+        # The body is downloaded here, after the headers: a dropped connection or a
+        # read timeout at this point costs this page only (it is not cached, so a
+        # re-run with the same output folder fetches it again).
+        try:
+            if "charset=" in ctype:
+                body = resp.text
+            else:  # no declared charset: sniff <meta charset> / BOM rather than assume Latin-1
+                body = UnicodeDammit(resp.content, is_html=True).unicode_markup or resp.text
+        except requests.RequestException as exc:
+            log.warning("Download failed %s: %s", url, exc)
+            self.outcomes["download"] += 1
+            return None
+        finally:
+            resp.close()
         if self.cfg.render_js:
             try:
                 body, rendered_url, _ = self._render(url)
@@ -313,7 +465,7 @@ class Crawler:
                 if sm.endswith(".gz"):
                     content = gzip.decompress(content)
                 root = ET.fromstring(content)
-            except (requests.RequestException, ET.ParseError, OSError):
+            except (requests.RequestException, ET.ParseError, OSError, EOFError, zlib.error, ValueError):
                 continue
             for loc in root.iter():
                 if not loc.tag.endswith("loc") or not loc.text:
@@ -327,13 +479,27 @@ class Crawler:
 
     # ------------------------------------------------------------------ crawl
     def crawl(self) -> int:
-        queue: deque = deque()   # (url, depth, referrer, is_pdf)
+        """Crawl and return the number of pages and PDFs fetched or reused from cache.
+
+        Three queues with strict priority: the start URLs first (so the exact page
+        an event links to is never crowded out), then PDFs linked from pages
+        already read, then everything else in breadth-first order.
+        """
+        starts: deque = deque()   # (url, depth, referrer, is_pdf)
+        pdfq: deque = deque()
+        queue: deque = deque()
         seen: Set[str] = set()
         for u in self.cfg.start_urls:
             n = normalise_url(u)
-            if n:
-                queue.append((n, 0, "", False))
+            if n and n not in seen:
+                starts.append((n, 0, "", False))
                 seen.add(n)
+                # A shared Google Drive file / Google Doc: read the document itself too.
+                if urlparse(n).netloc in FILE_HOSTS:
+                    target = unwrap_pdf_url(n)
+                    if target and target not in seen and self.pdf_in_scope(target):
+                        pdfq.append((target, 1, n, True))
+                        seen.add(target)
         if self.cfg.use_sitemap:
             for u in self.sitemap_urls():
                 n = normalise_url(u)
@@ -341,45 +507,121 @@ class Crawler:
                     queue.append((n, 1, "", False))
                     seen.add(n)
 
-        fetched = 0
+        shared = self.cfg.max_pdfs is None          # PDFs count against max_pages
+        pdf_cap = self.cfg.max_pages if shared else self.cfg.max_pdfs
+        fetched = pdfs = 0                          # pages (and PDFs if shared), separate PDFs
+        t0 = last_report = time.monotonic()
+        network = 0                                 # items actually requested this run
         try:
-            while queue and fetched < self.cfg.max_pages:
-                url, depth, referrer, is_pdf = queue.popleft()
-                page = None if self.cfg.refresh else self.cache.get(url)
-                if page is None:
-                    if not self.allowed(url):
-                        log.info("robots.txt disallows %s", url)
-                        continue
-                    page = self.fetch(url, depth, referrer, expect_pdf=is_pdf)
+            while True:
+                if self.stop is not None and self.stop.is_set():
+                    log.info("Crawl stopped early")
+                    break
+                if starts and fetched < self.cfg.max_pages:
+                    src = starts
+                elif pdfq and (fetched < self.cfg.max_pages if shared else pdfs < pdf_cap):
+                    src = pdfq
+                elif queue and fetched < self.cfg.max_pages:
+                    src = queue
+                else:
+                    break
+                url, depth, referrer, is_pdf = src.popleft()
+                try:
+                    page = None if self.cfg.refresh else self.cache.get(url)
+                    if page is not None and is_transient(page.status):
+                        page = None     # an earlier run hit a temporary error: ask again
+                    from_cache = page is not None
                     if page is None:
+                        if not self.allowed(url):
+                            base = "{0.scheme}://{0.netloc}".format(urlparse(url))
+                            blocked = any(b == base for b, _ in self.robots_blocked)
+                            self.outcomes["robots-unreachable" if blocked else "robots"] += 1
+                            log.info("robots.txt disallows %s", url)
+                            continue
+                        network += 1
+                        page = self.fetch(url, depth, referrer, expect_pdf=is_pdf)
+                        if page is None:
+                            continue    # fetch() logged and counted why
+                        if is_transient(page.status):
+                            self.outcomes[page.status] += 1
+                            log.warning("HTTP %s (temporary error, retries used up; not cached, "
+                                        "so the next run tries again): %s", page.status, url)
+                            continue
+                        self.cache.put(page)
+                    if page.status >= 400:
+                        self.outcomes[page.status] += 1
+                        if not from_cache:
+                            log.warning("HTTP %s, not analysed: %s", page.status, url)
                         continue
-                    self.cache.put(page)
-                    log.info("[%d/%d] d=%d %s", fetched + 1, self.cfg.max_pages, depth, url)
-                if page.status >= 400:
-                    continue
-                fetched += 1
+                    self.outcomes["ok"] += 1
+                    if page.is_pdf and not shared:
+                        pdfs += 1
+                        if not from_cache:
+                            log.info("[PDF %d/%d] d=%d %s", pdfs, pdf_cap, depth, url)
+                    else:
+                        fetched += 1
+                        if not from_cache:
+                            log.info("[%d/%d] d=%d %s", fetched, self.cfg.max_pages, depth, url)
 
-                if page.is_pdf or not page.body:
-                    continue
-                for cal in self.calendar_pages(page):
-                    fetched += 1
-                    self._enqueue_links(cal, depth, queue, seen)
-                self._enqueue_links(page, depth, queue, seen)
+                    if depth == 0 and not page.is_pdf and not page.kind:
+                        self._note_redirect(page)
+                    if page.is_pdf or not page.body:
+                        continue
+                    for cal in self.calendar_pages(page):
+                        fetched += 1
+                        self._enqueue_links(cal, depth, queue, pdfq, seen)
+                    self._enqueue_links(page, depth, queue, pdfq, seen)
+                except Exception as exc:  # noqa: BLE001 - one bad page must not end the crawl
+                    self.outcomes["error"] += 1
+                    log.error("Skipped %s after an unexpected error: %s: %s",
+                              url, type(exc).__name__, exc)
+                finally:
+                    now = time.monotonic()
+                    if self.cfg.progress_every and now - last_report >= self.cfg.progress_every:
+                        last_report = now
+                        self._log_progress(now - t0, network, fetched, pdfs,
+                                           len(starts) + len(pdfq) + len(queue))
         finally:
             if self._browser is not None:
                 self._browser.close()
                 self._playwright.stop()
-        log.info("Crawl finished: %d pages fetched or reused from cache, %d queued URLs not visited",
-                 fetched, len(queue))
-        return fetched
+        errors = sum(n for k, n in self.outcomes.items() if k != "ok")
+        log.info("Crawl finished: %d pages%s fetched or reused from cache, %d URLs failed or "
+                 "skipped, %d queued URLs not visited", fetched,
+                 "" if shared else f" and {pdfs} PDFs", errors, len(starts) + len(pdfq) + len(queue))
+        return fetched + pdfs
 
-    def _enqueue_links(self, page: CachedPage, depth: int, queue: deque, seen: Set[str]) -> None:
+    def _log_progress(self, elapsed: float, network: int, fetched: int, pdfs: int, queued: int) -> None:
+        """One progress line with an estimate of the time left if the page limit is reached."""
+        left = min(queued, max(0, self.cfg.max_pages - fetched)) if queued else 0
+        per = elapsed / network if network else 0.0
+        eta = f", at most ~{fmt_duration(left * per)} left" if per and left else ""
+        log.info("Crawl progress: %d/%d pages%s after %s, %d URLs queued%s", fetched,
+                 self.cfg.max_pages, f" + {pdfs} PDFs" if pdfs else "", fmt_duration(elapsed),
+                 queued, eta)
+
+    def _note_redirect(self, page: CachedPage) -> None:
+        """A start URL that redirected to another domain: crawl that domain as well."""
+        if not self.cfg.follow_start_redirects:
+            return
+        host = registered_host(urlparse(page.final_url).netloc)
+        blocked = self.cfg.blocked_hosts
+        if (not host or host in self.hosts
+                or any(host == b or host.endswith("." + b) for b in blocked)):
+            return
+        self.hosts.add(host)
+        self.aliases.add(host)
+        log.info("%s redirects to %s; crawling that host too", page.url, host)
+
+    def _enqueue_links(self, page: CachedPage, depth: int, queue: deque, pdfq: deque,
+                       seen: Set[str]) -> None:
         links, pdfs = extract_links(page.body, page.final_url)
-        # PDFs on a page are part of that page, so they are read even at max depth.
+        # PDFs on a page are part of that page, so they are read even at max depth
+        # (in page order, after the remaining start URLs).
         for link in pdfs:
             if link not in seen and self.pdf_in_scope(link):
                 seen.add(link)
-                queue.appendleft((link, depth + 1, page.final_url, True))
+                pdfq.append((link, depth + 1, page.final_url, True))
         if depth >= self.cfg.max_depth:
             return
         for link in links:
@@ -389,58 +631,137 @@ class Crawler:
 
     # --------------------------------------------------------------- calendar
     def calendar_pages(self, page: CachedPage) -> List[CachedPage]:
-        """Load every month of a calendar embedded in `page` (once per page)."""
-        if not self.cfg.calendar or page.kind or page.final_url in self._swept:
+        """Load every month of each calendar embedded in `page`, once per calendar.
+
+        A calendar is identified by its own settings (admin-ajax URL, shortcode
+        attributes and skin id), not by the page showing it, so the paginated
+        archive copies (/events/page/2/ ...) do not load the same months again.
+        Month pages are anchored to the calendar's canonical page (/events/).
+        """
+        if not self.cfg.calendar or page.kind:
             return []
         if self.cfg.calendar_url_pattern and not re.search(self.cfg.calendar_url_pattern, page.final_url):
             return []
+        from calendar_sweep import calendar_id, detect_mec, parse_month, sweep_by_clicking, sweep_mec
+
+        home = calendar_home(page.final_url)
         # The index remembers a sweep for this exact range/method, so a narrow test
         # run is not mistaken for a full sweep when the output folder is reused.
         scope = f"{self.cfg.calendar_from or ''}_{self.cfg.calendar_to or ''}_{self.cfg.calendar_click or ''}"
-        index_url = (page.final_url + ("&" if "?" in page.final_url else "?")
-                     + "calendar_index=" + quote(scope, safe=""))
-        if not self.cfg.refresh:
-            index = self.cache.get(index_url)
-            if index is not None:
-                self._swept.add(page.final_url)
-                return [p for u in json.loads(index.body or "[]") if (p := self.cache.get(u))]
-
-        from calendar_sweep import detect_mec, parse_month, sweep_by_clicking, sweep_mec
-        sweeps = []
         if self.cfg.calendar_click:
-            if re.search(r"mec-|calendar|fc-|tribe-events", page.body, re.I) or self.cfg.calendar_url_pattern:
-                sweeps.append(("click", sweep_by_clicking(page.final_url, self.cfg.calendar_click,
-                                                          self.cfg.calendar_clicks, self.cfg.user_agent,
-                                                          self.cfg.timeout)))
+            scope += f"_{self.cfg.calendar_clicks}"
+            cid = hashlib.sha1(home.encode("utf-8")).hexdigest()[:10]
+            if cid in self._swept or not (re.search(r"mec-|calendar|fc-|tribe-events", page.body, re.I)
+                                          or self.cfg.calendar_url_pattern):
+                return []
+            jobs = [(cid, None)]
+            n_on_page = 1
         else:
-            for mec in detect_mec(page.body, page.final_url):
-                log.info("Calendar found on %s (Modern Events Calendar); loading all months", page.final_url)
-                sweeps.append(("month", sweep_mec(self.session, mec, self._wait, self.cfg.timeout,
-                                                  parse_month(self.cfg.calendar_from),
-                                                  parse_month(self.cfg.calendar_to))))
-        if not sweeps:
-            return []
-        self._swept.add(page.final_url)
+            mecs = detect_mec(page.body, page.final_url)
+            n_on_page = len(mecs)
+            jobs = []
+            for mec in mecs:
+                cid = calendar_id(mec)
+                if cid in self._swept:
+                    log.debug("Calendar on %s already loaded from %s", page.final_url, self._cal_home[cid])
+                elif cid not in {c for c, _ in jobs}:
+                    jobs.append((cid, mec))
+
         out: List[CachedPage] = []
-        sep = "&" if "?" in page.final_url else "?"
-        for kind, months in sweeps:
+        for cid, mec in jobs:
+            self._swept.add(cid)
+            cal_home = self._cal_home.setdefault(cid, home)
+            sep = "&" if "?" in cal_home else "?"
+            # Several calendars on one page (or one canonical page): keep their months apart.
+            shared_home = any(h == cal_home and c != cid for c, h in self._cal_home.items())
+            tag = f"&cal={cid}" if (n_on_page > 1 or shared_home) else ""
+            kind = "click" if mec is None else "month"
+            index_url = f"{cal_home}{sep}calendar_index={cid}_{quote(scope, safe='')}"
+
+            if not self.cfg.refresh:
+                index = self.cache.get(index_url)
+                if index is not None:
+                    try:
+                        data = json.loads(index.body or "[]")
+                    except ValueError:
+                        data = {}
+                    if isinstance(data, list):          # older runs: a plain list of URLs
+                        data = {"pages": data, "failed": [], "complete": True}
+                    urls = data.get("pages", []) if isinstance(data, dict) else []
+                    cached = [p for u in urls if (p := self.cache.get(u))]
+                    if (isinstance(data, dict) and data.get("complete", True) and not data.get("failed")
+                            and len(cached) == len(urls) and cached):
+                        out += cached
+                        continue
+                    log.info("Calendar on %s was not complete last time; loading the missing months",
+                             cal_home)
+
+            def month_url(label: str) -> str:
+                return f"{cal_home}{sep}calendar_{kind}={label}{tag}"
+
+            reused: Dict[str, CachedPage] = {}
+
+            def have(label: str) -> Optional[str]:
+                """Month already in the cache (an interrupted or partly failed sweep)."""
+                if self.cfg.refresh:
+                    return None
+                cp = self.cache.get(month_url(label))
+                if cp is None or cp.kind != "calendar":
+                    return None
+                reused[label] = cp
+                body = cp.body
+                if body.startswith(_WRAP_HEAD) and body.endswith(_WRAP_TAIL):
+                    body = body[len(_WRAP_HEAD):-len(_WRAP_TAIL)]
+                return body
+
+            if mec is None:
+                log.info("Calendar on %s: clicking %r up to %d times", page.final_url,
+                         self.cfg.calendar_click, self.cfg.calendar_clicks)
+                months = sweep_by_clicking(page.final_url, self.cfg.calendar_click,
+                                           self.cfg.calendar_clicks, self.cfg.user_agent, self.cfg.timeout)
+            else:
+                log.info("Calendar found on %s (Modern Events Calendar); loading all months", page.final_url)
+                months = sweep_mec(self.session, mec, self._wait, self.cfg.timeout,
+                                   parse_month(self.cfg.calendar_from), parse_month(self.cfg.calendar_to),
+                                   have=have)
+            loaded: List[CachedPage] = []
+            failed: List[str] = []
             try:
                 for label, html, n_events in months:
-                    url = f"{page.final_url}{sep}calendar_{kind}={label}"
+                    if html is None:
+                        failed.append(label)
+                        continue
+                    if label in reused:
+                        loaded.append(reused[label])
+                        continue
+                    url = month_url(label)
                     cal = CachedPage(url, url, 200, "text/html", page.depth, time.time(),
-                                     f"<html><body><main>{html}</main></body></html>",
-                                     referrer=page.final_url, kind="calendar", label=label)
+                                     f"{_WRAP_HEAD}{html}{_WRAP_TAIL}",
+                                     referrer=cal_home, kind="calendar", label=label)
                     self.cache.put(cal)
-                    out.append(cal)
+                    loaded.append(cal)
                     log.info("  calendar %s %s: %d events", kind, label, n_events)
             except ImportError:
                 log.warning("--calendar-click needs playwright: pip install playwright && "
                             "playwright install chromium")
-        if out:  # an index is only saved for a sweep that worked, so failures are retried
-            self.cache.put(CachedPage(index_url, index_url, 200, "application/json", page.depth,
-                                      time.time(), json.dumps([c.url for c in out]),
-                                      kind="calendar-index"))
-        log.info("Calendar on %s: %d months/views loaded", page.final_url, len(out))
+            except Exception as exc:  # noqa: BLE001 - keep the months loaded so far
+                log.error("Calendar on %s stopped after an error: %s", cal_home, exc)
+                failed.append("(stopped)")
+            if loaded or failed:
+                # A sweep with failed months is saved as incomplete, so the next run with
+                # this output folder loads only the missing months (cached ones are reused).
+                self.cache.put(CachedPage(index_url, index_url, 200, "application/json", page.depth,
+                                          time.time(), json.dumps({"pages": [c.url for c in loaded],
+                                                                   "failed": failed,
+                                                                   "complete": not failed}),
+                                          kind="calendar-index"))
+            if failed:
+                log.warning("Calendar on %s: %d months could not be loaded (%s). The sweep is "
+                            "incomplete; run again with the same output folder to load them.",
+                            cal_home, len(failed), ", ".join(failed[:12]) + (" ..." if len(failed) > 12 else ""))
+            log.info("Calendar on %s: %d months/views loaded%s", cal_home, len(loaded),
+                     f" ({len(reused)} from cache)" if reused else "")
+            out += loaded
         return out
 
 
@@ -450,9 +771,12 @@ FILE_HOSTS = ("drive.google.com", "docs.google.com")
 
 def unwrap_pdf_url(url: str) -> Optional[str]:
     """Turn viewer / preview URLs into the URL of the PDF itself, or None."""
-    p = urlparse(url)
-    host = p.netloc.lower()
-    qs = parse_qs(p.query)
+    try:
+        p = urlparse(url)
+        host = p.netloc.lower()
+        qs = parse_qs(p.query)
+    except ValueError:
+        return None
     # Google Drive: /file/d/<id>/view|preview, open?id=<id>, uc?id=<id>
     if host == "drive.google.com":
         m = re.search(r"/file/d/([\w-]{10,})", p.path)
@@ -462,7 +786,7 @@ def unwrap_pdf_url(url: str) -> Optional[str]:
     for key in ("url", "file", "pdf", "src", "document"):
         for v in qs.get(key, []):
             if PDF_HINT.search(v) or v.lower().endswith(".pdf"):
-                return urljoin(url, v)
+                return safe_join(url, v) or None
     # Google Docs / Slides shared as documents: fetch their PDF export.
     if host == "docs.google.com":
         m = re.match(r"/(document|presentation)/d/([\w-]{10,})", p.path)
@@ -486,13 +810,13 @@ def extract_links(html: str, base_url: str) -> Tuple[List[str], List[str]]:
     soup = BeautifulSoup(html, "lxml")
     base_tag = soup.find("base", href=True)
     if base_tag:
-        base_url = urljoin(base_url, base_tag["href"])
+        base_url = safe_join(base_url, base_tag["href"]) or base_url
     pages: List[str] = []
     pdfs: List[str] = []
 
     def add_pdf(raw: str) -> bool:
-        full = urljoin(base_url, raw.strip())
-        target = unwrap_pdf_url(full)
+        full = safe_join(base_url, raw.strip())
+        target = unwrap_pdf_url(full) if full else None
         if target:
             n = normalise_url(target)
             if n:
@@ -504,7 +828,7 @@ def extract_links(html: str, base_url: str) -> Tuple[List[str], List[str]]:
     for link in soup.find_all("link", href=True):
         rel = " ".join(link.get("rel") or []).lower()
         if "next" in rel or "prev" in rel:
-            n = normalise_url(urljoin(base_url, link["href"]))
+            n = normalise_url(safe_join(base_url, link["href"]))
             if n:
                 pages.append(n)
 
@@ -521,7 +845,7 @@ def extract_links(html: str, base_url: str) -> Tuple[List[str], List[str]]:
                 if add_pdf(v):
                     continue
             if tag.name == "a" and attr == "href":
-                n = normalise_url(urljoin(base_url, v))
+                n = normalise_url(safe_join(base_url, v))
                 if n:
                     pages.append(n)
     return pages, pdfs

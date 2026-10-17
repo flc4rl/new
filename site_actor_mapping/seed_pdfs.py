@@ -12,18 +12,21 @@ organisations found in the PDF can be tied to the right event.
 
 from __future__ import annotations
 
+import calendar
 import io
 import logging
 import re
+import unicodedata
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
+from urllib.parse import unquote, urlparse
 
 import requests
 
 from crawler import normalise_url
-from events import (MONTHS, comment_timestamp_year, find_date, heading_info, is_banner,
-                    normalise_date_text, parse_entry_date)
+from events import (comment_timestamp_year, find_date, heading_info, is_banner,
+                    normalise_date_text, parse_entry_date, parse_entry_month)
 
 log = logging.getLogger(__name__)
 
@@ -32,12 +35,50 @@ URL_IN_TEXT = re.compile(r"(?:https?://|www\.)(?:(?!https?://)[^\s<>\"')\]])+", 
 # Domains written without http/www: "radicalbookfairleipzig.org", "framaforms.org/inscription-..."
 BARE_URL = re.compile(r"(?<![@\w./:-])(?:[a-z0-9-]+\.)+(?:org|net|com|eu|de|fr|nl|be|at|it|es|dk|se|uk|info|ch|"
                       r"pt|pl|cz|no|online|events|blog|io)(?:/(?:(?!https?://)[^\s<>\"')\]])*)?(?![\w@])", re.I)
-MONTH_NAMES = {v: k for k, v in MONTHS.items() if len(k) > 3 and k.isascii()}
+# Month labels for entries with no exact date ("May 2023"): English, whatever the agenda's language.
+MONTH_NAMES = {i: calendar.month_name[i] for i in range(1, 13)}
 VALID_HOST = re.compile(r"^(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+[a-z]{2,}$", re.I)
 # Links that are part of the PDF's own page furniture, never events.
 JUNK_LINK = re.compile(r"^https?://(?:www\.)?(?:wordpress\.com|wp\.me|gravatar\.com|riseup\.net|pad\.riseup\.net)/?$",
                        re.I)
 URLISH = re.compile(r"(?:https?://|www\.)|\b[\w-]+\.(?:org|com|net|eu|de|fr|nl|be|at|it|es|dk|se|uk|info|io)\b|/\S", re.I)
+
+
+# French inclusive plurals look like Spanish domains: "les migrants.es", "Amis.es de Silence".
+# A bare one-word ".es" match without www. or a path is read as a word, not a link
+# ("kultur-an-der-kante.de" and "casapalestina.es/stopgenocide12a/" stay links).
+_INCLUSIVE_PLURAL = re.compile(r"[^\W\d_]+\.es", re.I)
+
+
+def _is_word_not_url(match: str) -> bool:
+    return bool(_INCLUSIVE_PLURAL.fullmatch(match))
+
+
+def _strip_bare_urls(text: str) -> str:
+    return BARE_URL.sub(lambda m: m.group(0) if _is_word_not_url(m.group(0)) else " ", text)
+
+
+def pdf_name(uri: str) -> str:
+    """File name of a seed PDF, decoded ("Les échos du vent.pdf", not "Les%20e%CC%81chos...")."""
+    p = urlparse(uri)
+    return unicodedata.normalize("NFC", unquote(Path(p.path).name)) or uri
+
+
+_FILE_URI = re.compile(r"file://[^\s|;#]*(?:#[^\s|;]*)?")
+
+
+def pdf_display(value: str) -> str:
+    """How a local seed PDF is shown in output files: "pdf:<file name>" (plus the
+    "#entry" part of event keys) instead of a percent-encoded file:// path that
+    contains the user's folders. Web URLs are returned unchanged; several values
+    joined with " | " or "; " are each converted."""
+    if not value or "file:" not in value:
+        return value
+
+    def one(m: "re.Match") -> str:
+        p = urlparse(m.group(0))
+        return f"pdf:{pdf_name(m.group(0))}" + (f"#{p.fragment}" if p.fragment else "")
+    return _FILE_URI.sub(one, value)
 
 
 def _title_like(line: str) -> bool:
@@ -92,7 +133,7 @@ def load_pdf_bytes(source: str, timeout: float = 30.0) -> bytes:
 def _has_name_text(lines: List[str], date_raw: str) -> bool:
     """Would these lines still give the entry a name (text besides its date and links)?"""
     text = normalise_date_text(" ".join(lines)).replace(date_raw, " ", 1)
-    text = BARE_URL.sub(" ", URL_IN_TEXT.sub(" ", text))
+    text = _strip_bare_urls(URL_IN_TEXT.sub(" ", text))
     return len(re.sub(r"[\W\d_]+", "", text)) >= 4
 
 
@@ -120,7 +161,7 @@ def _entry_name(entry: Entry) -> str:
             text = text[text.index(")") + 1:]
     # Leftover date words before the title's colon: "until ? : March to Gaza",
     # "au 1/2 octobre : Rassemblement ...", "à fin septembre : Ecotopia ..."
-    lead = re.match(r"^[\s,.;-]*([^:]{0,30}?)\s*:\s*(?=\S)", text)
+    lead = re.match(r"^[\s,.;-]*([^:]{0,30}?)\s*:(?!//)\s*(?=\S)", text)   # not "https:"
     if lead and (not lead.group(1) or not lead.group(1)[:1].isupper()):
         text = text[lead.end():]
     text = f"{before.strip()} {text}" if before.strip(" ([") else text
@@ -128,13 +169,41 @@ def _entry_name(entry: Entry) -> str:
     if first_url and first_url.start() > 8:       # the name ends where the first link starts
         text = text[:first_url.start()]
     text = re.sub(r"\(\s*(?:https?://|www\.)[^)]*\)", " ", text)   # "(https://...)" duplicates
-    text = BARE_URL.sub(" ", URL_IN_TEXT.sub(" ", text))
+    text = _strip_bare_urls(URL_IN_TEXT.sub(" ", text))
     text = re.sub(r"^[\s()\[\]:\-–—,.;/>]+", "", text)
     text = re.sub(r"\s+", " ", text).strip(" :-–—,;/>(")
+    # An unmatched ")" near the start is the end of a bracketed note after the date:
+    # "(14.-16. 6. (probably) Tipping Points ..." / "(27.08 - 02.09) (Italy)".
+    note = re.match(r"^([^()]{1,25})\)\s*", text)
+    if note:
+        rest = text[note.end():]
+        text = rest if len(re.sub(r"[\W\d_]+", "", rest)) >= 4 else f"({note.group(1).strip()})"
     if len(text) > 160:
         cut = re.search(r"(?<=[.;])\s", text[60:200])
         text = text[:60 + cut.start()] if cut else text[:160].rsplit(" ", 1)[0] + " …"
     return text
+
+
+_DOMAIN_ONLY = re.compile(r"(?:https?://)?(?:www\.)?[\w-]+(?:\.[\w-]+)+/?", re.I)
+
+
+def _fallback_name(entry: Entry, name: str = "") -> str:
+    """A name for an entry whose text gave none, only a link ("endfossil.com") or only
+    a bracketed note ("(Italy)"): its first title-like line, else the host of its
+    first link (plus the note), else a placeholder naming its date."""
+    for line in entry.lines:
+        t = normalise_date_text(line)
+        if entry.date_raw and entry.date_raw in t:
+            t = t.replace(entry.date_raw, " ", 1)
+        t = re.sub(r"^[\s()\[\]:\-–—,.;/>]+", "", t).strip()
+        if _title_like(t):
+            return t
+    host = re.sub(r"^www\.", "", urlparse(entry.links[0]).netloc) if entry.links else ""
+    if name.startswith("("):
+        return f"{host} {name}".strip()
+    if name:
+        return name
+    return host or f"Untitled agenda entry {entry.date_raw}".strip()
 
 
 def extract_entries(source: str) -> Tuple[List[Entry], List[PdfLink], List[List[str]], Dict[int, List[int]]]:
@@ -180,9 +249,14 @@ def extract_entries(source: str) -> Tuple[List[Entry], List[PdfLink], List[List[
                 headings.append(False)
                 raw, start, end = parse_entry_date(text, year)
                 undated = None
+                u_year, u_month = year, month
                 if not raw:
                     bullet = re.match(r"^\s*[–—]\s+(?P<when>[^:]{3,80}?)\s*:\s*\S", text)
-                    if bullet:
+                    m_raw, m_month, m_year = parse_entry_month(text)
+                    if m_raw:
+                        # "(Sept) Cost of living & climate marches": a month, no day
+                        undated, u_month, u_year = m_raw, m_month, m_year or year
+                    elif bullet:
                         # "– Début juillet jusqu’à fin septembre : Ecotopia bike tour ..."
                         undated = bullet.group("when")
                     elif current is None and month and (URL_IN_TEXT.search(text) or BARE_URL.search(text)):
@@ -192,7 +266,7 @@ def extract_entries(source: str) -> Tuple[List[Entry], List[PdfLink], List[List[
                     d_raw, d_iso = find_date(undated, year)
                     new = Entry(source, len(entries), pno, [text], undated, d_iso.split(" to ")[0] if d_iso else "",
                                 d_iso.split(" to ")[1] if " to " in d_iso else "", year_known=bool(d_iso),
-                                month=f"{year}-{month:02d}" if year and month else "")
+                                month=f"{u_year}-{u_month:02d}" if u_year and u_month else "")
                     entries.append(new)
                     current = new
                     owners.append(current.index)
@@ -249,6 +323,8 @@ def extract_entries(source: str) -> Tuple[List[Entry], List[PdfLink], List[List[
             for k, (top, bottom, text) in enumerate(raw_lines):
                 masked = URL_IN_TEXT.sub(lambda m: " " * len(m.group(0)), text)
                 for m in BARE_URL.finditer(masked):
+                    if _is_word_not_url(m.group(0)):      # "migrants.es": a French plural
+                        continue
                     url = _clean_url(m.group(0))
                     if url and not any(url.split("://", 1)[-1][:30] in a for a in annotated):
                         links.append(PdfLink(source, pno, url, "", text, "", "", "", owners[k]))
@@ -272,8 +348,6 @@ def extract_entries(source: str) -> Tuple[List[Entry], List[PdfLink], List[List[
                     links.append(PdfLink(source, pno, url, "", text, "", "", "", owners[k]))
 
     # Names, dates and links per entry
-    for e in entries:
-        e.name = _entry_name(e)
     seen = set()
     unique: List[PdfLink] = []
     for ln in links:
@@ -281,12 +355,18 @@ def extract_entries(source: str) -> Tuple[List[Entry], List[PdfLink], List[List[
             continue
         seen.add((ln.entry, ln.url))
         if 0 <= ln.entry < len(entries):
-            e = entries[ln.entry]
-            ln.event, ln.date_raw, ln.date_iso = e.name, e.date_raw, e.date_iso
-            e.links.append(ln.url)
+            entries[ln.entry].links.append(ln.url)
         else:
             ln.event = ln.anchor or re.sub(r"\s+", " ", URL_IN_TEXT.sub(" ", ln.line)).strip() or ln.url
         unique.append(ln)
+    for e in entries:
+        e.name = _entry_name(e)
+        if not e.name or _DOMAIN_ONLY.fullmatch(e.name) or re.fullmatch(r"\([^()]*\)", e.name):
+            e.name = _fallback_name(e, e.name)
+    for ln in unique:
+        if 0 <= ln.entry < len(entries):
+            e = entries[ln.entry]
+            ln.event, ln.date_raw, ln.date_iso = e.name, e.date_raw, e.date_iso
     no_year = sum(1 for e in entries if not e.year_known)
     log.info("Seed PDF %s: %d entries, %d links on %d pages%s", source, len(entries), len(unique),
              len(page_lines), f" ({no_year} entries without a known year)" if no_year else "")

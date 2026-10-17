@@ -10,6 +10,9 @@
 # Syntax (see example_themes.txt): term* = prefix; *term* = also inside
 # compound words (Technofascism, Ökofaschismus, klimaatracisme, neokolonial);
 # re: = regular expression. Overlapping matches count once (the longest).
+# !term = exclusion: a hit of this theme that overlaps a match of the
+# exclusion is not counted ("!énfasis" keeps "*fasis*" off the Spanish word
+# for "emphasis"). Greek accents are ignored when matching.
 
 [colonialism]
 # --- any language: word stems, also inside compounds
@@ -41,8 +44,13 @@ empires
 land back
 indigenous sovereignty
 global south
-reparations
+# "reparations" alone is often about repairing ecosystems; only the political
+# phrases count.
 climate reparations
+re:(?:colonial|historic(?:al)?|slavery|racial)\s+reparations
+re:reparations\s+for\s+(?:slavery|colonial\w*|empire)
+reparatory justice
+Françafrique
 climate debt
 # --- Italian / Spanish / French / Portuguese
 impero
@@ -156,6 +164,36 @@ white privilege
 environmental racism
 climate apartheid
 anti-blackness
+# apartheid, also "anti-apartheid", "Apartheidstaat", "apartheidas", "aparthejd"
+*apartheid*
+*aparthejd*
+*απαρτχαιντ*
+*апартеид*
+*апартеїд*
+# racialised groups named as such: BIPoC, BPoC, PoC (case-sensitive: not "poc")
+BIPoC
+BPoC
+re:(?-i:(?<![\w-])PoC(?![\w-]))
+re:people\s+of\s+colou?r
+personnes? de couleur
+racial discrimination
+racial segregation
+discrimination raciale
+ségrégation raciale
+discriminación racial
+segregación racial
+discriminazione razziale
+segregazione razziale
+discriminação racial
+segregação racial
+rassistische Diskriminierung
+Rassentrennung
+# antigypsyism / antiziganism (Roma and Sinti)
+*antiziganis*
+*antigypsyis*
+*antitsiganis*
+*anticiganis*
+*antigitanis*
 hostile environment
 racial profiling
 # --- German / Dutch
@@ -167,6 +205,9 @@ wit privilege
 # Note: Dutch/Danish "racisme", "antiracisme", "klimaatracisme" etc. are covered by *racis*.
 # --- Danish / Swedish
 *rasis*
+# Spanish "paráfrasis", "perífrasis", "antífrasis" are not racism
+!*frasis*
+!*fràsis*
 fremmedhad
 fremmedfjendsk*
 främlingsfientlig*
@@ -208,7 +249,10 @@ idegengyűlölet
 *fascista*
 *facist*
 antifa
-nazi*
+# "nazi*" would also match Italian nazionale/Nazioni Unite and Croatian naziv
+re:(?<!\w)nazi(?!on|v)\w*
+*nazionalsocialis*
+*nationalsozialis*
 neo-nazi*
 neonazi*
 *neonazi*
@@ -225,6 +269,11 @@ authoritarianis*
 estrema destra
 ultradestra
 autoritarism*
+# anarchist "anti-authoritarian" camps and groups are not about authoritarianism
+!anti-autoritar*
+!antiautoritar*
+!anti-authoritar*
+!antiauthoritar*
 ultraderecha
 extrema derecha
 extrema direita
@@ -257,6 +306,9 @@ ytre høyre
 *fašiz*
 *fašist*
 *fasis*
+# Spanish "énfasis" (emphasis) is not fascism
+!*énfasis*
+!*enfasis*
 *fasiz*
 *feixis*
 *faxis*
@@ -277,6 +329,11 @@ ultradreta
 eskuin muturra*
 kraštutin* dešin*
 szélsőjobb*
+# Nazism in Czech, Slovak, Slovenian, Croatian/Serbian, Lithuanian (nacismus, nacizem,
+# nacizam, nacisti, nacizmas; not Spanish "nacisteis"), Hungarian (náci) and Finnish (natsi)
+re:(?<![\w-])(?:neo-?)?naci(?:zam|zem|zm\w*|smus\w*|st(?!eis)\w*)
+re:(?<![\w-])(?:neo-?)?náci\w*
+re:(?<![\w-])(?:uus)?natsi(?!on)\w*
 # --- Greek / Ukrainian / Russian
 *φασισ*
 *φασιστ*

@@ -17,13 +17,13 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Set as AbcSet
 from dataclasses import dataclass, field
 from typing import Dict, Iterable, List, Optional, Set, Tuple
-from urllib.parse import urljoin
 
 from bs4 import BeautifulSoup
 
-from crawler import CachedPage, normalise_url
+from crawler import CachedPage, normalise_url, safe_join
 
 MONTHS = {
     # en
@@ -98,8 +98,17 @@ class Event:
     dates: Set[str] = field(default_factory=set)   # ISO dates (calendar cells, page data)
     date_text: str = ""              # date as written, when no ISO date is known
     months: Set[str] = field(default_factory=set)
-    source: str = ""                 # calendar page / seed PDF where it was listed
+    source: str = ""                 # first calendar page / seed PDF where it was listed
     link: str = ""                   # the link shown for the event (key may add a date)
+    sources: List[str] = field(default_factory=list)   # every calendar page / seed PDF listing it
+    entry_text: str = ""             # the agenda entry's own text (seed PDFs)
+    location: str = ""               # structured location from the event page (venue, address, country)
+    country: Dict[str, object] = field(default_factory=dict)   # filled by EventIndex.locate()
+
+    def add_source(self, source: str) -> None:
+        if source and source not in self.sources:
+            self.sources.append(source)
+        self.source = self.source or source
 
     @property
     def date(self) -> str:
@@ -117,6 +126,7 @@ class EventRef:
     name: str
     date: str
     link: str
+    key: str = ""                    # EventIndex key ("" for placeholders and unknown events)
 
 
 def _clean(text: str) -> str:
@@ -126,15 +136,19 @@ def _clean(text: str) -> str:
 class EventIndex:
     def __init__(self):
         self.events: Dict[str, Event] = {}
+        self._name_index: Optional[List[Tuple[str, str]]] = None   # (casefolded name, key)
+        self.date_conflicts = 0      # same key listed with different date ranges (first kept)
 
     def get_or_add(self, key: str) -> Event:
         key = normalise_url(key) or key
         if key not in self.events:
             self.events[key] = Event(key=key)
+            self._name_index = None
         return self.events[key]
 
     # ----------------------------------------------------------- calendars
     def add_calendar_page(self, page: CachedPage) -> None:
+        self._name_index = None
         soup = BeautifulSoup(page.body, "lxml")
         base = page.referrer or page.url
         for cell in soup.select("[data-mec-cell]"):
@@ -144,28 +158,38 @@ class EventIndex:
                 href = a["href"].strip()
                 if href.startswith(("#", "javascript:")):
                     continue
-                ev = self.get_or_add(urljoin(base, href))
+                url = safe_join(base, href)
+                if not url:
+                    continue
+                ev = self.get_or_add(url)
                 title = a.select_one(".mec-event-title, h4, h3") or a
                 ev.name = ev.name or _clean(title.get_text(" "))
                 if iso:
                     ev.dates.add(iso)
                 if page.label and re.fullmatch(r"\d{4}-\d{2}", page.label):
                     ev.months.add(page.label)
-                ev.source = ev.source or base
+                ev.add_source(base)
         # Calendars without date cells (click mode, other plugins): name + month only.
         if not soup.select("[data-mec-cell]"):
-            for a in soup.select('a[href*="event"], .fc-event a[href], .tribe-events-calendar-month__calendar-event a[href]'):
-                ev = self.get_or_add(urljoin(base, a["href"]))
+            for a in soup.select('a[href*="event"], .fc-event a[href], .tribe-events-calendar-month__calendar-event a[href], '
+                                 '.mec-calendar-day a[href], a[class*="event-single-link"][href]'):
+                url = safe_join(base, a["href"])
+                if not url:
+                    continue
+                ev = self.get_or_add(url)
                 ev.name = ev.name or _clean(a.get_text(" "))
                 if page.label and re.fullmatch(r"\d{4}-\d{2}", page.label):
                     ev.months.add(page.label)
+                ev.add_source(base)
 
     # --------------------------------------------------------- event pages
     def add_event_page(self, page: CachedPage) -> None:
-        """Fill in name/date from an event's own page (schema.org Event, <time>)."""
+        """Fill in name, date and location from an event's own page (schema.org
+        Event data, the Modern Events Calendar location box, <time>)."""
         ev = self.events.get(page.final_url) or self.events.get(page.url)
         if ev is None:
             return
+        self._name_index = None
         soup = BeautifulSoup(page.body, "lxml")
         for sc in soup.find_all("script", type="application/ld+json"):
             try:
@@ -174,10 +198,13 @@ class EventIndex:
                 continue
             for item in _walk_json(data):
                 if isinstance(item, dict) and "Event" in str(item.get("@type", "")):
-                    ev.name = ev.name or _clean(item.get("name", ""))
+                    ev.name = ev.name or _clean(str(item.get("name", "")))
                     for k in ("startDate", "endDate"):
                         if isinstance(item.get(k), str) and re.match(r"\d{4}-\d{2}-\d{2}", item[k]):
                             ev.dates.add(item[k][:10])
+                    ev.location = ev.location or schema_location(item)
+        if not ev.location:
+            ev.location = mec_location(soup)
         if not ev.name:
             h1 = soup.find("h1")
             ev.name = _clean(h1.get_text(" ")) if h1 else ""
@@ -188,42 +215,170 @@ class EventIndex:
 
     # ---------------------------------------------------------- seed PDFs
     def add_pdf_link(self, url: str, name: str, date_raw: str, date_iso: str, source: str,
-                     link: str = "") -> None:
+                     link: str = "", entry_text: str = "") -> None:
         """An agenda entry. `url` is its key; `link` the URL to show (several
-        editions of a recurring event share a link but are separate events)."""
+        editions of a recurring event share a link but are separate events).
+
+        The same key listed twice (the French and English listing of one event,
+        or the same event in both agendas) is one event listed on every source.
+        Its date range is the first listing's: a later listing may add an end
+        date to a start-only date, but never widens a range it disagrees with."""
+        self._name_index = None
         ev = self.events.get(url) or self.events.setdefault(url, Event(key=url))
         ev.link = ev.link or link
         ev.name = ev.name or name
+        ev.entry_text = ev.entry_text or entry_text
         if date_iso:
-            ev.dates.update(date_iso.split(" to "))
+            rng = set(date_iso.split(" to "))
+            if not ev.dates:
+                ev.dates.update(rng)
+            elif not rng <= ev.dates:
+                if len(ev.dates) == 1 and min(rng) == min(ev.dates):
+                    ev.dates.update(rng)          # the first listing had only the start date
+                else:
+                    self.date_conflicts += 1
         elif date_raw and not ev.date_text:
             ev.date_text = date_raw
-        ev.source = ev.source or source
+        ev.add_source(source)
 
     # ------------------------------------------------------------- lookup
     def ref(self, key: str, fallback_name: str = "", fallback_date: str = "") -> EventRef:
-        ev = self.events.get(normalise_url(key) or key)
-        if ev is None:
-            ev = self.events.get(key)
+        # The exact key first: an agenda entry key ("https://x.org/#2023-08-10")
+        # must not resolve to the calendar event keyed by the bare link.
+        ev = self.events.get(key) or self.events.get(normalise_url(key) or key)
         if ev is None:
             return EventRef(fallback_name, fallback_date, key)
-        return EventRef(ev.name or fallback_name, ev.date or fallback_date, ev.link or ev.key)
+        return EventRef(ev.name or fallback_name, ev.date or fallback_date, ev.link or ev.key, ev.key)
 
-    def named_in(self, text: str, candidates: Iterable[str]) -> List[EventRef]:
-        """Events among `candidates` whose name appears in `text` (calendar cells,
-        PDF lines)."""
+    def named_in(self, text: str, candidates: Optional[Iterable[str]] = None) -> List[EventRef]:
+        """Events among `candidates` (default: all) whose name appears in `text`
+        (calendar cells, PDF lines)."""
+        if self._name_index is None:   # names casefolded once, not for every paragraph
+            self._name_index = [(ev.name.casefold(), k) for k, ev in self.events.items()
+                                if len(ev.name) >= 4]
         low = text.casefold()
+        keys = None if candidates is None else (candidates if isinstance(candidates, (AbcSet, dict))
+                                                else set(candidates))
         out = []
-        for key in candidates:
-            ev = self.events.get(key)
-            if ev and len(ev.name) >= 4 and ev.name.casefold() in low:
-                out.append(EventRef(ev.name, ev.date, ev.link or ev.key))
+        for name, k in self._name_index:
+            if (keys is None or k in keys) and name in low:
+                ev = self.events[k]
+                out.append(EventRef(ev.name, ev.date, ev.link or ev.key, ev.key))
         return out
 
-    def rows(self) -> List[dict]:
-        return [{"event": ev.name, "date": ev.date, "event_link": ev.link or ev.key, "listed_on": ev.source,
-                 "calendar_months": "; ".join(sorted(ev.months))}
-                for ev in sorted(self.events.values(), key=lambda e: (e.date, e.name))]
+    # ------------------------------------------------------------ location
+    def locate(self) -> str:
+        """Country of every event (R2), from the gazetteer module: the structured
+        location of the event page first, then tags such as [DE], country and
+        city names in the name and entry text, and the link's country domain as
+        a last resort. Returns "" on success, else why no country was set."""
+        try:
+            import gazetteer   # written separately; optional
+        except Exception as exc:  # noqa: BLE001 - a missing or broken module must not stop the run
+            return f"gazetteer module not available ({type(exc).__name__}: {exc})"
+        failed = 0
+        for ev in self.events.values():
+            link = ev.link or ev.key
+            link = link if re.match(r"https?://", link) else ""
+            try:
+                res = _call_gazetteer(gazetteer, ev.name, ev.entry_text, link, ev.location)
+            except Exception:  # noqa: BLE001 - one odd name must not stop the run
+                failed += 1
+                res = {}
+            ev.country = res
+        return f"country lookup failed for {failed} events" if failed else ""
+
+    def rows(self, display=lambda u: u) -> List[dict]:
+        """One row per event. `display` turns internal links (local seed-PDF
+        paths) into the form written to files."""
+        out = []
+        for ev in sorted(self.events.values(), key=lambda e: (e.date, e.name, e.key)):
+            out.append({
+                "event": ev.name, "date": ev.date, "event_link": display(ev.link or ev.key),
+                "event_key": display(ev.key),
+                "listed_on": "; ".join(display(s) for s in (ev.sources or [ev.source])),
+                "calendar_months": "; ".join(sorted(ev.months)),
+                **country_columns(ev.country),
+                "location_structured": ev.location,
+                "entry_words": len(ev.entry_text.split()),
+            })
+        return out
+
+
+COUNTRY_FIELDS = ["event_country", "country_iso", "country_source", "location_text"]
+
+
+def country_columns(res: Optional[Dict[str, object]]) -> Dict[str, str]:
+    """The four country columns (English names, ISO codes, method, matched text)."""
+    res = res or {}
+    codes = [str(c) for c in res.get("countries") or []]
+    names = [str(n) for n in res.get("names") or []] or codes
+    return {"event_country": "; ".join(names), "country_iso": "; ".join(codes),
+            "country_source": str(res.get("method") or "") if codes else "",
+            "location_text": str(res.get("matched") or "") if codes else ""}
+
+
+def _call_gazetteer(mod, name: str, entry_text: str, link: str, structured: str) -> Dict[str, object]:
+    """gazetteer.event_country(name, entry_text, link, structured) -> {countries,
+    names, method, matched}; older prototypes take (name, entry_text) and return
+    (countries, method)."""
+    fn = mod.event_country
+    try:
+        res = fn(name or "", entry_text or "", link=link or "", structured=structured or "")
+    except TypeError:
+        res = fn(name or "", entry_text or "")
+    if isinstance(res, tuple):
+        countries, method = (list(res) + ["", ""])[:2]
+        res = {"countries": list(countries or []), "names": [], "method": method or "", "matched": ""}
+    return dict(res or {})
+
+
+def _text(v) -> str:
+    if isinstance(v, dict):
+        return _clean(str(v.get("name") or v.get("@id") or ""))
+    return _clean(str(v or "")) if isinstance(v, (str, int, float)) else ""
+
+
+def schema_location(item: dict) -> str:
+    """schema.org Event location as one line: venue, street, town, region, country."""
+    if "OnlineEventAttendanceMode" in str(item.get("eventAttendanceMode", "")) \
+            and "Mixed" not in str(item.get("eventAttendanceMode", "")):
+        return "Online"
+    locs = item.get("location")
+    locs = locs if isinstance(locs, list) else [locs]
+    parts: List[str] = []
+    for loc in locs:
+        if isinstance(loc, str):
+            parts.append(_clean(loc))
+            continue
+        if not isinstance(loc, dict):
+            continue
+        if "VirtualLocation" in str(loc.get("@type", "")):
+            parts.append("Online")
+            continue
+        parts.append(_text(loc.get("name")))
+        addr = loc.get("address")
+        if isinstance(addr, dict):
+            parts += [_text(addr.get(k)) for k in ("streetAddress", "addressLocality", "addressRegion",
+                                                    "addressCountry")]
+        else:
+            parts.append(_text(addr))
+    return ", ".join(dict.fromkeys(p for p in parts if p))[:300]
+
+
+def mec_location(soup: BeautifulSoup) -> str:
+    """The location box of a Modern Events Calendar event page (venue and address)."""
+    box = soup.select_one(".mec-single-event-location, .mec-event-location")
+    if box is None:
+        return ""
+    parts = [_clean(x.get_text(" ")) for x in box.select(".author, .fn, h6, .mec-address, address")]
+    if not any(parts):
+        heading = box.select_one("h3, .mec-events-single-section-title")
+        text = _clean(box.get_text(" "))
+        if heading is not None:
+            text = text.replace(_clean(heading.get_text(" ")), "", 1).strip()
+        parts = [text]
+    return ", ".join(dict.fromkeys(p for p in parts if p))[:300]
 
 
 def _walk_json(data):
@@ -246,6 +401,9 @@ _ENTRY_DATE_PATTERNS = [
     re.compile(r"^\(?\s*(?P<d1>\d{1,2})(?!\d)\.?(?:\s?(?P<m1>\d{1,2})(?!\d)\.?(?:(?P<y1>20\d\d|\d\d)(?!\d)\.?)?)?"
                rf"\s*{_RANGE_SEP}\s*~?(?P<d2>\d{{1,2}})(?!\d)\.\s?(?P<m2>\d{{1,2}})(?!\d)\.?"
                r"(?:(?P<y2>20\d\d|\d\d)(?!\d))?\.?"),
+    # 11.12th April (the 11th and 12th of April, not 11 December)
+    re.compile(rf"^\(?\s*(?P<d1>\d{{1,2}})(?!\d)\.(?P<d2>\d{{1,2}})(?!\d){_ORD}\s+(?P<mon2>{_MON})\.?,?\s*(?P<y2>20\d\d)?",
+               re.I),
     # (24.05)  20.06.2026
     re.compile(r"^\(?\s*(?P<d1>\d{1,2})(?!\d)\.(?P<m1>\d{1,2})(?!\d)\.?(?:(?P<y1>20\d\d|\d\d)(?!\d))?"),
     # 24 of may – 1st of june / 29 juillet au 1er août / 15 au 18 juillet / 1 Aug - 8 Aug 2025
@@ -310,6 +468,21 @@ def parse_entry_date(line: str, year: Optional[int]) -> Tuple[str, str, str]:
             continue
         return raw, start, (end if end and end != start else "")
     return "", "", ""
+
+
+# "(Sept) Cost of living ...", "(mid-June) ...", "(début juillet) ...": a month, no day.
+_ENTRY_MONTH = re.compile(rf"^\(\s*(?:(?:early|mid|late|end|end of|début|debut|fin|mi|anfang|mitte|ende)[- ]+)?"
+                          rf"(?P<mon>{_MON})\.?\s*(?P<y>20\d\d)?\s*\)", re.I)
+
+
+def parse_entry_month(line: str) -> Tuple[str, Optional[int], Optional[int]]:
+    """A month written in brackets at the start of an agenda entry ("(Sept) ..."):
+    (raw text, month, year or None). ("", None, None) when there is none."""
+    m = _ENTRY_MONTH.match(_BULLETS.sub("", line))
+    if not m:
+        return "", None, None
+    return m.group(0).strip(" ()"), MONTHS.get(m.group("mon").lower().rstrip(".")), \
+        int(m.group("y")) if m.group("y") else None
 
 
 _HEADING = re.compile(rf"^(?:(?:ann[ée]e|year|jahr|jaar|år|anno|año|ano)(?:\s*/\s*(?:year|ann[ée]e))?)?\s*"

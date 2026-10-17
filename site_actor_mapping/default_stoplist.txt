@@ -34,9 +34,25 @@ Terms of Use
 Newsletter
 RSS
 PDF
+# Calendar export buttons and loading messages
+Google Calendar
+Outlook 365
+Outlook Live
+Outlook.com
+iCal
+ICS
+Apple Calendar
+Chargement
+Loading
+Laden
+Caricamento
+Cargando
 
 re:^(?:all )?rights reserved
 re:^copyright\b
 re:^(?:read|learn|find out|click|see) more\b
 re:^(?:home|about|contact|donate|menu|search|shop|news|blog|events?)$
 re:^\W*\d[\d\s./-]*$
+# clock times and road numbers that NER tags as organisations ("14 H 51 MIN", "A10")
+re:^\W*(?:\d{1,2}\s*)?h\s*\d{1,2}(?:\s*min)?\b
+re:^[ABDEMN]-?\d{1,3}$
