@@ -133,6 +133,10 @@ def _clean(text: str) -> str:
     return re.sub(r"\s+", " ", text or "").strip()
 
 
+# A day an event can be on: "9999-12-31" (some plugins' "no end date") is not one.
+_PLAUSIBLE_DAY = re.compile(r"(?:18|19|20|21)\d{2}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12]\d|3[01])")
+
+
 class EventIndex:
     def __init__(self):
         self.events: Dict[str, Event] = {}
@@ -200,7 +204,7 @@ class EventIndex:
                 if isinstance(item, dict) and "Event" in str(item.get("@type", "")):
                     ev.name = ev.name or _clean(str(item.get("name", "")))
                     for k in ("startDate", "endDate"):
-                        if isinstance(item.get(k), str) and re.match(r"\d{4}-\d{2}-\d{2}", item[k]):
+                        if isinstance(item.get(k), str) and _PLAUSIBLE_DAY.match(item[k]):
                             ev.dates.add(item[k][:10])
                     ev.location = ev.location or schema_location(item)
         if not ev.location:
@@ -210,7 +214,7 @@ class EventIndex:
             ev.name = _clean(h1.get_text(" ")) if h1 else ""
         if not ev.dates:
             t = soup.find("time", datetime=True)
-            if t and re.match(r"\d{4}-\d{2}-\d{2}", t["datetime"]):
+            if t and _PLAUSIBLE_DAY.match(t["datetime"]):
                 ev.dates.add(t["datetime"][:10])
 
     # ---------------------------------------------------------- seed PDFs
@@ -455,11 +459,19 @@ def parse_entry_date(line: str, year: Optional[int]) -> Tuple[str, str, str]:
         m1 = int(g["m1"]) if g.get("m1") and g["m1"].isdigit() else MONTHS.get((g.get("mon1") or "").lower().rstrip("."))
         m2 = int(g["m2"]) if g.get("m2") and str(g["m2"]).isdigit() else MONTHS.get((g.get("mon2") or "").lower().rstrip("."))
         d1, d2 = int(g["d1"]), int(g["d2"]) if g.get("d2") else None
+        # "(29 - 02.09)": the first day has no month and is well after the second, so it
+        # is in the month before (29 August to 2 September, a short span); "25 au 16 mai"
+        # is left as written
+        month_before = not m1 and bool(m2) and d2 is not None and d1 - d2 >= 14
         m1 = m1 or m2
         if not m1 or not (1 <= m1 <= 12) or (m2 and not 1 <= m2 <= 12):
             continue
         y1 = _year(g.get("y1")) or _year(g.get("y2")) or year
         y2 = _year(g.get("y2")) or y1
+        if month_before:
+            m1 = m1 - 1 or 12
+            if m1 == 12 and y1:
+                y1 -= 1
         if d2 is not None and y1 and y2 == y1 and (m2 or m1) < m1:
             y2 = y1 + 1   # 01.10 - 28.02 runs into the next year
         raw = m.group(0).strip(" (")

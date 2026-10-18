@@ -150,6 +150,19 @@ def _clean_url(raw: str) -> Optional[str]:
     return url
 
 
+# Notes the editors of a shared pad leave after a title: part of the entry's text, not
+# of the event's name ("Cost of living & climate marches (Europe) Where can we find more
+# info?", "Climate Camp Cymru (Wales, UK) - (more information to follow)").
+_PAD_NOTE = re.compile(
+    r"\s*(?:->|→|[-–])?\s*\(?\s*(?:where can (?:we|i) find more info(?:rmation)?\s*\??"
+    r"|any website,? link with more info(?:rmation)?\s*\??"
+    r"|more info(?:rmation)? (?:to come|to follow|coming(?: up)?(?: soon)?)(?=\s*(?:[.!)\-–>]|$))\s*[.!]?"
+    r"|i[’']?ll add more info[^)]*)\s*\)?", re.I)
+
+# The end of a line that runs on into the next one: "REPORTÉES AUX 3-" + "17 AOÛT".
+_RUNS_ON = re.compile(r"(?:\d\s*[-–—/]|\b(?:au|aux|jusqu[’']?au|to|until|till|bis|al|fino al))\s*$", re.I)
+
+
 def _entry_name(entry: Entry) -> str:
     text = normalise_date_text(re.sub(r"^[\s–—\-•*·>]+", "", " ".join(entry.lines)))
     opened = text.startswith("(")
@@ -170,6 +183,7 @@ def _entry_name(entry: Entry) -> str:
         text = text[:first_url.start()]
     text = re.sub(r"\(\s*(?:https?://|www\.)[^)]*\)", " ", text)   # "(https://...)" duplicates
     text = _strip_bare_urls(URL_IN_TEXT.sub(" ", text))
+    text = _PAD_NOTE.sub(" ", text)        # "-> Where can I find more information?"
     text = re.sub(r"^[\s()\[\]:\-–—,.;/>]+", "", text)
     text = re.sub(r"\s+", " ", text).strip(" :-–—,;/>(")
     # An unmatched ")" near the start is the end of a bracketed note after the date:
@@ -269,6 +283,13 @@ def extract_entries(source: str) -> Tuple[List[Entry], List[PdfLink], List[List[
                                 month=f"{u_year}-{u_month:02d}" if u_year and u_month else "")
                     entries.append(new)
                     current = new
+                    owners.append(current.index)
+                    continue
+                if raw and current is not None and i > 0 and owners and owners[-1] == current.index \
+                        and _RUNS_ON.search(raw_lines[i - 1][2]) and not _has_name_text([text], raw):
+                    # Only a date, ending the line before ("... REPORTÉES AUX 3-" / "17 AOÛT"
+                    # / link): the end of the current entry, not a new one.
+                    current.lines.append(text)
                     owners.append(current.index)
                     continue
                 if raw:

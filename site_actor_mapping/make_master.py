@@ -17,6 +17,11 @@ Build the two master files from one or more result folders:
                                           footers or text repeated on every page
                                           of a site (site furniture), kept apart
                                           so they do not inflate the network
+                     ner_only_candidates  rows whose organisation was found only by
+                                          NER (spaCy) with no other evidence in the
+                                          corpus (see OrgEvidence): kept apart so
+                                          nothing is lost, but not in the network
+                                          unless --keep-ner-only is given
                      sources              every source read (web page, PDF,
                                           agenda entry, calendar cell) with its
                                           theme hits
@@ -33,12 +38,20 @@ Theme filter (--theme-filter, default "source"): a theme hit is the inclusion
 criterion for master_network. Organisations and events are kept only from
 sources with at least one theme term in their content (not only in menus or
 repeated furniture): "source" = the web page, the PDF, or for seed agendas the
-agenda entry itself; "site" = any page of the same website; "event" = any
+agenda entry itself; "site" = any page of the same website (an agenda entry
+is still judged on its own, as the agenda PDF counts as one site); "event" = any
 source tied to the same event; "none" keeps everything. master_themes is not
 filtered. The run log and the about sheet say how much was left out.
 
 Country columns (event_country, country_iso, country_source, location_text)
-come from events.csv of each result folder, matched on event_key.
+come from events.csv of each result folder, matched on event_key. For folders
+made by older versions (no country columns) they are worked out with
+gazetteer.py, as analytics.py does.
+
+Names that join two organisations ("Exxon & Shell", "Greenpeace and Civil
+Rights Defenders") are split into one row per organisation when each part is an
+organisation the corpus or the run's watchlist corroborates; found_by then says
+"split from ...".
 
 Written as .xlsx (one sheet per table, filters, frozen header) and as .csv.
 site_actors.py calls this at the end of every run; run it yourself to merge
@@ -200,12 +213,87 @@ def _in_title(org_key: str, event_name: str) -> bool:
         canonical_key(h).startswith(k) for h in re.findall(r"#(\w+)", event_name or ""))
 
 
+_country_note: Set[str] = set()
+
+
+def _seed_entry_texts(res: Path) -> Dict[str, str]:
+    """Agenda entry text by event name (casefolded), from seed_links.json."""
+    p = res / "seed_links.json"
+    out: Dict[str, str] = {}
+    try:
+        data = json.loads(p.read_text(encoding="utf-8")) if p.exists() else {}
+        for pdf in (data.get("pdfs") or {}).values():
+            for e in pdf.get("entries") or []:
+                out.setdefault((e.get("name") or "").casefold().strip(), " ".join(e.get("lines") or []))
+    except (OSError, ValueError, AttributeError):
+        pass
+    return out
+
+
+_OLD_FOLDERS = ("\x00older folder",)   # marker key in by_name: work out missing countries
+
+
+def _gazetteer_countries(res: Path, rows: List[dict], quiet: bool = False) -> Dict[int, dict]:
+    """Country columns for events.csv rows of an older folder (no country columns),
+    worked out with gazetteer.py as analytics.py does. {} when it is not available."""
+    try:
+        import gazetteer
+        from events import country_columns
+    except ImportError as exc:
+        if not quiet and str(res) not in _country_note:
+            _country_note.add(str(res))
+            log.warning("events.csv in %s has no country columns (older version) and gazetteer.py "
+                        "could not be loaded (%s): the country columns stay empty. Run site_actors.py "
+                        "--no-crawl on this folder to add them", res, exc)
+        return {}
+    entries = _seed_entry_texts(res)
+    out: Dict[int, dict] = {}
+    for i, e in enumerate(rows):
+        link = e.get("event_link") or ""
+        link = link if link.startswith(("http://", "https://")) else ""
+        try:
+            got = gazetteer.event_country(e.get("event") or "",
+                                          entries.get((e.get("event") or "").casefold().strip(), ""),
+                                          link=link, structured=e.get("location_structured") or "")
+            if got.get("countries") and not got.get("names"):
+                got = {**got, "names": [gazetteer.country_name(c) for c in got["countries"]]}
+            if isinstance(got.get("matched"), (list, tuple)):
+                got = {**got, "matched": "; ".join(str(x) for x in got["matched"])}
+            out[i] = country_columns(got)
+        except Exception as exc:  # noqa: BLE001 - one odd event name must not stop the master files
+            log.debug("No country for %r: %s", e.get("event"), exc)
+    if not quiet and str(res) not in _country_note:
+        _country_note.add(str(res))
+        log.info("events.csv in %s has no country columns (older version): countries worked out "
+                 "with the gazetteer for %d of %d events (run site_actors.py --no-crawl on this "
+                 "folder to store them)", res, sum(1 for c in out.values() if c.get("country_iso")),
+                 len(rows))
+    return out
+
+
+_countries_memo: Dict[tuple, Tuple[Dict[str, dict], Dict[tuple, dict]]] = {}
+
+
 def _countries(results: Sequence[Path]) -> Tuple[Dict[str, dict], Dict[tuple, dict]]:
+    memo_key = tuple(str(r) for r in results) + tuple(
+        str((r / "events.csv").stat().st_mtime_ns) if (r / "events.csv").exists() else "" for r in results)
+    if memo_key not in _countries_memo:
+        _countries_memo.clear()
+        _countries_memo[memo_key] = _read_countries(results)
+    return _countries_memo[memo_key]
+
+
+def _read_countries(results: Sequence[Path]) -> Tuple[Dict[str, dict], Dict[tuple, dict]]:
     by_key: Dict[str, dict] = {}
     by_name: Dict[tuple, dict] = {}
     for res in results:
-        for e in _iter(res / "events.csv"):
-            c = {f: e.get(f, "") for f in COUNTRY_FIELDS}
+        rows = list(_iter(res / "events.csv"))
+        derived = (_gazetteer_countries(res, rows)
+                   if rows and "country_iso" not in rows[0] else {})
+        if derived:
+            by_name[_OLD_FOLDERS] = {"derive": "yes"}
+        for i, e in enumerate(rows):
+            c = derived.get(i) or {f: e.get(f, "") for f in COUNTRY_FIELDS}
             if e.get("event_key"):
                 by_key.setdefault(e["event_key"], c)
             by_name.setdefault((e.get("event", ""), e.get("event_link", "")), c)
@@ -214,7 +302,184 @@ def _countries(results: Sequence[Path]) -> Tuple[Dict[str, dict], Dict[tuple, di
 
 def _country_of(ev: dict, by_key: Dict[str, dict], by_name: Dict[tuple, dict]) -> dict:
     c = by_key.get(ev.get("key") or "") or by_name.get((ev.get("name", ""), ev.get("link", "")))
+    if c is None and by_name.get(_OLD_FOLDERS) and not str(ev.get("name") or "(").startswith("("):
+        # Older folders: the event names of mentions.csv do not always match events.csv.
+        k = (ev.get("name", ""), ev.get("link", ""))
+        c = by_name[k] = _gazetteer_countries(Path("."), [{"event": k[0], "event_link": k[1]}],
+                                              quiet=True).get(0)
     return c or {f: "" for f in COUNTRY_FIELDS}
+
+
+# --------------------------------------------------------------------------
+# Corpus evidence for organisation names (NER-only candidates, coordinated names)
+# --------------------------------------------------------------------------
+NER_ONLY_METHODS = frozenset({"ner", "pattern_after"})   # extract.NER_LIKE_METHODS
+CANDIDATE_FIELDS = NETWORK_FIELDS + ["corpus_sources", "corpus_sites", "why_candidate"]
+_LEGAL_FORM = re.compile(r"\s(?:AG|SE|plc|PLC|Ltd\.?|Limited|GmbH|LLC|Inc\.?|S\.?A\.?|SpA|S\.p\.A\.|N\.?V\.?|"
+                         r"B\.?V\.?|e\.\s?V\.|Oy|Oyj|AB|ASA|A/S|SAS|SARL|Srl|KG|Corp\.?|Corporation)$")
+_ACRONYM = re.compile(r"[A-Z0-9ÀÂÄÇÉÈÊËÎÏÔÖÙÛÜ][A-Z0-9ÀÂÄÇÉÈÊËÎÏÔÖÙÛÜ&\-]{1,5}")
+
+
+def _method_names(value: str) -> Set[str]:
+    """"ner (2); pattern (1)" (organisations.csv) or "ner+pattern" (mentions.csv)."""
+    return {re.sub(r"\s*\(\d+\)$", "", m).strip() for m in re.split(r";\s*|\+", value or "")} - {""}
+
+
+class OrgEvidence:
+    """What the whole corpus (every mention in every result folder, theme hit or
+    not) says about each organisation key: the rules that found it, how many
+    sources and websites name it, and whether a watchlist of the run lists it.
+
+    A name found only by NER (spaCy) is "corroborated" when it has other evidence:
+    - another rule found it somewhere (a descriptor or organisational noun, a
+      website or link, an agenda title, the watchlist);
+    - its own words include an organisational noun (org_type is set);
+    - an acronym was spelt out for it in the text ("Climate Action Network (CAN)");
+    - it ends in a legal form ("Pan American Energy LLC", "RWE AG");
+    - it is an acronym of 2 to 6 capitals named in 2 or more sources, not a place;
+    - or, not being a place, it is named in the content (not menus or footers) of 3 or
+      more sources on 2 or more websites, or of 3 or more agenda entries.
+    Other NER-only names go to the ner_only_candidates sheet instead of the network."""
+
+    def __init__(self, results: Sequence[Path]):
+        self.methods: Dict[str, Set[str]] = defaultdict(set)
+        self.sources: Dict[str, Set[str]] = defaultdict(set)
+        self.sites: Dict[str, Set[str]] = defaultdict(set)
+        self.content: Dict[str, Set[Tuple[str, str, bool]]] = defaultdict(set)   # (source, site, seed)
+        self.surfaces: Dict[str, Counter] = defaultdict(Counter)
+        self.typed: Set[str] = set()
+        self.spelt: Set[str] = set()
+        self.watch: Set[str] = set()
+        self.by_name: Dict[str, str] = {}     # canonical key of a display name -> org_key
+        for res in results:
+            for m in _iter(res / "mentions.csv"):
+                k = m.get("org_key") or ""
+                if not k:
+                    continue
+                self.methods[k] |= _method_names(m.get("methods", ""))
+                src = m.get("source_unit") or m.get("url", "")
+                self.sources[k].add(src)
+                self.sites[k].add(m.get("site", ""))
+                if not (_true(m.get("boilerplate")) or _true(m.get("in_menu"))
+                        or _true(m.get("menu_or_sidebar")) or m.get("region", "") in FURNITURE_REGIONS):
+                    self.content[k].add((src, m.get("site", ""), m.get("site_role") == "seed"))
+                self.surfaces[k][m.get("organisation", "")] += 1
+                if m.get("org_type"):
+                    self.typed.add(k)
+            for o in _iter(res / "organisations.csv"):
+                k = o.get("org_key") or ""
+                if k and o.get("acronyms"):
+                    self.spelt.add(k)
+                if k and o.get("methods"):
+                    self.methods[k] |= _method_names(o["methods"])
+            self.watch |= _watchlist_keys(res)
+        try:
+            from extract import canonical_key, tidy_surface
+            for k, forms in self.surfaces.items():
+                for f in forms:
+                    self.by_name.setdefault(canonical_key(tidy_surface(f)), k)
+                self.by_name.setdefault(k, k)
+        except ImportError:   # extract.py missing: names are compared by their keys only
+            self.by_name = {k: k for k in self.surfaces}
+
+    def display(self, key: str) -> str:
+        forms = self.surfaces.get(key)
+        return forms.most_common(1)[0][0] if forms else key
+
+    def why_not(self, key: str) -> str:
+        """"" when the name is corroborated, else why it is only a candidate."""
+        methods = self.methods.get(key, set())
+        if not methods or methods - NER_ONLY_METHODS:
+            return ""   # unknown here (keep it) or found by another rule as well
+        if key in self.typed or key in self.spelt or key in self.watch:
+            return ""
+        n_src = len(self.sources.get(key, set()) - {""})
+        n_sites = len(self.sites.get(key, set()) - {""})
+        surface = self.display(key)
+        if _LEGAL_FORM.search(surface):
+            return ""
+        if _ACRONYM.fullmatch(surface) and n_src >= 2 and not _is_place(surface):
+            return ""
+        content = self.content.get(key, set())
+        seed_entries = {src for src, _, seed in content if seed}
+        if ((len({src for src, _, _ in content}) >= 3 and len({site for _, site, _ in content}) >= 2)
+                or len(seed_entries) >= 3) and not _is_place(surface):
+            return ""
+        return (f"found only by NER (spaCy), in {n_src} source{'s' if n_src != 1 else ''} on "
+                f"{n_sites} website{'s' if n_sites != 1 else ''}, with no other evidence")
+
+    def attested(self, name: str) -> str:
+        """org_key of `name` when the corpus or a watchlist knows it as a corroborated
+        organisation, else ""."""
+        try:
+            from extract import canonical_key, tidy_surface
+            ck = canonical_key(tidy_surface(name))
+        except ImportError:
+            ck = name.casefold()
+        if ck in self.watch:
+            return self.by_name.get(ck, ck)
+        k = self.by_name.get(ck, "")
+        return k if k and not self.why_not(k) else ""
+
+
+def _is_place(surface: str) -> bool:
+    try:
+        from extract import _is_place_name
+        return _is_place_name(surface)
+    except ImportError:
+        return False
+
+
+def _watchlist_keys(res: Path) -> Set[str]:
+    """Canonical keys of the watchlist a run used (from run_info.json)."""
+    p = res / "run_info.json"
+    try:
+        info = json.loads(p.read_text(encoding="utf-8")) if p.exists() else {}
+        path = ((info.get("input_files") or {}).get("watchlist") or {}).get("path")
+        if not path or not Path(path).exists():
+            return set()
+        from extract import Watchlist
+        wl = Watchlist.load(Path(path))
+        return set(wl.canonical) | set(wl.canonical.values())
+    except (OSError, ValueError, ImportError, AttributeError):
+        return set()
+
+
+def split_coordinated(rows: List[dict], ev: OrgEvidence) -> int:
+    """Split organisation names such as "Greenpeace and Civil Rights Defenders" or
+    "Exxon & Shell" into their parts when every part is itself an organisation the
+    corpus or a watchlist corroborates (see OrgEvidence). Names like "Perth and
+    Kinross Council" or "Bund für Umwelt und Naturschutz" stay whole because their
+    parts are not organisations of their own. Works in place; returns the number of
+    rows split."""
+    try:
+        from extract import coordinated_parts
+    except ImportError:
+        return 0
+    eid = lambda r: r.get("event_key") or f"{r['event']}\x1f{r['event_link']}"  # noqa: E731
+    keep: List[dict] = []
+    index: Dict[tuple, dict] = {}
+    split: List[Tuple[dict, List[str]]] = []
+    for r in rows:
+        parts = coordinated_parts(r["organisation"])
+        keys = [ev.attested(p) for p in parts] if len(parts) >= 2 else []
+        if keys and all(keys) and len(set(keys)) == len(keys):
+            split.append((r, keys))
+            continue
+        keep.append(r)
+        index.setdefault((eid(r), r.get("org_key") or r["organisation"], r["source_link"]), r)
+    for r, keys in split:
+        for k in keys:
+            have = index.get((eid(r), k, r["source_link"]))
+            if have is not None:
+                have["mentions_on_source"] += r["mentions_on_source"]
+                continue
+            q = {**r, "organisation": ev.display(k), "org_key": k,
+                 "found_by": "; ".join(x for x in (r.get("found_by", ""), "split from " + r["organisation"]) if x)}
+            index[(eid(q), k, q["source_link"])] = q
+            keep.append(q)
+    rows[:] = keep
+    return len(split)
 
 
 def _is_menu_theme(r: dict) -> bool:
@@ -238,6 +503,8 @@ class ThemeFilter:
         self.events: Set[str] = set()
         self.menu_only_units: Set[str] = set()
         self.old_folders: List[str] = []
+        self.no_theme_file: List[str] = []   # folders without theme_hits.csv or page theme counts
+        self.from_mentions: List[str] = []   # folders whose theme hits came from mentions.csv
         for res in results:
             src = res / "sources.csv"
             if src.exists():
@@ -253,6 +520,22 @@ class ThemeFilter:
                 for r in _iter(res / "theme_hits.csv"):
                     if not _is_menu_theme(r) and (r.get("source_unit") or r.get("source_link")) in self.units:
                         self.events.update(_event_id(e) for e in _events_of(r))
+            elif not (res / "theme_hits.csv").exists():
+                # The four files of an old run copied on their own (no theme_hits.csv):
+                # the page-level theme counts of mentions.csv say which pages had a hit.
+                self.old_folders.append(str(res))
+                found_col = False
+                for m in _iter(res / "mentions.csv"):
+                    found_col = found_col or "page_themes" in m
+                    if (m.get("page_themes") or "").strip():
+                        u = self.unit_of(m)
+                        self.units.add(u)
+                        self.sites.add(m.get("site", ""))
+                        self.events.update(_event_id(e) for e in _events_of(m))
+                if found_col:
+                    self.from_mentions.append(str(res))
+                else:
+                    self.no_theme_file.append(str(res))
             else:
                 # Older folder: a source is a page or a whole PDF.
                 self.old_folders.append(str(res))
@@ -273,13 +556,17 @@ class ThemeFilter:
         if self.mode == "none":
             return True
         if self.mode == "site":
+            if m.get("site_role") == "seed":
+                # The "site" of an agenda entry is the whole agenda PDF: one hit anywhere in
+                # it would keep every entry, so each entry is judged on its own.
+                return self.unit_of(m) in self.units
             return m.get("site", "") in self.sites
         if self.mode == "event" and not str(ev.get("name", "")).startswith("("):
             return _event_id(ev) in self.events
         return self.unit_of(m) in self.units
 
     def reason(self, m: dict) -> str:
-        if self.mode == "site":
+        if self.mode == "site" and m.get("site_role") != "seed":
             return "no theme term on any page of this website"
         if self.mode == "event":
             return "no theme term in any source tied to this event, nor in this source"
@@ -364,9 +651,13 @@ def network_rows(results: Sequence[Path], min_confidence: str = "low",
         r["only_in_menus_or_footers"] = r.pop("_bp")
         r.pop("_ex_bp")
         out.append(r)
-    out.sort(key=lambda r: (r["event"].startswith("("), r["event_date"] or "", r["event"].casefold(),
-                            r["organisation"].casefold()))
+    out.sort(key=_network_order)
     return out
+
+
+def _network_order(r: dict) -> tuple:
+    return (r["event"].startswith("("), r["event_date"] or "", r["event"].casefold(),
+            r["organisation"].casefold())
 
 
 def event_rows(network: List[dict]) -> List[dict]:
@@ -395,8 +686,12 @@ def all_event_rows(results: Sequence[Path], network: List[dict], before: Set[str
         orgs_of[_event_id({"key": r.get("event_key"), "name": r["event"], "link": r["event_link"]})].add(
             r["organisation"])
     out, seen = [], set()
+    by_key, by_name = _countries(results)
     for res in results:
         for e in _iter(res / "events.csv"):
+            if "country_iso" not in e:   # older folder: countries from the gazetteer
+                e.update(_country_of({"key": e.get("event_key"), "name": e.get("event", ""),
+                                      "link": e.get("event_link", "")}, by_key, by_name))
             eid = _event_id({"key": e.get("event_key"), "name": e.get("event", ""),
                              "link": e.get("event_link", "")})
             if eid in seen:
@@ -513,7 +808,10 @@ def _write_xlsx(path: Path, sheets: List[tuple]) -> bool:
             for r in part:
                 cells = []
                 for f, a in zip(fields, aligns):
-                    c = WriteOnlyCell(ws, value=_cell(r.get(f, "")))
+                    v = _cell(r.get(f, ""))
+                    c = WriteOnlyCell(ws, value=v)
+                    if isinstance(v, str) and v.startswith("="):
+                        c.data_type = "s"   # text such as "=== Antifa camp ===", not a formula
                     c.alignment = a
                     cells.append(c)
                 ws.append(cells)
@@ -561,22 +859,53 @@ def _about_rows(results: Sequence[Path], facts: List[Tuple[str, object]]) -> Lis
 
 def build_masters(results: Sequence[Path], out_dir: Path, min_confidence: str = "low",
                   theme_filter: str = "source", keep_menu_themes: bool = False,
-                  stats: Optional[dict] = None) -> List[Path]:
+                  stats: Optional[dict] = None, keep_ner_only: bool = False) -> List[Path]:
     """Write master_network and master_themes (.csv and .xlsx) to out_dir and
     return their paths. `stats` (if given) receives the counts of what the theme
-    filter kept and left out."""
+    filter kept and left out. Names found only by NER with no other evidence (see
+    OrgEvidence) go to the ner_only_candidates sheet unless keep_ner_only."""
     out_dir.mkdir(parents=True, exist_ok=True)
     results = [Path(r) for r in results]
     tf = ThemeFilter(theme_filter, results)
     if tf.old_folders and theme_filter != "none":
         log.info("No sources.csv in %s (made by an older version): for the theme filter a source "
                  "is a whole page or PDF, not an agenda entry", ", ".join(tf.old_folders))
+    if tf.from_mentions and theme_filter != "none":
+        log.warning("theme_hits.csv not found in %s: the theme filter uses the page theme counts of "
+                    "mentions.csv instead (they may include menus and footers), and master_themes has "
+                    "no rows from this folder. Use the whole results folder for full theme rows.",
+                    ", ".join(tf.from_mentions))
     excluded: Dict[str, dict] = {}
     before: Dict[tuple, list] = {}
     kept_net = network_rows(results, min_confidence, tf if theme_filter != "none" else None,
                             excluded, before)
+    evidence = OrgEvidence(results)
+    n_split = split_coordinated(kept_net, evidence)
+    if n_split:
+        kept_net.sort(key=_network_order)
+        log.info("Split %d network %s naming several organisations at once (\"Exxon & Shell\") "
+                 "into one row per organisation; found_by says 'split from ...'", n_split,
+                 "row" if n_split == 1 else "rows")
     net = [r for r in kept_net if not r["only_in_menus_or_footers"]]
     furniture = [r for r in kept_net if r["only_in_menus_or_footers"]]
+    tf_net = list(net)   # what the theme filter kept, before the NER-only candidates go
+    candidates: List[dict] = []
+    if not keep_ner_only:
+        for r in net:
+            why = evidence.why_not(r.get("org_key") or "")
+            if why:
+                k = r.get("org_key") or ""
+                candidates.append({**r, "corpus_sources": len(evidence.sources.get(k, set()) - {""}),
+                                   "corpus_sites": len(evidence.sites.get(k, set()) - {""}),
+                                   "why_candidate": why})
+        if candidates:
+            cand_ids = {id(r) for r in net if evidence.why_not(r.get("org_key") or "")}
+            net = [r for r in net if id(r) not in cand_ids]
+            log.info("%d network rows (%d organisations) found only by NER with no other evidence "
+                     "are in the ner_only_candidates sheet of master_network, not in the network "
+                     "(make_master.py --keep-ner-only keeps them; a --watchlist entry confirms a name)",
+                     len(candidates), len({r["organisation"] for r in candidates}))
+    kept_net = net + furniture
     before_content = [b for b in before.values() if not b[0]]
     del before
     before_ids = {b[2] for b in before_content if not b[3]}
@@ -593,10 +922,10 @@ def build_masters(results: Sequence[Path], out_dir: Path, min_confidence: str = 
 
     # What the theme filter kept, for the log and the about sheet.
     n = {
-        "network_rows": (len(net), len(before_content)),
-        "organisations": (len({r["organisation"] for r in net}), len({b[1] for b in before_content})),
+        "network_rows": (len(tf_net), len(before_content)),
+        "organisations": (len({r["organisation"] for r in tf_net}), len({b[1] for b in before_content})),
         "events": (len({_event_id({"key": r.get("event_key"), "name": r["event"], "link": r["event_link"]})
-                        for r in net if not r["event"].startswith("(")}), len(before_ids)),
+                        for r in tf_net if not r["event"].startswith("(")}), len(before_ids)),
     }
     left_out_sources = len({x["source_unit"] for x in excl})
     if theme_filter != "none":
@@ -606,9 +935,14 @@ def build_masters(results: Sequence[Path], out_dir: Path, min_confidence: str = 
                  theme_filter, *n["network_rows"], *n["organisations"], *n["events"], left_out_sources,
                  "source" if left_out_sources == 1 else "sources",
                  "was" if left_out_sources == 1 else "were")
-        if before_content and not net:
-            log.warning("The theme filter left master_network empty: no source has a theme hit. "
-                        "Check the --themes file.")
+        if before_content and not tf_net:
+            if tf.no_theme_file:
+                log.warning("theme_hits.csv not found in %s: the theme hits are unknown, so the theme "
+                            "filter left master_network empty. Use the whole results folder, or "
+                            "--theme-filter none", ", ".join(tf.no_theme_file))
+            else:
+                log.warning("The theme filter left master_network empty: no source has a theme hit. "
+                            "Check the --themes file.")
     if menu_themes:
         log.info("%d theme rows from menus, sidebars, site furniture and short labels are in the "
                  "menus_and_sidebars sheet of master_themes (--keep-menu-themes keeps them in the main "
@@ -616,7 +950,10 @@ def build_masters(results: Sequence[Path], out_dir: Path, min_confidence: str = 
     summary = {"theme_filter": theme_filter, "keep_menu_themes": keep_menu_themes,
                "min_confidence": min_confidence,
                **{f"{k}_kept": a for k, (a, _) in n.items()}, **{f"{k}_before_filter": b for k, (_, b) in n.items()},
-               "sources_left_out": left_out_sources, "theme_rows": len(themes),
+               "sources_left_out": left_out_sources,
+               "keep_ner_only": keep_ner_only, "ner_only_candidate_rows": len(candidates),
+               "ner_only_candidate_organisations": len({r["organisation"] for r in candidates}),
+               "coordinated_names_split": n_split, "theme_rows": len(themes),
                "theme_rows_in_menus_and_sidebars": len(menu_themes), "all_events": len(all_events),
                "sources": len(sources)}
     if stats is not None:
@@ -633,6 +970,7 @@ def build_masters(results: Sequence[Path], out_dir: Path, min_confidence: str = 
                                                       ("events", events, EVENT_FIELDS),
                                                       ("all_events", all_events, ALL_EVENT_FIELDS),
                                                       ("menus_and_footers", furniture, NETWORK_FIELDS),
+                                                      ("ner_only_candidates", candidates, CANDIDATE_FIELDS),
                                                       ("sources", sources, SOURCE_FIELDS),
                                                       ("excluded_sources", excl, EXCLUDED_FIELDS),
                                                       ("about", about, ["item", "value"])]):
@@ -653,8 +991,11 @@ def main(argv: Optional[List[str]] = None) -> None:
     ap.add_argument("--theme-filter", choices=THEME_FILTERS, default="source",
                     help="Keep organisations and events only from sources with a theme hit: the "
                          "source itself ('source': page, PDF or agenda entry), any page of its "
-                         "website ('site'), any source of the same event ('event'), or keep "
-                         "everything ('none')")
+                         "website ('site'; agenda entries are still judged one by one), any source "
+                         "of the same event ('event'), or keep everything ('none')")
+    ap.add_argument("--keep-ner-only", action="store_true",
+                    help="Keep organisations found only by NER (spaCy) with no other evidence in the "
+                         "network; by default they are listed in the ner_only_candidates sheet")
     ap.add_argument("--keep-menu-themes", action="store_true",
                     help="Keep theme terms found in menus, sidebars and site furniture in the main "
                          "sheet of master_themes")
@@ -674,7 +1015,7 @@ def main(argv: Optional[List[str]] = None) -> None:
     if missing:
         ap.error(f"no mentions.csv in {', '.join(missing)} (not a site_actors.py result folder?)")
     for p in build_masters(args.results, args.output_dir, args.min_confidence, args.theme_filter,
-                           args.keep_menu_themes):
+                           args.keep_menu_themes, keep_ner_only=args.keep_ner_only):
         print(p)
 
 

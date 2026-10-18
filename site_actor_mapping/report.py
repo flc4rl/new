@@ -82,7 +82,8 @@ mark.t{background:var(--theme)}
 table{border-collapse:collapse;font-size:13px}td,th{padding:3px 10px 3px 0;text-align:left}
 .empty{color:var(--muted);padding:20px}
 </style></head><body>
-<header><h1>{{TITLE}}</h1><div class="sub" id="stats"></div></header>
+<header><h1>{{TITLE}}</h1><div class="sub" id="stats"></div>
+<div class="sub">This report lists every organisation found. The theme filter (inclusion criterion) applies only to master_network, so it may hold fewer.</div></header>
 <div class="wrap">
  <div class="panel">
   <div class="filters">

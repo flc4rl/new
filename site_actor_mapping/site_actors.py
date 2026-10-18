@@ -32,9 +32,12 @@ import inspect
 import json
 import time
 import logging
+import os
+import pickle
 import platform
 import re
 import sys
+import tempfile
 from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Set, Tuple
@@ -48,14 +51,30 @@ from extract import (
 )
 from events import EventIndex, EventRef
 from linked_sites import (PLATFORM_HOSTS, Site, SiteRegistry, Via, collect_targets, crawl_linked,
-                          filter_targets, host_matches)
+                          filter_targets, host_matches, platform_site_key)
 from make_master import THEME_FILTERS, build_masters
 from seed_pdfs import PdfLink, entries_to_json, extract_entries, pdf_display, pdf_name
 from report import write_report
 
+try:
+    from report import MAX_CONTEXTS_PER_ORG
+except ImportError:      # pragma: no cover - older report.py
+    MAX_CONTEXTS_PER_ORG = 300
+# Columns of a mention row the HTML report reads.
+REPORT_FIELDS = ("org_key", "site", "site_role", "repeat_context", "surface_form", "context", "url",
+                 "page_title", "page_date", "methods", "boilerplate", "region", "embedded_in",
+                 "via_event", "calendar_month", "paragraph_themes", "context_theme_terms",
+                 "co_mentioned")
+
 log = logging.getLogger("site_actors")
 HERE = Path(__file__).resolve().parent
 FURNITURE_REGIONS = ("nav", "header", "footer", "aside")
+# Columns of a mention row kept in memory until the CSV files are written (merging
+# names, the organisation table, the co-occurrence edges and the report's contexts
+# need them); the full rows wait in a temporary file (finding 57).
+LIGHT_MENTION_FIELDS = ("org_key", "methods", "surface_form", "org_type", "repeat_context",
+                        "boilerplate", "paragraph_themes", "url", "site", "site_role",
+                        "link_domain", "co_mentioned_keys", "_block", "_unit")
 
 
 def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
@@ -252,6 +271,36 @@ def write_run_info(out: Path, info: dict) -> None:
         log.warning("Could not write run_info.json: %s", exc)
 
 
+def write_text_atomic(path: Path, text: str) -> None:
+    """Write through a temporary file, so an interrupted save never leaves half a file."""
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(text, encoding="utf-8")
+    os.replace(tmp, path)
+
+
+class RowSpill:
+    """Output rows written to a temporary file as they are produced and read back once,
+    in order, when the CSV files are written: memory no longer grows with the number of
+    mentions and theme hits of a long run (finding 57)."""
+
+    def __init__(self, folder: Path):
+        self._fh = tempfile.TemporaryFile(dir=folder, prefix=".rows-", suffix=".tmp")
+        self.n = 0
+
+    def add(self, row: dict) -> None:
+        pickle.dump(row, self._fh, protocol=pickle.HIGHEST_PROTOCOL)
+        self.n += 1
+
+    def __iter__(self):
+        self._fh.flush()
+        self._fh.seek(0)
+        for _ in range(self.n):
+            yield pickle.load(self._fh)
+
+    def close(self) -> None:
+        self._fh.close()
+
+
 def fmt_duration(seconds: float) -> str:
     seconds = int(max(0, seconds))
     if seconds < 90:
@@ -333,7 +382,8 @@ def load_pages(cache_pages: Iterable[CachedPage], registry: SiteRegistry, strip_
                seed_pdfs: Dict[str, dict], in_window=None, total: int = 0,
                pages: Optional[Dict[str, ParsedPage]] = None,
                pdf_rows: Optional[List[dict]] = None,
-               platform_hosts: Optional[Set[str]] = None) -> dict:
+               platform_hosts: Optional[Set[str]] = None,
+               seed_urls: Optional[Set[str]] = None) -> dict:
     """Parse cached pages that belong to a registered site, plus PDFs found on
     them (wherever hosted), tagging each with its site.
 
@@ -368,6 +418,8 @@ def load_pages(cache_pages: Iterable[CachedPage], registry: SiteRegistry, strip_
             continue
         if in_window is not None and not in_window(cp):
             continue        # a calendar month outside --calendar-from/--calendar-to
+        if cp.kind == "seed" and seed_urls is not None and cp.url not in seed_urls:
+            continue        # the cached text of a seed PDF not used in this run
         meta[cp.url] = (cp.final_url, cp.is_pdf, cp.kind, cp.referrer)
         if cp.is_pdf:
             site = (registry.site_of(cp.url) or registry.site_of(cp.final_url)
@@ -467,12 +519,17 @@ def _date_span(text: str) -> Tuple[Optional[dt.date], Optional[dt.date]]:
         try:
             if len(s) == 7:
                 y, m = int(s[:4]), int(s[5:7])
+                if not 1800 <= y <= 2200:
+                    return None
                 if not last:
                     return dt.date(y, m, 1)
                 return dt.date(y + (m == 12), m % 12 + 1, 1) - dt.timedelta(days=1)
-            return dt.date.fromisoformat(s)
+            d = dt.date.fromisoformat(s)
         except ValueError:
             return None
+        # "9999-12-31" (no end date in some event plugins) or "0001-01-01": unknown, and
+        # the six-month margins of timing() would overflow
+        return d if 1800 <= d.year <= 2200 else None
     return day(found[0], False), day(found[-1], True)
 
 
@@ -537,7 +594,7 @@ def planned_sites(targets: Dict[str, List[Via]], platform_hosts: Set[str], statu
     for host in sorted(by_host):
         urls = sorted(by_host[host])
         if host_matches(host, platform_hosts):
-            sites += [Site(f"{host}{urlparse(u).path}".rstrip("/"), "linked", [u], True, targets[u],
+            sites += [Site(platform_site_key(host, u), "linked", [u], True, targets[u],
                            status=status) for u in urls]
         else:
             sites.append(Site(host, "linked", urls, False, [v for u in urls for v in targets[u]],
@@ -617,6 +674,78 @@ def assign_entry_keys(seed_pdfs: Dict[str, dict], skip_hosts: Set[str],
     return entry_keys, entry_links
 
 
+QUOTE_HINT = ("Put a path that contains spaces, '|', brackets or accents in quotes, for example "
+              "--seed-pdf \"$HOME/Downloads/Agenda militant | Activist agenda [Europe].pdf\" "
+              "(or type --seed-pdf and a space, then drag the file from Finder into the Terminal "
+              "window). Write --seed-pdf before each PDF.")
+_HOST = re.compile(r"^(?:localhost|\d{1,3}(?:\.\d{1,3}){3}|\[[0-9a-f:]+\]|"
+                   r"(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+[a-z][a-z0-9-]*[a-z0-9])(?::\d+)?$", re.I)
+
+
+def check_inputs(args: argparse.Namespace) -> List[str]:
+    """Problems with the input files, start URLs and months, found before anything is
+    crawled (an hours-long run should not stop, or quietly go without a seed PDF, only
+    at the end). Also points --themes, --watchlist and --stoplist given as a bare name
+    at the copy next to this script when there is none in the current folder."""
+    from calendar_sweep import parse_month
+    errors: List[str] = []
+    path_like = False
+    for src in args.seed_pdf:
+        if re.match(r"https?://", src, re.I):
+            if not _HOST.match(urlparse(src).netloc):
+                errors.append(f"--seed-pdf {src!r}: not a valid web address")
+            continue
+        p = Path(src).expanduser()
+        if p.is_dir():
+            errors.append(f"--seed-pdf {src!r} is a folder, not a PDF file")
+        elif not p.is_file():
+            errors.append(f"Seed PDF not found: {src!r} (looked for {p.resolve()})")
+            path_like = True
+        elif p.suffix.lower() != ".pdf":
+            log.warning("--seed-pdf %s does not end in .pdf; it is read as a PDF anyway", src)
+    for u in args.start_urls:
+        if "://" in u:
+            scheme = u.split("://", 1)[0]
+            host = urlparse(u).netloc
+            if scheme.lower() not in ("http", "https"):
+                errors.append(f"Start URL {u!r}: only http:// and https:// addresses can be crawled")
+            elif not _HOST.match(host):
+                errors.append(f"Start URL {u!r}: {host!r} is not a valid host name")
+            continue
+        host = u.split("/", 1)[0]
+        if u.lower().endswith(".pdf") or u.startswith(("/", "~", "./", "../")) or "\\" in u:
+            errors.append(f"Start URL {u!r} looks like (part of) a file path, not a website: if it "
+                          "is a seed PDF, its path was probably split at a space")
+            path_like = True
+        elif not _HOST.match(host) or ("." not in host and not host.lower().startswith("localhost")):
+            errors.append(f"Start URL {u!r} is not a web address (expected e.g. "
+                          "https://themovementhub.org/events/); a word left over from a path "
+                          "with spaces?")
+            path_like = True
+    if path_like:
+        errors.append(QUOTE_HINT)
+    try:
+        lo, hi = parse_month(args.calendar_from), parse_month(args.calendar_to)
+        if lo and hi and lo > hi:
+            errors.append(f"--calendar-from {args.calendar_from} is after --calendar-to "
+                          f"{args.calendar_to}: no calendar month would be read")
+    except ValueError as exc:
+        errors.append(f"--calendar-from / --calendar-to: {exc} (e.g. 2024-01)")
+    for opt in ("themes", "watchlist", "stoplist"):
+        p = getattr(args, opt, None)
+        if p is None:
+            continue
+        p = Path(p).expanduser()
+        if p.is_file():
+            setattr(args, opt, p)
+        elif not p.is_absolute() and (HERE / p).is_file():
+            log.info("--%s %s: using %s (the file next to site_actors.py)", opt, p, HERE / p)
+            setattr(args, opt, HERE / p)
+        else:
+            errors.append(f"--{opt} file not found: {str(p)!r}")
+    return errors
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     args = parse_args(argv)
     out = args.output_dir
@@ -630,6 +759,12 @@ def main(argv: Optional[List[str]] = None) -> int:
             args.seed_pdf.append(u)
             log.warning("%s is a PDF file, not a website: read as a seed PDF (write --seed-pdf "
                         "before each PDF)", u)
+    errors = check_inputs(args)
+    if errors:
+        for e in errors:
+            log.error("%s", e)
+        log.error("Nothing was crawled or changed. Correct the command and run it again.")
+        return 2
     info = {"tool": "site_actors.py", "started_at": now_iso(), "status": "running",
             "command": sys.argv if argv is None else ["site_actors.py"] + list(argv),
             "cwd": str(Path.cwd()), "arguments": {k: str(v) if isinstance(v, Path) else v
@@ -650,8 +785,10 @@ def main(argv: Optional[List[str]] = None) -> int:
         info["status"] = f"failed: {type(exc).__name__}: {exc}"
         raise
     finally:
-        info["finished_at"] = now_iso()
-        info["duration"] = fmt_duration(time.monotonic() - t0)
+        # run() sets both just before it writes the master files (whose 'about' sheet
+        # records them); otherwise they are set here
+        info.setdefault("finished_at", now_iso())
+        info.setdefault("duration", fmt_duration(time.monotonic() - t0))
         write_run_info(out, info)
 
 
@@ -692,12 +829,24 @@ def run(args: argparse.Namespace, out: Path, info: dict) -> int:
             log.warning("%s: no effect with --no-crawl (no website is crawled; the sites in "
                         "sites.json are analysed as they were cached)", ", ".join(changed))
     if start_urls and not args.no_crawl:
+        main_crawler = Crawler(base_cfg, cache)
         try:
-            Crawler(base_cfg, cache).crawl()
+            n_main = main_crawler.crawl()
         except Exception as exc:  # noqa: BLE001 - analyse what was cached so far (finding 53)
+            n_main = -1
             log.error("Main-site crawl stopped by an error (%s: %s); continuing with the pages "
                       "cached so far. Run the same command again later to resume.",
                       type(exc).__name__, exc)
+        if n_main == 0:
+            # Not one page of the start URL(s) could be read: stop before the linked
+            # sites are crawled for hours without it (finding 64).
+            from linked_sites import _why_unreachable
+            why = _why_unreachable(main_crawler) or "no page could be read"
+            log.error("The start URL%s %s could not be read (%s). Check the address and the "
+                      "internet connection, then run the command again (pages cached so far "
+                      "are kept). Nothing else was crawled.", "" if len(start_urls) == 1 else "s",
+                      ", ".join(start_urls), why)
+            return 2
 
     hosts = {registered_host(urlparse(u).netloc) for u in start_urls}
     main_sites = [Site(h, "main", [u for u in start_urls if registered_host(urlparse(u).netloc) == h])
@@ -709,15 +858,23 @@ def run(args: argparse.Namespace, out: Path, info: dict) -> int:
     stored_links: List[PdfLink] = []
     stored_pdfs: Dict[str, dict] = {}
     if seed_file.exists():
-        data = json.loads(seed_file.read_text(encoding="utf-8"))
-        if isinstance(data, list):            # older runs: links only
-            data = {"links": data, "pdfs": {}}
-        stored_links = [PdfLink(**d) for d in data["links"]]
-        stored_pdfs = data.get("pdfs", {})
+        try:
+            data = json.loads(seed_file.read_text(encoding="utf-8"))
+            if isinstance(data, list):            # older runs: links only
+                data = {"links": data, "pdfs": {}}
+            stored_links = [PdfLink(**d) for d in data["links"]]
+            stored_pdfs = dict(data.get("pdfs", {}))
+        except (OSError, ValueError, TypeError, KeyError, AttributeError) as exc:
+            log.warning("seed_links.json could not be read (%s: %s): only the seed PDFs given now "
+                        "are used", type(exc).__name__, exc)
+            stored_links, stored_pdfs = [], {}
     read_now: Dict[str, Tuple[list, dict]] = {}
+    given_local: Set[str] = set()
     for src in args.seed_pdf:
         is_url = bool(re.match(r"https?://", src))
         pdf_url = src if is_url else Path(src).expanduser().resolve().as_uri()
+        if not is_url:
+            given_local.add(pdf_url)
         if args.no_crawl and is_url:
             if pdf_url not in stored_pdfs and not any(ln.pdf == pdf_url for ln in stored_links):
                 log.warning("Seed PDF %s is not in seed_links.json and is not downloaded with "
@@ -738,6 +895,26 @@ def run(args: argparse.Namespace, out: Path, info: dict) -> int:
                              is_pdf=True, title=pdf_name(pdf_url), kind="seed"))
     if args.seed_pdf and not args.no_crawl:
         stored_links, stored_pdfs = [], {}    # a crawl uses exactly the seed PDFs given
+    elif given_local:
+        # --no-crawl with local seed PDFs: those given are the complete set of local seed
+        # PDFs, as in a crawl. A stored copy under another path (the file was moved,
+        # renamed or copied) would otherwise be analysed a second time. Seed PDFs given
+        # as URLs are not downloaded with --no-crawl, so the stored ones are kept.
+        old_local = [u for u in dict.fromkeys(list(stored_pdfs) + [ln.pdf for ln in stored_links])
+                     if u.startswith("file:") and u not in given_local]
+        if old_local:
+            names_now = {pdf_name(u) for u in given_local}
+            for u in old_local:
+                if pdf_name(u) in names_now:
+                    log.info("Seed PDF %s: the copy given now replaces the one read from another "
+                             "folder before", pdf_name(u))
+                else:
+                    log.info("Seed PDF %s of the earlier run (read from another path) is not "
+                             "used: with --seed-pdf, only the PDFs given are read (a moved or "
+                             "renamed copy given now replaces it)", pdf_name(u))
+            drop = set(old_local)
+            stored_pdfs = {u: d for u, d in stored_pdfs.items() if u not in drop}
+            stored_links = [ln for ln in stored_links if ln.pdf not in drop]
     for ln in stored_links:
         if ln.pdf not in read_now:
             seed_links.append(ln)
@@ -748,8 +925,8 @@ def run(args: argparse.Namespace, out: Path, info: dict) -> int:
         seed_links += links
         seed_pdfs[pdf_url] = d
     if read_now:
-        seed_file.write_text(json.dumps({"links": [ln.__dict__ for ln in seed_links], "pdfs": seed_pdfs},
-                                        indent=1, ensure_ascii=False), encoding="utf-8")
+        write_text_atomic(seed_file, json.dumps({"links": [ln.__dict__ for ln in seed_links],
+                                                 "pdfs": seed_pdfs}, indent=1, ensure_ascii=False))
         if args.no_crawl:
             log.info("Seed PDFs read again from disk: %s", ", ".join(pdf_name(u) for u in read_now))
 
@@ -762,21 +939,25 @@ def run(args: argparse.Namespace, out: Path, info: dict) -> int:
     seed_sites = [Site(f"pdf:{pdf_name(u)}", "seed", [u], platform=True)
                   for u in dict.fromkeys([ln.pdf for ln in seed_links] + list(seed_pdfs))]
 
+    active_seeds = {u for s in seed_sites for u in s.start_urls}
     registry = SiteRegistry(main_sites + seed_sites, args.include_subdomains)
     registry_rebuilt = False
     if args.no_crawl:
         loaded = SiteRegistry.load(out / "sites.json", args.include_subdomains)
         if loaded is None:
-            log.warning("sites.json is missing (the linked-site crawl was interrupted, or this "
+            log.warning("sites.json is missing or unreadable (the linked-site crawl was interrupted, or this "
                         "folder was made by an older version): which cached pages belong to "
                         "which linked website is rebuilt from the cached links")
         else:
             # Seed sites of older runs were keyed by the percent-encoded file name.
             sites = [s for s in loaded.sites if s.role != "seed"]
-            known = {u for s in loaded.sites if s.role == "seed" for u in s.start_urls}
+            # only the seed PDFs in use (not a copy of one under its old path)
+            old_seeds = [s for s in loaded.sites if s.role == "seed"
+                         and (not s.start_urls or s.start_urls[0] in active_seeds)]
+            known = {u for s in old_seeds for u in s.start_urls}
             sites += [Site(f"pdf:{pdf_name(s.start_urls[0])}" if s.start_urls else s.key, "seed",
                            s.start_urls, platform=True, status=s.status)
-                      for s in loaded.sites if s.role == "seed"]
+                      for s in old_seeds]
             sites += [s for s in seed_sites if s.start_urls[0] not in known]
             registry = SiteRegistry(sites, args.include_subdomains)
     elif args.follow_links != "none" or seed_links:
@@ -819,7 +1000,7 @@ def run(args: argparse.Namespace, out: Path, info: dict) -> int:
     n_cached = sum(1 for _ in cache.root.glob("*.json.gz"))
     log.info("Reading %d cached pages ...", n_cached)
     loaded_pages = load_pages(cache, registry, args.strip_regions, seed_pdfs, in_window, n_cached,
-                              platform_hosts=platform_hosts)
+                              platform_hosts=platform_hosts, seed_urls=active_seeds)
     pages_by_url, pdf_rows, meta = loaded_pages["pages"], loaded_pages["pdf_rows"], loaded_pages["meta"]
     orphans, moved = loaded_pages["orphans"], loaded_pages["moved"]
     if args.no_crawl and orphans:
@@ -849,7 +1030,8 @@ def run(args: argparse.Namespace, out: Path, info: dict) -> int:
     if registry_rebuilt or moved:
         retry = [cp for cp in (cache.get(u) for u in orphans) if cp is not None]
         again = load_pages(retry, registry, args.strip_regions, seed_pdfs, in_window,
-                           pages=pages_by_url, pdf_rows=pdf_rows, platform_hosts=platform_hosts)
+                           pages=pages_by_url, pdf_rows=pdf_rows, platform_hosts=platform_hosts,
+                           seed_urls=active_seeds)
         meta.update(again["meta"])
         orphans = again["orphans"]
         if args.no_crawl:
@@ -955,6 +1137,17 @@ def run(args: argparse.Namespace, out: Path, info: dict) -> int:
     log.info("Events found: %d", len(index.events))
     by_url = {p.url: p for p in pages}
     sites_by_key = {s.key: s for s in registry.sites}
+
+    def site_of_page(page) -> Optional[Site]:
+        """The page's site, found by URL as load_pages found it: two single-page
+        platform sites can share a key in folders of older versions (finding: query
+        strings), and the key alone would then give the other link's events."""
+        urls = [page.url, *sorted(getattr(page, "requested_urls", ()) or ()), page.referrer]
+        for u in urls:
+            s = registry.site_of(u) if u else None
+            if s is not None and s.key == page.site:
+                return s
+        return sites_by_key.get(page.site) or registry.site_of(page.url)
     page_event_cache: Dict[str, List[EventRef]] = {}
     other_pages_of: Dict[str, str] = {}
     editions_of: Dict[str, str] = {}
@@ -990,7 +1183,7 @@ def run(args: argparse.Namespace, out: Path, info: dict) -> int:
             nurls = urls | {normalise_url(u) for u in urls if normalise_url(u)}
             # The page is an event page itself (also when reached through a redirect).
             refs = [index.ref(k) for k in sorted(u for u in nurls if u in index.events)]
-            site = sites_by_key.get(page.site) or registry.site_of(page.url)
+            site = site_of_page(page)
             linked = site is not None and site.role == "linked"
             if linked:
                 exact = [v for v in site.via if v.target in nurls or normalise_url(v.target) in nurls]
@@ -1177,8 +1370,11 @@ def run(args: argparse.Namespace, out: Path, info: dict) -> int:
                     acronyms.setdefault(canonical_key(acr), lk)
                     acr_display[lk][acr] += 1
 
+    # Full mention and theme rows go to temporary files as they are produced; only the
+    # light columns needed to merge names and count mentions stay in memory.
     mention_rows: List[dict] = []
-    theme_rows: List[dict] = []
+    mention_spill = RowSpill(out)
+    theme_spill = RowSpill(out)
     page_rows: List[dict] = []
     seen_theme_sentences: Dict[tuple, str] = {}
     theme_terms: Dict[str, Counter] = defaultdict(Counter)
@@ -1196,6 +1392,7 @@ def run(args: argparse.Namespace, out: Path, info: dict) -> int:
         return {"key": pdf_display(r.key), "name": r.name, "date": r.date, "link": pdf_display(r.link),
                 "layer": layer, "content_vs_event": cve, "years_after_event": years}
 
+    repeated_theme_hits = 0     # theme hits in main-content passages repeated across a site
     log.info("Analysing %d pages ...", len(pages))
     prog = Progress("pages analysed", len(pages))
     for pi, page in enumerate(pages, 1):
@@ -1231,9 +1428,12 @@ def run(args: argparse.Namespace, out: Path, info: dict) -> int:
         # Per paragraph: its source unit, and whether it is site furniture.
         block_unit = [unit_of(page, bi, block_refs[bi]) for bi in range(len(page.blocks))]
         block_bp = [(page.site, b.hash) in boilerplate if b.text else True for b in page.blocks]
-        block_menu = [b.region in FURNITURE_REGIONS or bp
+        # Only page furniture (nav, header, footer, aside) and short labels are menus. A
+        # passage repeated in the main content of many pages of a site stays a theme hit
+        # of every page carrying it (flagged boilerplate, later copies duplicate_of).
+        block_menu = [b.region in FURNITURE_REGIONS
                       or (not on_listing and 0 < len(b.text.split()) <= 4)   # a label or heading
-                      for b, bp in zip(page.blocks, block_bp)]
+                      for b in page.blocks]
         words_of = [len(b.text.split()) for b in page.blocks]
         for bi, u in enumerate(block_unit):
             row = units.get(u)
@@ -1258,6 +1458,8 @@ def run(args: argparse.Namespace, out: Path, info: dict) -> int:
                     row["menu_theme_hits"] += len(v)
                 else:
                     row["theme_hits"] += len(v)
+                    if block_bp[bi]:
+                        repeated_theme_hits += len(v)
                     row[f"theme:{t}"] += len(v)
                     for r in block_refs[bi]:
                         if r.key:
@@ -1304,12 +1506,14 @@ def run(args: argparse.Namespace, out: Path, info: dict) -> int:
                     before = " ".join(sent_text(i) for i in same[max(0, pos - 2):pos])
                     after = " ".join(sent_text(i) for i in same[pos + 1:pos + 3])
                     sentence = sent_text(k)
-                    dup_key = (theme, term.lower(), sentence.strip().casefold())
+                    # keyed by a digest, not the sentence itself (memory, finding 57)
+                    dup_key = (theme, term.lower(), hashlib.blake2b(
+                        sentence.strip().casefold().encode("utf-8"), digest_size=16).digest())
                     first_seen = seen_theme_sentences.setdefault(dup_key, page.url)
                     duplicate = (pdf_display(first_seen) if first_seen != page.url
                                  else "same_page" if dup_key in page_seen else "")
                     page_seen.add(dup_key)
-                    theme_rows.append({
+                    theme_spill.add({
                         "theme": theme, "term": term,
                         "event": _join(e.name for e in evs),
                         "event_date": _join(e.date for e in evs),
@@ -1332,6 +1536,8 @@ def run(args: argparse.Namespace, out: Path, info: dict) -> int:
                     })
 
         n_mentions = 0
+        pthemes = themes_str(page_hits)
+        page_url_shown = pdf_display(page.url)
         for bi, (block, doc, bhits) in enumerate(zip(page.blocks, docs, block_hits)):
             mentions = extractor.extract(block.text, block.links, doc)
             if not mentions:
@@ -1351,6 +1557,7 @@ def run(args: argparse.Namespace, out: Path, info: dict) -> int:
                 if not mentions:
                     continue
             is_bp = block_bp[bi]
+            bthemes = themes_str(bhits)
             sents = split_sentences(block.text) if block.text else []
             keys_here = sorted({m.key for m in mentions})
             evj = refs_json(evs)
@@ -1383,7 +1590,7 @@ def run(args: argparse.Namespace, out: Path, info: dict) -> int:
                     if e.key:
                         ev_mentions[e.key] += 1
                 flags = [in_title(m.key, e) for e in evs]
-                mention_rows.append({
+                row = {
                     "event": _join(e.name for e in evs),
                     "event_date": _join(e.date for e in evs),
                     "event_link": _join(pdf_display(e.link) for e in evs),
@@ -1404,7 +1611,7 @@ def run(args: argparse.Namespace, out: Path, info: dict) -> int:
                     "site_role": page.site_role,
                     "via_event": page.via_event,
                     "calendar_month": page.label if page.kind == "calendar" else "",
-                    "url": pdf_display(page.url),
+                    "url": page_url_shown,
                     "source_unit": pdf_display(unit),
                     "page_title": page.title,
                     "page_date": pdate,
@@ -1419,11 +1626,16 @@ def run(args: argparse.Namespace, out: Path, info: dict) -> int:
                     "paragraph": block.text[:3000],
                     "context_themes": themes_str(ctx_hits),
                     "context_theme_terms": "; ".join(sorted({x[2].lower() for v in ctx_hits.values() for x in v})),
-                    "paragraph_themes": themes_str(bhits),
-                    "page_themes": themes_str(page_hits),
+                    "paragraph_themes": bthemes,
+                    "page_themes": pthemes,
                     "co_mentioned_keys": [k for k in keys_here if k != m.key],
                     "_unit": unit,
-                })
+                }
+                mention_spill.add(row)
+                light = {k: row[k] for k in LIGHT_MENTION_FIELDS}
+                light["_ev_keys"] = [e.key for e in evs if e.key]
+                light["_page"] = len(page_rows)      # this page's row in pages.csv
+                mention_rows.append(light)
         page_keys = list(dict.fromkeys(r.key for refs in block_refs for r in refs if r.key))
         page_rows.append({
             "site": page.site, "site_role": page.site_role, "via_event": page.via_event,
@@ -1438,7 +1650,13 @@ def run(args: argparse.Namespace, out: Path, info: dict) -> int:
             **{f"theme:{t}": page_hits.get(t, 0) for t in themes.names},
         })
         prog.tick(pi)
+        page.blocks = []     # the page's text is no longer needed (memory, finding 57)
 
+    if repeated_theme_hits:
+        log.info("%d theme hits are in main-content passages repeated on many pages of their site: "
+                 "they count as theme hits of every page carrying them (boilerplate=True in "
+                 "theme_hits.csv; menus, headers, footers and sidebars are counted apart)",
+                 repeated_theme_hits)
     log.info("Page languages: %s", ", ".join(f"{k} {n}" for k, n in langs.most_common()))
     extractor.log_model_summary(log)    # missing, broken (spacy validate) and smaller models
     log.info("Merging organisation names ...")
@@ -1449,28 +1667,42 @@ def run(args: argparse.Namespace, out: Path, info: dict) -> int:
     rejected = {k for k, ms in methods_by_key.items() if not extractor.vet(k, ms)}
     if rejected:
         log.info("Dropped %d names spaCy mostly labels as places, people, laws etc.", len(rejected))
-    mention_rows = [r for r in mention_rows if r["org_key"] not in rejected]
-    for r in mention_rows:
+    vetted = [r for r in mention_rows if r["org_key"] not in rejected]
+    for r in vetted:
         r["co_mentioned_keys"] = [k for k in r["co_mentioned_keys"] if k not in rejected]
 
-    orgs = aggregate(mention_rows, extractor, acr_display, themes.names, args.min_mentions)
+    orgs = aggregate(vetted, extractor, acr_display, themes.names, args.min_mentions)
+    del vetted
     display = {o["org_key"]: o["organisation"] for o in orgs}
     for r in mention_rows:
+        if r["org_key"] in rejected:
+            r["organisation"], r["co_mentioned"] = "", ""
+            r.pop("co_mentioned_keys", None)
+            continue
         r["organisation"] = display.get(r["org_key"], "")
         r["co_mentioned"] = "; ".join(display.get(k, k) for k in r.pop("co_mentioned_keys"))
     kept = [r for r in mention_rows if r["organisation"]]
-    del mention_rows
     orgs_in_block: Dict[tuple, Dict[str, str]] = defaultdict(dict)
     for r in kept:
         orgs_in_block[r["_block"]].setdefault(r["org_key"], r["organisation"])
     themed_units = {u for u, row in units.items() if row["theme_hits"]}
-    for r in theme_rows:
-        here = orgs_in_block.get(r.pop("_block"), {})
-        r["organisations_in_paragraph"] = "; ".join(here.values())
-        r["organisations_in_paragraph_keys"] = "; ".join(here.keys())
     for r in kept:
-        r.pop("_block", None)
-        r["source_has_theme"] = r.pop("_unit") in themed_units
+        r["source_has_theme"] = r["_unit"] in themed_units
+    # Mention counts of sources, events and pages from the names finally kept (names
+    # dropped above are in no output), so sources.csv, events.csv and the master
+    # files add up.
+    for row in units.values():
+        row["org_mentions"] = 0
+    ev_mentions.clear()
+    page_mentions: Counter = Counter()
+    for r in kept:
+        units[r["_unit"]]["org_mentions"] += 1
+        for k in r["_ev_keys"]:
+            ev_mentions[k] += 1
+        page_mentions[r["_page"]] += 1
+    for i, row in enumerate(page_rows):
+        row["org_mentions"] = page_mentions.get(i, 0)
+    del page_mentions
     theme_fields = ["theme", "term", "event", "event_date", "event_link", "event_key", "n_events",
                     "site_linked_from_events", "recurring_event_editions", "source_link", "source_unit",
                     "page_title", "page_date", "page_date_from", "fetched_at", "site", "site_role",
@@ -1478,11 +1710,46 @@ def run(args: argparse.Namespace, out: Path, info: dict) -> int:
                     "context_before", "sentence", "context_after", "organisations_in_paragraph",
                     "organisations_in_paragraph_keys", "events_json"]
     log.info("Writing CSV outputs ...")
-    write_csv(out / "theme_hits.csv", theme_rows, theme_fields)
-    n_theme_rows = len(theme_rows)
-    del theme_rows
 
-    write_outputs(out, kept, orgs, page_rows, themes, theme_terms, theme_pages, len(pages), args)
+    def final_theme_rows():
+        for r in theme_spill:
+            here = orgs_in_block.get(r.pop("_block"), {})
+            r["organisations_in_paragraph"] = "; ".join(here.values())
+            r["organisations_in_paragraph_keys"] = "; ".join(here.keys())
+            yield r
+
+    write_csv(out / "theme_hits.csv", final_theme_rows(), theme_fields)
+    n_theme_rows = theme_spill.n
+    theme_spill.close()
+    orgs_in_block.clear()
+
+    # The report shows at most MAX_CONTEXTS_PER_ORG contexts per organisation: only
+    # those rows keep their text in memory.
+    report_rows: List[dict] = []
+    n_ctx: Counter = Counter()
+
+    def final_mention_rows():
+        for light, r in zip(mention_rows, mention_spill):
+            if not light["organisation"]:
+                continue
+            for k in ("_block", "_unit", "co_mentioned_keys"):
+                r.pop(k, None)
+            r["organisation"], r["co_mentioned"] = light["organisation"], light["co_mentioned"]
+            r["source_has_theme"] = light["source_has_theme"]
+            key = r["org_key"]
+            if not r["repeat_context"] and n_ctx[key] < MAX_CONTEXTS_PER_ORG:
+                n_ctx[key] += 1
+                report_rows.append({k: r.get(k, "") for k in REPORT_FIELDS})
+            else:
+                report_rows.append({"org_key": key, "site": r["site"], "site_role": r["site_role"],
+                                    "repeat_context": True})
+            yield r
+
+    write_outputs(out, kept, orgs, page_rows, themes, theme_terms, theme_pages, len(pages), args,
+                  mention_rows=final_mention_rows())
+    mention_spill.close()
+    mention_rows.clear()
+    n_ctx.clear()
     for r in pdf_rows:
         r["pdf_url"], r["embedded_in"] = pdf_display(r["pdf_url"]), pdf_display(r["embedded_in"])
     write_csv(out / "pdfs.csv", pdf_rows,
@@ -1526,7 +1793,7 @@ def run(args: argparse.Namespace, out: Path, info: dict) -> int:
                                                          "words_analysed", "org_mentions",
                                                          "sources_with_theme_hit"])
 
-    write_report(out / "report.html", orgs, kept, themes, theme_pages, len(pages),
+    write_report(out / "report.html", orgs, report_rows, themes, theme_pages, len(pages),
                  start_urls or [Path(u).name for u in args.seed_pdf],
                  [st.key for st in registry.sites if analysed.get(st.key)])
 
@@ -1559,10 +1826,21 @@ def run(args: argparse.Namespace, out: Path, info: dict) -> int:
     if isinstance(getattr(extractor, "_models", None), dict):
         extractor._models.clear()
     del kept, orgs, pages, page_rows
+    report_rows.clear()
     for d in (by_url, block_event_cache, page_event_cache, landing_of):
         d.clear()
     gc.collect()
 
+    # The analysis is complete: record it as finished before the master files are
+    # built, so their 'about' sheet does not describe a run still 'running'.
+    info["status"] = "finished"
+    info["finished_at"] = now_iso()
+    try:
+        info["duration"] = fmt_duration((dt.datetime.now().astimezone()
+                                         - dt.datetime.fromisoformat(info["started_at"])).total_seconds())
+    except (KeyError, TypeError, ValueError):
+        pass
+    write_run_info(out, info)
     log.info("Writing the master files ...")
     stats: dict = {}
     try:
@@ -1698,7 +1976,10 @@ def write_csv(path: Path, rows: List[dict], fields: Optional[List[str]] = None) 
 
 def write_outputs(out: Path, mentions: List[dict], orgs: List[dict], page_rows: List[dict],
                   themes: ThemeSet, theme_terms: Dict[str, Counter], theme_pages: Counter,
-                  n_pages: int, args: argparse.Namespace) -> None:
+                  n_pages: int, args: argparse.Namespace,
+                  mention_rows: Optional[Iterable[dict]] = None) -> None:
+    """mention_rows: the full rows of mentions.csv, when `mentions` holds only the
+    columns needed for the co-occurrence edges (read once, as they are written)."""
     mention_fields = [
         "organisation", "surface_form", "org_type", "methods", "event", "event_date", "event_link",
         "event_key", "site_linked_from_events", "recurring_event_editions", "in_menu",
@@ -1709,7 +1990,7 @@ def write_outputs(out: Path, mentions: List[dict], orgs: List[dict], page_rows: 
         "paragraph_themes", "page_themes", "sentence", "context", "paragraph", "co_mentioned",
         "link_domain", "org_key", "events_json",
     ]
-    write_csv(out / "mentions.csv", mentions, mention_fields)
+    write_csv(out / "mentions.csv", mentions if mention_rows is None else mention_rows, mention_fields)
     write_csv(out / "organisations.csv", orgs)
     write_csv(out / "pages.csv", page_rows)
 

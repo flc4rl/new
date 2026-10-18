@@ -84,3 +84,8 @@ re:^IBAN\b
 re:^RDV\b
 re:^keep(?:\s+(?:updated|informed|in touch|up to date))?$
 re:^(?:presential|présentiel|presencial|presenziale)\b
+# Technologies and substances that NER tags as organisations ("Carbon Capture")
+Carbon Capture
+Carbon Capture and Storage
+Carbon Capture and Utilisation
+Carbon Capture and Utilization

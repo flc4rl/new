@@ -32,9 +32,11 @@ import unicodedata
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Sequence, Set, Tuple
-from urllib.parse import urljoin, urlparse
+from urllib.parse import urlparse
 
 from bs4 import BeautifulSoup, Comment, NavigableString, Tag
+
+from crawler import safe_join
 
 from places import COUNTRY_CODES, LANGUAGE_NAMES, PLACES
 
@@ -1024,8 +1026,10 @@ def parse_html(html: str, url: str, depth: int, strip_regions: bool) -> ParsedPa
             if not t.decomposed:
                 t.decompose()
     base = soup.find("base", href=True)
-    base_url = urljoin(url, base["href"]) if base else url
-    own_host = urlparse(url).netloc.lower().removeprefix("www.")
+    # A malformed <base> or <a href> (e.g. 'http://[lien]') must never make the page
+    # unparseable: safe_join gives "" instead of raising.
+    base_url = (safe_join(url, base["href"]) if base else "") or url
+    own_host = _netloc(url)
     root = soup.body or soup
     blocks: List[Block] = []
     _walk(root, blocks, "main", base_url, own_host)
@@ -1080,12 +1084,22 @@ def _has_block_child(tag: Tag) -> bool:
     return tag.find(BLOCK_TAGS - {"br"}) is not None
 
 
+def _netloc(url: str) -> str:
+    """Lower-case host of a URL without 'www.'; "" when the URL cannot be parsed."""
+    try:
+        p = urlparse(url)
+        p.port   # raises ValueError for a bad port or bracketed host
+        return p.netloc.lower().removeprefix("www.")
+    except ValueError:
+        return ""
+
+
 def _collect_link(a: Tag, links: List[Link], base_url: str, own_host: str) -> None:
     href = (a.get("href") or "").strip()
     if not href or href.startswith(("#", "mailto:", "tel:", "javascript:")):
         return
-    full = urljoin(base_url, href)
-    host = urlparse(full).netloc.lower().removeprefix("www.")
+    full = safe_join(base_url, href)
+    host = _netloc(full) if full else ""
     if not host or host == own_host or host.endswith("." + own_host):
         return
     if host in FILE_SHARING_HOSTS or re.search(r"\.(pdf|docx?|odt|pptx?|xlsx?)(?:$|[?#])", full, re.I):
@@ -1496,6 +1510,38 @@ def page_language(texts: Sequence[str], declared: str = "") -> str:
     return detect_language(" ".join(texts[:200]))
 
 
+def _second_language(text: str, code: str) -> Tuple[str, List[Tuple[int, int]]]:
+    """Another language that a paragraph routed to `code` is partly written in, and the
+    sentences written in it: a language that leads in a sentence of four or more words
+    with two or more function words ("Blockade of the armaments factory and war
+    profiteer Heckler & Koch" after the French text of an agenda entry), or that has
+    three or more function words in the whole paragraph against fewer for `code`.
+    ("", []) when there is none."""
+    sc = language_scores(text)
+    sents = [(s, e, language_scores(text[s:e])) for s, e in split_sentences(text)]
+    lang = ""
+    best = max(((n, c) for c, n in sc.items() if c != code), default=(0, ""))
+    if best[0] >= 3 and sc.get(code, 0) < best[0]:
+        lang = best[1]
+    else:
+        votes: Counter = Counter()
+        for s, e, ss in sents:
+            if len(text[s:e].split()) < 4:
+                continue
+            ranked = ss.most_common(2)
+            if not ranked:
+                continue
+            lead, top = ranked[0]
+            second = ranked[1][1] if len(ranked) > 1 else 0
+            if lead != code and top >= 2 and top > second:
+                votes[lead] += top
+        lang = votes.most_common(1)[0][0] if votes else ""
+    if not lang:
+        return "", []
+    spans = [(s, e) for s, e, ss in sents if ss.get(lang, 0) >= max(1, ss.get(code, 0))]
+    return (lang, spans) if spans else ("", [])
+
+
 class OrgExtractor:
     NER_MEMO_SIZE = 200_000   # distinct (model, paragraph) results kept in memory
     # spaCy models kept loaded at once. A model takes about 70 MB (sm) to 600 MB (lg);
@@ -1536,6 +1582,7 @@ class OrgExtractor:
         self._phrase_case: Dict[str, bool] = {}
         self.missing_models: Set[str] = set()
         self.broken_models: Set[str] = set()       # installed but failed to load or run
+        self.missing_deps: Dict[str, str] = {}      # model -> Python package it could not import
         self.models_used: Dict[str, str] = {}       # every model loaded in the run -> version
         self.ner_fallbacks: Dict[str, Dict[str, str]] = {}   # lang -> {"requested", "used"}
         self._lru: "OrderedDict[str, None]" = OrderedDict()  # loaded models, least recent first
@@ -1550,12 +1597,7 @@ class OrgExtractor:
         self.ner_stats: Counter = Counter()          # "analysed" by spaCy, read from "cache"
         self._db = None
         if cache_dir is not None:
-            import sqlite3
-            Path(cache_dir).mkdir(parents=True, exist_ok=True)
-            self._db = sqlite3.connect(str(Path(cache_dir) / "ner_cache.sqlite"))
-            self._db.execute("PRAGMA journal_mode=WAL")
-            self._db.execute("PRAGMA synchronous=OFF")
-            self._db.execute("CREATE TABLE IF NOT EXISTS ner (k TEXT PRIMARY KEY, v TEXT NOT NULL)")
+            self._db = self._open_cache(Path(cache_dir) / "ner_cache.sqlite")
         self.label_votes: Dict[str, Counter] = defaultdict(Counter)
         self.locative: Dict[str, List[int]] = defaultdict(lambda: [0, 0])   # key -> [after "in/à/bei…", total]
         desc = "|".join(re.escape(d).replace(r"\ ", r"[\s\-]+") for d in DESCRIPTORS)
@@ -1609,7 +1651,23 @@ class OrgExtractor:
                 self._cache_only.discard(name)
                 self._lru[name] = None
                 self._evict()
-            except (ImportError, OSError) as exc:
+            except ImportError as exc:
+                # A package the model or spaCy needs (e.g. jinja2) is missing: downloading
+                # the model again would not help, the Python environment is incomplete.
+                dep = (getattr(exc, "name", "") or "").split(".")[0]
+                if dep and dep != name:
+                    log.warning("spaCy model %r could not be loaded because the Python package "
+                                "%r is missing (%s). Run: pip install -r requirements.txt (inside "
+                                "the activated .venv)", name, dep, exc)
+                    self.missing_deps[name] = dep
+                    self.broken_models.add(name)
+                else:
+                    log.warning("spaCy model %r unavailable (%s). Install with: python -m spacy "
+                                "download %s", name, exc, name)
+                    self.missing_models.add(name)
+                self._models[name] = None
+                self._forget_name(name)
+            except OSError as exc:
                 log.warning("spaCy model %r unavailable (%s). Install with: python -m spacy "
                             "download %s", name, exc, name)
                 self.missing_models.add(name)
@@ -1722,6 +1780,7 @@ class OrgExtractor:
                 "ner_fallbacks": dict(sorted(self.ner_fallbacks.items())),
                 "spacy_models_missing": sorted(self.missing_models),
                 "spacy_models_broken": sorted(self.broken_models),
+                "spacy_missing_packages": dict(sorted(self.missing_deps.items())),
                 "spacy_models_freed": sorted(self._evicted)}
 
     def log_model_summary(self, logger: logging.Logger) -> None:
@@ -1733,12 +1792,20 @@ class OrgExtractor:
                            ", ".join(sorted(self.missing_models)),
                            " && ".join(f"python -m spacy download {m}" for m in sorted(self.missing_models)
                                        if m.endswith("_sm")))
-        if self.broken_models:
+        if self.missing_deps:
+            logger.warning("NER was skipped for some text because Python packages that spaCy "
+                           "needs are missing (%s; models affected: %s). The organisations of this "
+                           "run are therefore incomplete. Run: pip install -r requirements.txt "
+                           "(inside the activated .venv), then run again with --no-crawl",
+                           ", ".join(sorted(set(self.missing_deps.values()))),
+                           ", ".join(sorted(self.missing_deps)))
+        other_broken = sorted(self.broken_models - set(self.missing_deps))
+        if other_broken:
             logger.warning("These spaCy models are installed but failed to load or run, so NER "
                            "used another model or was skipped for their language: %s. They are "
                            "usually built for another spaCy version: run 'python -m spacy validate' "
                            "and reinstall the models it lists, e.g. python -m spacy download %s --upgrade",
-                           ", ".join(sorted(self.broken_models)), sorted(self.broken_models)[0])
+                           ", ".join(other_broken), other_broken[0])
         if self.ner_fallbacks:
             logger.warning("NER used another spaCy model than the one asked for (--ner-size %s) for: %s",
                            self.ner_size, ", ".join(f"{lang} ({v['used']})"
@@ -1779,15 +1846,65 @@ class OrgExtractor:
             self._model_ids[name] = f"{name}@{versions[0]}|spacy@{versions[1]}|pos={name.startswith('de_')}"
         return self._model_ids[name]
 
+    @staticmethod
+    def _open_cache(path: Path):
+        """Open (or create) the persistent NER cache. A damaged file (power loss or a
+        folder sync during a long run) is moved aside as .bad and a new, empty cache is
+        started; if even that fails the run goes on without a persistent cache."""
+        import sqlite3
+
+        def connect():
+            db = sqlite3.connect(str(path))
+            try:
+                db.execute("PRAGMA journal_mode=WAL")
+                db.execute("PRAGMA synchronous=NORMAL")
+                db.execute("CREATE TABLE IF NOT EXISTS ner (k TEXT PRIMARY KEY, v TEXT NOT NULL)")
+                db.execute("SELECT 1 FROM ner LIMIT 1").fetchall()
+            except Exception:
+                db.close()
+                raise
+            return db
+
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            return connect()
+        except (sqlite3.Error, OSError) as exc:
+            log.warning("The NER cache %s cannot be read (%s); it is moved aside as .bad and a "
+                        "new one is started (NER runs again on text it had stored)", path, exc)
+        try:
+            for suffix in ("", "-wal", "-shm"):
+                part = Path(str(path) + suffix)
+                if part.exists():
+                    part.replace(Path(str(path) + suffix + ".bad"))
+            return connect()
+        except (sqlite3.Error, OSError) as exc:
+            log.warning("No NER cache this run (%s): results are not kept for later runs", exc)
+            return None
+
+    def _cache_failed(self, exc: Exception) -> None:
+        """A read or write of the NER cache failed mid-run: carry on without it."""
+        log.warning("The NER cache stopped working (%s: %s); the run goes on without it, so "
+                    "NER results from now on are not kept for later runs",
+                    type(exc).__name__, exc)
+        try:
+            self._db.close()
+        except Exception:  # noqa: BLE001 - already broken
+            pass
+        self._db = None
+
     def _cache_get(self, keys: List[str]) -> Dict[str, "NerDoc"]:
         found: Dict[str, NerDoc] = {}
         if self._db is None or not keys:
             return found
-        for i in range(0, len(keys), 500):
-            chunk = keys[i:i + 500]
-            q = "SELECT k, v FROM ner WHERE k IN (%s)" % ",".join("?" * len(chunk))
-            for k, v in self._db.execute(q, chunk):
-                found[k] = v
+        import sqlite3
+        try:
+            for i in range(0, len(keys), 500):
+                chunk = keys[i:i + 500]
+                q = "SELECT k, v FROM ner WHERE k IN (%s)" % ",".join("?" * len(chunk))
+                for k, v in self._db.execute(q, chunk):
+                    found[k] = v
+        except sqlite3.Error as exc:
+            self._cache_failed(exc)
         return found
 
     def pipe(self, texts: List[str], lang: str = "en") -> list:
@@ -1797,6 +1914,53 @@ class OrgExtractor:
         Each distinct (model, text) is analysed once per run; with cache_dir, also once
         across runs."""
         per_text = self.paragraph_languages(texts, lang)
+        docs = self._pipe_models(texts, per_text)
+        # Bilingual paragraphs (agenda entries in French followed by an English
+        # translation): the model of the main language misses names in the other half
+        # ("Heckler & Koch", "FossielVrij NL" as MISC), so the second language's model
+        # runs too and its organisation entities that do not overlap are added.
+        # Only entities inside the sentences written in that language are taken; one
+        # that the first model saw only as MISC ("Heckler & Koch") is replaced.
+        second: Dict[int, Tuple[str, List[Tuple[int, int]]]] = {}
+        if self.spacy_model.lower() == "auto":
+            for i, (t, code) in enumerate(zip(texts, per_text)):
+                if docs[i] is not None and len(t.split()) >= 12:
+                    c, sents = _second_language(t, code)
+                    # Only pairs with English: French, Spanish, Italian and Portuguese
+                    # share too many function words to tell their sentences apart.
+                    if (c and "en" in (c, code)
+                            and self.model_name_for(c) not in (None, self.model_name_for(code))):
+                        second[i] = (c, sents)
+        if second:
+            idx = sorted(second)
+            extra = self._pipe_models([texts[i] for i in idx], [second[i][0] for i in idx], tally=False)
+            for i, rec in zip(idx, extra):
+                if rec is None:
+                    continue
+                base, sents = docs[i], second[i][1]
+                add, drop = [], set()
+                for e in rec.ents:
+                    if e.label_ not in ORG_LABELS or not any(a <= e.start_char and e.end_char <= b
+                                                             for a, b in sents):
+                        continue
+                    hit = [k for k, b in enumerate(base.ents)
+                           if b.start_char < e.end_char and e.start_char < b.end_char]
+                    if all(base.ents[k].label_ == "MISC" for k in hit):
+                        add.append(e)
+                        drop.update(hit)
+                if not add:
+                    continue
+                for ent in add:
+                    self.label_votes[canonical_key(tidy_surface(ent.text))][ent.label_] += 1
+                kept = [b for k, b in enumerate(base.ents) if k not in drop]
+                docs[i] = NerDoc(base.lang_, base.has_annotation("POS"),
+                                 sorted(kept + add, key=lambda e: e.start_char))
+                self.ner_stats["second_language"] += 1
+        return docs
+
+    def _pipe_models(self, texts: List[str], per_text: List[str], tally: bool = True) -> list:
+        """NER records for `texts`, each with the model for its language in `per_text`.
+        With `tally`, the labels go into label_votes (see pipe())."""
         docs: list = [None] * len(texts)
         # Results of this call, kept apart from the run-wide memo: _remember() may clear
         # the memo when it is full, which must not lose texts analysed earlier in this call.
@@ -1855,14 +2019,20 @@ class OrgExtractor:
                     self._forget_name(name)
                     left = [i for i in idx if (mid, texts[i]) not in self._call_results]
                     queue.extend(self._regroup(name, left, per_text))
-                if new_rows:
-                    self._db.executemany("INSERT OR REPLACE INTO ner (k, v) VALUES (?, ?)", new_rows)
-                    self._db.commit()
+                if new_rows and self._db is not None:
+                    import sqlite3
+                    try:
+                        self._db.executemany("INSERT OR REPLACE INTO ner (k, v) VALUES (?, ?)", new_rows)
+                        self._db.commit()
+                    except sqlite3.Error as exc:
+                        self._cache_failed(exc)
             for i in idx:
                 rec = self._call_results.get((mid, texts[i]))
                 if rec is None:
                     continue
                 docs[i] = rec
+                if not tally:
+                    continue
                 for ent in rec.ents:  # every label a name receives anywhere on the site
                     self.label_votes[canonical_key(tidy_surface(ent.text))][ent.label_] += 1
                 if self._title_counts:   # names in agenda titles, for entries NER missed
@@ -1888,8 +2058,12 @@ class OrgExtractor:
     def close(self) -> None:
         """Close the persistent NER cache (safe to call more than once)."""
         if self._db is not None:
-            self._db.commit()
-            self._db.close()
+            import sqlite3
+            try:
+                self._db.commit()
+                self._db.close()
+            except sqlite3.Error as exc:
+                log.warning("Could not close the NER cache cleanly (%s)", exc)
             self._db = None
 
     # ------------------------------------------------------- corpus statistics
@@ -1992,7 +2166,9 @@ class OrgExtractor:
         # person labels count for less than place labels.
         if place >= 2 * org and place >= 3:
             return False
-        return not (other >= 3 * org and org < 3)
+        # MISC (and an unseen label) does not count against a name: with no non-org
+        # label at all, nothing speaks against it.
+        return not (other > 0 and other >= 3 * org and org < 3)
 
     def merge_key(self, name: str) -> str:
         """The organisation key for `name` (a name or a canonical key) in this run.
@@ -2060,6 +2236,8 @@ class OrgExtractor:
                 if nxt in _CAP_INDEFINITES:
                     break   # "Kraftwerk Eine Gruppe vorm Tor": a capitalised article starts a new phrase
                 if _is_cap(nxt):
+                    if j > last_cap and nxt.casefold() in MONTHS:
+                        break   # "Extinction Rebellion met on Tuesday": a date, not part of the name
                     j += 1
                     last_cap = j
                 elif nxt.casefold() in CONNECTORS and j + 1 - last_cap <= 2:
@@ -2259,7 +2437,10 @@ class OrgExtractor:
     def _org_elsewhere(self, surface: str) -> bool:
         """Has spaCy labelled this exact name ORG at least twice in the paragraphs seen so
         far (this page included), and more often than any non-organisation label?"""
-        votes = self.label_votes.get(canonical_key(tidy_surface(surface)))
+        key = canonical_key(tidy_surface(surface))
+        if key in self.watchlist.canonical:
+            return True   # a watchlist name ("Greenpeace" in "Greenpeace and Civil Rights Defenders")
+        votes = self.label_votes.get(key)
         if not votes:
             return False
         org = sum(n for lab, n in votes.items() if lab in ORG_LABELS)
@@ -2599,7 +2780,17 @@ class OrgExtractor:
                 # (not in French, Italian, Spanish...: "Ferme collective" is "collective farm")
                 nxt = re.match(r"\s+([\w\-]+)", after)
                 if (nxt and nxt.group(1) in HEAD_TO_TYPE and nxt.group(1).islower()
-                        and nxt.group(1) not in WEAK_TRAILING and self._name_before_head(surface, toks, before)):
+                        and nxt.group(1) not in WEAK_TRAILING and not _plural_head(nxt.group(1))
+                        and not re.match(r"\s+[A-ZÀ-Ý]", after[nxt.end():])
+                        and not _COMPOUND_MODIFIER_BEFORE.search(before)
+                        and self._name_before_head(surface, toks, before)):
+                    # Not "Social movements" (a plural head is a description), not "Trainers
+                    # collective Stroomversnellers" (the head introduces the next name), not
+                    # "the anti-Big Tech movement" (a compound modifier).
+                    if (nxt.group(1) in NAME_FINAL_HEADS
+                            and re.match(r"\s+(?:area|areas|region|district|boundary|boundaries|wide)\b",
+                                         after[nxt.end():])):
+                        continue   # "the Falkirk council area": a territory, not the council
                     head_typ = HEAD_TO_TYPE[nxt.group(1)]
                     after_head = True
                     if nxt.group(1) in NAME_FINAL_HEADS:   # "Falkirk council" -> "Falkirk council"
@@ -2682,6 +2873,9 @@ class OrgExtractor:
                     if ADDRESS_BEFORE.search(pre_text) or (_ADDRESS_NUMBER.search(pre_text) and (
                             _POSTCODE_AFTER.match(text[e:e + 16]) or _place_follows(text, e))):
                         continue   # "138/140 Pleasance, Edinburgh", "rue de la Papotière", "arrêt de bus X"
+                    if (re.fullmatch(r"\S+\s+(?:to|à|a|nach|naar|bis)\s+\S+", surface)
+                            and re.search(r"(?i)\b(?:from|de|depuis|von|vanaf|van|da|desde)\s+$", pre_text)):
+                        continue   # "from Verfeil to Castres": a route between two places
                     if _STREET_NUMBER.search(surface) and _HOUSE_NUMBER_AFTER.match(text[e:e + 8]):
                         continue   # "Heidenheimerstr. 55": a street
                     m_pc = re.search(r"\s+[A-Z]{1,2}\d{1,2}[A-Z]?$", surface)
@@ -2808,6 +3002,27 @@ ARTICLES = {"the", "die", "der", "das", "la", "le", "les", "l", "il", "lo", "gli
 _PLAIN_STOP_KEYS = None   # filled below, once canonical_key exists
 
 
+_COORD_SPLIT = re.compile(r",\s+|\s+(?:and|&|et|und|y|e|og|och|ja|és|și)\s+(?:(?:the|la|le|les|l’|l'|el|los|las|il|die|der|das|de)\s+)?")
+
+
+def coordinated_parts(name: str) -> List[str]:
+    """The names joined in "Greenpeace and Civil Rights Defenders", "Exxon & Shell" or
+    "Alternatiba, ANV-COP21 et Attac": one part per conjunct, each starting with a
+    capital or a digit. [name] when the name is not such a list: a conjunct in lower
+    case, or a coordination after "for / pour / für / against ..." ("Bund für Umwelt
+    und Naturschutz", "Society for the Protection of Birds and the Environment").
+    Whether the parts are organisations of their own is for the caller to decide."""
+    pieces = [p.strip() for p in _COORD_SPLIT.split(name or "")]
+    if len(pieces) < 2 or not all(pieces):
+        return [name]
+    left_low = [w.casefold() for w in TOKEN_RE.findall(pieces[0]) if not _is_cap(w)]
+    if any(w in PURPOSE_PREPOSITIONS for w in left_low):
+        return [name]
+    if not all(_is_cap(TOKEN_RE.findall(p)[0]) or p[:1].isdigit() for p in pieces if TOKEN_RE.findall(p)):
+        return [name]
+    return pieces
+
+
 def _is_head_word(word: str) -> bool:
     """An organisational word, alone ("Collective") or ending a compound ("Klimabündnis")."""
     return word in HEAD_TO_TYPE or any(word.endswith(h) and len(word) >= len(h) + 3
@@ -2878,6 +3093,18 @@ def _starts_named_org(toks: list, k: int) -> bool:
 _CAP_INDEFINITES = {"Eine", "Ein", "Einer", "Einem", "Einen", "Eines"}
 # Languages whose adjectives follow the noun, so a lower-case "collective", "populaire" or
 # "solidaire" after a capitalised word describes it rather than naming a group.
+# "the anti-Big Tech movement", "pro-EU groups": a hyphenated modifier before the name
+_COMPOUND_MODIFIER_BEFORE = re.compile(r"(?i)(?<![\w\-])(?:anti|pro|non|post|neo|counter|contra|ex)-[\w\-]*\s*$")
+
+
+def _plural_head(word: str) -> bool:
+    """A plural of an organisational head word ("movements", "collectives", "groupes")."""
+    w = word.casefold()
+    if w in HEAD_TO_TYPE and not w.endswith("s"):
+        return False
+    return any(w.endswith(suf) and w[:-len(suf)] in HEAD_TO_TYPE for suf in ("s", "es", "en", "n"))
+
+
 _ADJ_AFTER_NOUN_LANGS = {"fr", "it", "es", "pt", "ca", "ro"}
 _INTO_PREPOSITIONS = {"in", "into", "an", "auf", "zu", "nach", "ins", "dans", "nel", "à", "a", "en", "naar", "op"}
 _APPOS_TAIL = re.compile(r"([^\W\d_]+)[\s\"“«‘]*$")

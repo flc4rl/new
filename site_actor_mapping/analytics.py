@@ -7,8 +7,9 @@ Analysis tables, charts and network files for a finished run (read-only).
 RESULTS_DIR is a site_actors.py results folder (or a make_master.py output
 folder). It must hold master_network (.xlsx or .csv), master_themes (.xlsx or
 .csv) and events.csv. Optional files (seed_links.json, pages.csv, sites.csv,
-sources.csv) are read from there and from every --run folder (combined);
-analyses that need a missing file are skipped and listed in summary.json
+sources.csv) are read from there and from every --run folder (combined).
+Without --run, the folders a make_master.py output was built from (its about
+sheet, "result_folders") are used when they still exist. Analyses that need a missing file are skipped and listed in summary.json
 ("skipped").
 
 Nothing in RESULTS_DIR is changed. OUT receives:
@@ -23,7 +24,8 @@ Nothing in RESULTS_DIR is changed. OUT receives:
   charts/*.png             six charts (150 dpi)
   summary.json, summary.md provenance, parameters, numbers and caveats
 
-Inclusion criterion (--theme-filter, default "source", as in make_master.py):
+Inclusion criterion (--theme-filter; default: the filter make_master.py
+recorded in the masters' about sheet, or "source" when none is recorded):
 organisations and events count for the network only when they come from a
 source with a theme hit (colonialism, racism, fascism) in its content. A
 source is one web page or one PDF; for the agenda (seed) PDFs each agenda
@@ -649,6 +651,25 @@ class Analysis:
         about = {r.get("item", ""): r.get("value", "") for r in net["about"][1]}
         self.master_filter = about.get("theme_filter", "") or ("none" if not self.excluded_sources else "")
         self.master_about = about
+        if a.theme_filter is None:
+            # Default: the filter make_master.py recorded, so that masters built with
+            # --theme-filter none are analysed unfiltered; older masters: source.
+            rec = s(about.get("theme_filter"))
+            a.theme_filter = rec if rec in THEME_FILTERS else "source"
+            how = ("as recorded by make_master.py in the masters' about sheet" if rec in THEME_FILTERS
+                   else "default; the masters do not record a filter")
+            log.info("Theme filter '%s' (%s; set --theme-filter to change it)", a.theme_filter, how)
+            self.note("theme filter used here", a.theme_filter, how)
+        if not self.runs and about.get("result_folders"):
+            # A make_master.py output folder holds only the masters: look for the
+            # per-run files (seed_links.json, pages.csv ...) in the folders it was built from.
+            for d in (x.strip() for x in s(about.get("result_folders")).split(";")):
+                if d and Path(d).is_dir() and Path(d).resolve() != self.results.resolve():
+                    self.runs.append(Path(d))
+            if self.runs:
+                log.info("Run folders taken from the masters' about sheet: %s", "; ".join(map(str, self.runs)))
+                self.note("run folders (from master about sheet)", "; ".join(map(str, self.runs)),
+                          "give --run to use other folders")
         need_net = {"event", "event_date", "event_link", "organisation", "confidence", "source_link", "site",
                     "site_role"}
         need_th = {"theme", "term", "event", "event_date", "event_link", "source_link", "sentence"}
@@ -1227,6 +1248,9 @@ def _derive(an: Analysis) -> None:
         an.web_method = "sites.csv and pages.csv, plus events with web-layer rows"
     else:
         an.web_method = "proxy: events with web-layer rows in the masters"
+    if sites_rows:
+        an.note("sites.csv read from", "; ".join(str(x) for x in an.all_inputs.get("sites.csv", [])),
+                "used for link_followed" if not csv_followed else "")
     for ev in an.events:
         r = ev["_row"]
         host = ev["link_host"]
@@ -1237,7 +1261,10 @@ def _derive(an: Analysis) -> None:
         elif sites_rows:
             followed = on_site
         else:
-            followed = ev["event_id"] in row_web and is_web(ev["event_link"])
+            followed = False
+        # An event with web-layer rows had its link read, whatever sites.csv says (sites.csv
+        # from another run, or a link host with site role 'main'): link_followed >= has_web_text.
+        followed = followed or (ev["event_id"] in row_web and is_web(ev["event_link"]))
         ev["has_link"] = is_web(ev["event_link"]) and not ev["event_link"].startswith(("file:", "pdf:"))
         ev["link_followed"] = followed
         ev["has_web_text"] = followed or on_site or via[0] > 0 or ev["event_id"] in row_web
@@ -1245,10 +1272,13 @@ def _derive(an: Analysis) -> None:
         ev["n_words_web"] = int(r["words_analysed"]) if s(r.get("words_analysed")).isdigit() else via[1]
     an.note("events with web text (has_web_text)", f"{sum(e['has_web_text'] for e in an.events)}/{len(an.events)}",
             an.web_method)
-    # ---- event theme flags (clean units only)
+    # ---- event theme flags: every row outside menus and footers. Rows with duplicate_of
+    # count here (the pipeline marks the second sighting of a passage, which depends on
+    # crawl order and may belong to another event); the dedup applies only to the
+    # passage, document and concentration counts.
     flags = defaultdict(lambda: defaultdict(set))   # eid -> theme -> {L1, L2, L3}
     for inst in an.instances:
-        if not inst["clean"]:
+        if inst["furniture"]:
             continue
         for rf in inst["refs"]:
             if rf["event_id"]:
@@ -1634,7 +1664,11 @@ def a3_ladder(an: Analysis) -> None:
 # ==========================================================================
 # A4 theme prevalence (event as unit)
 # ==========================================================================
-MEASURES = ["own", "landing", "linked", "any", "in_title"]
+# Event-level measures. own, any_all and in_title are counted over all events of the group;
+# landing, linked and any_web only over the events whose link was read (has_web_text).
+MEASURES = ["own", "landing", "linked", "any_web", "any_all", "in_title"]
+WEB_MEASURES = {"landing", "linked", "any_web"}
+MEASURE_FLAG = {"any_web": "any", "any_all": "any"}
 
 
 def _prev_rows(an: Analysis, dimension: str, groups: Dict[tuple, List[dict]], measures=MEASURES) -> List[dict]:
@@ -1644,16 +1678,18 @@ def _prev_rows(an: Analysis, dimension: str, groups: Dict[tuple, List[dict]], me
         web = [e for e in evs if e["has_web_text"]]
         for t in an.themes + ["any"]:
             for m in measures:
-                base = evs if m in ("own", "in_title") else web
-                k = sum(1 for e in base if e[f"{t}_{m}"])
+                base = web if m in WEB_MEASURES else evs
+                flag = MEASURE_FLAG.get(m, m)
+                k = sum(1 for e in base if e[f"{t}_{flag}"])
                 lo, hi = wilson(k, len(base))
                 rows.append({"dimension": dimension, "group": grp, "stream": st, "theme": t, "measure": m,
+                             "denominator": "events with web text" if m in WEB_MEASURES else "all events",
                              "n_events": len(base), "k_events": k, "share": share(k, len(base)),
                              "wilson_lo": lo, "wilson_hi": hi})
     return rows
 
 
-PREV_FIELDS = ["dimension", "group", "stream", "theme", "measure", "n_events", "k_events", "share", "wilson_lo",
+PREV_FIELDS = ["dimension", "group", "stream", "theme", "measure", "denominator", "n_events", "k_events", "share", "wilson_lo",
                "wilson_hi"]
 
 
@@ -1679,7 +1715,7 @@ def a4_prevalence(an: Analysis) -> None:
         for c in ev["countries"] or ["(unresolved)"]:
             lab = c if (cnt[c] >= 15 or c == "(unresolved)") else "other (n<15 each)"
             gc[(lab, "all")].append(ev)
-    rows = _prev_rows(an, "country", gc, ["own", "any"])
+    rows = _prev_rows(an, "country", gc, ["own", "any_web", "any_all"])
     for r in rows:
         r["group_name"] = an.p.country_name(r["group"]) if re.fullmatch(r"[A-Z]{2,6}", r["group"]) else r["group"]
         r["headline_ok"] = r["n_events"] >= 30
@@ -2086,6 +2122,15 @@ def a7_org_theme(an: Analysis) -> None:
     # so the inclusion criterion does not inflate the shares it is compared with.
     included = {t["org_key"] for t in an.default_ties}
     base = [t for t in scenario_ties(an, an.default_sc, "L1-L3", "none") if t["org_key"] in included]
+    # When make_master.py already applied a theme filter, the 'none' ties above are the
+    # filtered ones: every series then has a theme hit by construction, which inflates
+    # share, lift and shrunk. Those three are left blank in that case.
+    prefiltered = an.master_filter != "none"
+    if prefiltered:
+        an.skipped["org_theme event-level share, lift, shrunk"] = (
+            f"the masters were built with theme filter '{an.master_filter or 'unknown'}', so the unfiltered base "
+            "rate cannot be measured; rebuild them with make_master.py --theme-filter none and run analytics.py "
+            "with --theme-filter source")
     series_theme = defaultdict(set)
     for ev in an.events:
         for t in th:
@@ -2115,7 +2160,7 @@ def a7_org_theme(an: Analysis) -> None:
                  "series_passage": len(a["series"]) if a else 0, "n_series": n, "k_series": kk,
                  "k_title": sum(1 for x in org_title_series.get(k, ()) if t in series_theme.get(x, ())),
                  "example_passage_id": a["example"] if a else ""}
-            if ev_ok:
+            if ev_ok and not prefiltered:
                 lo, _ = wilson(kk, n)
                 r.update({"share": share(kk, n), "wilson_lo": lo,
                           "lift": round((kk / n) / p0[t], 3) if p0[t] else None,
@@ -2128,7 +2173,7 @@ def a7_org_theme(an: Analysis) -> None:
     an.org_theme = rows
     an.facts["org_theme"] = {"orgs_in_passages": len({k for k, _ in pas}),
                              "robust_pairs_passage": sum(1 for (k, t), a in pas.items() if len(a["docs"]) >= 2),
-                             "p0": p0}
+                             "p0": None if prefiltered else p0}
     cen = {r["org_key"]: r for r in getattr(an, "org_centrality", [])}
     robust = defaultdict(list)
     for r in rows:
@@ -2198,7 +2243,12 @@ STATE = re.compile(r"^(?:nato|eu|european union|european commission|commission|u
                    r"gendarmerie|tribunal|court|gericht|parliament|parlement|bundestag", re.I)
 SITE_UI = re.compile(r"^(?:faq|newsletter|archive|archives|archiv|calendar|kalender|agenda|outlook|login|log in|"
                      r"impressum|imprint|datenschutz|privacy|cookie|cookies|contact|kontakt|menu|home|search|"
-                     r"donate|spenden|shop|blog|news|press|presse|about|about us|team|events?)$", re.I)
+                     r"donate|spenden|shop|blog|news|press|presse|about|about us|team|events?|tech)$", re.I)
+# Interface words that mark a name as site UI wherever they occur ('Outlook 365',
+# 'Add to Google Calendar'); words that are also common in organisation names
+# (archive, news, tech) only count as the whole name (SITE_UI above).
+SITE_UI_ANY = re.compile(r"\b(?:calendar|kalender|calendrier|outlook|ical|icalendar|add to|login|log in|sign in|"
+                         r"newsletter|faq|cookies?|impressum|datenschutz|privacy policy|google maps)\b", re.I)
 
 
 # Methods that are as weak as NER on their own (extract.NER_LIKE_METHODS).
@@ -2244,7 +2294,7 @@ def a1_authority(an: Analysis, cap_rows: Optional[int] = None) -> None:
         if re.fullmatch(r"[A-Z0-9&.-]{2,6}", name):
             flags.append("unexpanded_acronym")
         sug = ""
-        if SITE_UI.match(k):
+        if SITE_UI.match(k) or SITE_UI_ANY.search(k) or SITE_UI_ANY.search(name):
             sug = "site_ui?"
         elif k in p.places or _is_place_name(p, name):
             sug = "place?"
@@ -2402,6 +2452,15 @@ def precision_sample(an: Analysis, rows: List[dict]) -> List[dict]:
     return out
 
 
+def _stratified_interval(p: float, var: float, n: int) -> Tuple[Optional[float], Optional[float]]:
+    """95 % interval for a stratified proportion: Wilson with the effective sample size
+    p(1-p)/var (Korn and Graubard), capped at the number of coded names."""
+    if not n:
+        return None, None
+    n_eff = min(n, p * (1 - p) / var) if var > 0 else n
+    return wilson(p * n_eff, n_eff)
+
+
 def precision_readback(an: Analysis, rows: List[dict]) -> List[dict]:
     """Precision per stratum from coded org_codes (is_organisation filled in)."""
     coded = {k: c for k, c in an.codes.items() if s(c.get("is_organisation"))}
@@ -2421,18 +2480,29 @@ def precision_readback(an: Analysis, rows: List[dict]) -> List[dict]:
             a["kl"] += yes or truthy(c.get("is_partial_name")) or s(c.get("is_organisation")).lower() == "partial"
     out = []
     totN = sum(a["N"] for a in strata.values() if a["n"])
-    est = estl = 0.0
+    est = estl = var = varl = 0.0
     for st in sorted(strata):
         a = strata[st]
         lo, hi = wilson(a["k"], a["n"])
         out.append({"stratum": st, "N": a["N"], "n": a["n"], "k": a["k"], "precision": share(a["k"], a["n"]),
                     "wilson_lo": lo, "wilson_hi": hi, "k_lenient": a["kl"], "precision_lenient": share(a["kl"], a["n"])})
         if a["n"] and totN:
-            est += a["N"] / totN * a["k"] / a["n"]
-            estl += a["N"] / totN * a["kl"] / a["n"]
-    out.append({"stratum": "ALL (stratified estimate over strata with coded names; N = their size)", "N": totN, "n": sum(a["n"] for a in strata.values()),
+            w, n_h, fpc = a["N"] / totN, a["n"], 1 - a["n"] / a["N"]
+            ph, phl = a["k"] / n_h, a["kl"] / n_h
+            est += w * ph
+            estl += w * phl
+            if n_h > 1:     # unbiased within-stratum variance, finite population correction
+                var += w * w * fpc * ph * (1 - ph) / (n_h - 1)
+                varl += w * w * fpc * phl * (1 - phl) / (n_h - 1)
+    n_all = sum(a["n"] for a in strata.values())
+    out.append({"stratum": "ALL (stratified estimate over strata with coded names; N = their size; interval: "
+                           "Wilson with the effective sample size)", "N": totN, "n": n_all,
                 "k": sum(a["k"] for a in strata.values()), "precision": round(est, 4),
                 "k_lenient": sum(a["kl"] for a in strata.values()), "precision_lenient": round(estl, 4)})
+    lo, hi = _stratified_interval(est, var, n_all)
+    out[-1].update({"wilson_lo": lo, "wilson_hi": hi, "se": round(math.sqrt(var), 4)})
+    lo, hi = _stratified_interval(estl, varl, n_all)
+    out[-1].update({"lenient_lo": lo, "lenient_hi": hi})
     an.facts["precision"] = out[-1]
     return out
 
@@ -2731,7 +2801,9 @@ def chart_backbone(an: Analysis, plt, path: Path) -> None:
     fig, ax = plt.subplots(figsize=(10, 8))
     ax.set_axis_off()
     title = (f"Organisation backbone, scenario {an.default_sc}, alpha {an.a.backbone_alpha} "
-             f"({count_of(B.number_of_nodes(), 'organisation')}, {count_of(B.number_of_edges(), 'tie')})")
+             f"({count_of(B.number_of_nodes(), 'organisation')}, {count_of(B.number_of_edges(), 'tie')})"
+             + ("" if an.curated else "\n(uncurated: colours are the suggested_class guesses of "
+                "org_codes_template.xlsx, not codes)"))
     ax.set_title(title, loc="left")
     if not B.number_of_edges():
         # an empty projection (no two organisations share an event) is not the same as a strict alpha
@@ -2744,13 +2816,20 @@ def chart_backbone(an: Analysis, plt, path: Path) -> None:
     pos = _component_layout(B, an.a.seed)
     ax.set_aspect("equal", adjustable="datalim")
     ax.margins(0.08)
-    cen ={"O:" + r["org_key"]: r for r in an.org_centrality}
-    classes = sorted({cen.get(n, {}).get("actor_class") or "not coded" for n in B})
-    col = {c: (INK2 if c == "not coded" else EXTRA_COLOURS[i % len(EXTRA_COLOURS)]) for i, c in enumerate(classes)}
+    cen = {"O:" + r["org_key"]: r for r in an.org_centrality}
+    sug = {"O:" + r["org_key"]: r.get("suggested_class") for r in getattr(an, "authority", [])}
+
+    def cls(n: str) -> str:
+        if an.curated:
+            return cen.get(n, {}).get("actor_class") or "not coded"
+        return sug.get(n) or "no suggestion"
+    classes = sorted({cls(n) for n in B})
+    col = {c: (INK2 if c in ("not coded", "no suggestion") else EXTRA_COLOURS[i % len(EXTRA_COLOURS)])
+           for i, c in enumerate(classes)}
     widths = [0.5 + 2 * d["weight"] for _, _, d in B.edges(data=True)]
     nx.draw_networkx_edges(B, pos, ax=ax, width=widths, edge_color=GRID, alpha=0.9)
     for c in classes:
-        nodes = sorted(n for n in B if (cen.get(n, {}).get("actor_class") or "not coded") == c)
+        nodes = sorted(n for n in B if cls(n) == c)
         nx.draw_networkx_nodes(B, pos, nodelist=nodes, ax=ax, node_color=col[c],
                                node_size=[40 + 40 * cen.get(n, {}).get("n_series", 1) for n in nodes],
                                edgecolors=SURFACE, linewidths=1.5, label=c)
@@ -2760,7 +2839,8 @@ def chart_backbone(an: Analysis, plt, path: Path) -> None:
     lpos = {n: (x, y + dy) for n, (x, y) in pos.items()}     # labels just above their node
     nx.draw_networkx_labels(B, lpos, labels={n: short(B.nodes[n].get("label", n[2:]), 28) for n in strength},
                             ax=ax, font_size=7, font_color=INK)
-    ax.legend(title="actor_class (size = series)", loc="lower left", fontsize=7)
+    ax.legend(title=("actor_class" if an.curated else "suggested_class") + " (size = series)", loc="lower left",
+              fontsize=7)
     _save(plt, fig, path)
 
 
@@ -2772,9 +2852,10 @@ def chart_country(an: Analysis, plt, path: Path) -> None:
                     key=lambda g: (-next(r["n_events"] for r in rows if r["group"] == g and r["measure"] == "own"), g))
     if not groups:
         return
-    labels = {"own": "own listing text (all events)", "any": "any layer (events with web text)"}
+    labels = {"own": "own listing text (all events)", "any_web": "any layer (events with web text)"}
     # the any-layer panel only when at least one country has 15 or more events with web text
-    measures = ["own"] + (["any"] if any(r["measure"] == "any" and r["n_events"] >= 15 for r in rows) else [])
+    measures = ["own"] + (["any_web"] if any(r["measure"] == "any_web" and r["n_events"] >= 15 for r in rows)
+                          else [])
     fig, axes = plt.subplots(1, len(measures), figsize=(5 * len(measures), 0.35 * len(groups) + 1.8),
                              sharey=True, squeeze=False)
     axes = list(axes[0])
@@ -2889,8 +2970,10 @@ SHEET_DOCS = OrderedDict([
     ("attribution", "Clean theme references and documents per layer and theme."),
     ("term_families", "Theme-file lines (term families) with their rows, passages, documents, events and surface "
                       "forms."),
-    ("prev_stream_period", "Theme prevalence with the event as unit, per period and stream. own and in_title use "
-                           "all events; landing, linked and any only events whose linked site was read."),
+    ("prev_stream_period", "Theme prevalence with the event as unit, per period and stream. own, any_all and "
+                           "in_title use all events; landing, linked and any_web only the events whose link was "
+                           "read (column denominator). any_all is never lower than own; any_web counts fewer "
+                           "events because its denominator is smaller."),
     ("prev_stream_year", "As prev_stream_period, per year."),
     ("prev_country", "As prev_stream_period, per event country (an event in two countries counts in both; "
                      "countries with fewer than 15 events pooled; headline_ok means at least 30 events)."),
@@ -2900,10 +2983,13 @@ SHEET_DOCS = OrderedDict([
     ("page_rates", "Theme hits per 10,000 words of the sources that were read, per site role and kind."),
     ("sensitivity", "The event x organisation network under scenarios A-D (and C_curated), for all layers and for "
                     "L1+L2, at edition and series level, with and without the theme filter."),
-    ("org_centrality", "Organisations of the default network: series, years, countries, bipartite betweenness, "
-                       "backbone strength, hub dependence, (2,2)-core, country participation."),
+    ("org_centrality", "Organisations of the default network: series, years, countries, bip_betweenness "
+                       "(shortest-path betweenness on the event-organisation graph, normalised over all its "
+                       "nodes by (n-1)(n-2)/2 as for a one-mode graph, not by the bipartite maximum), backbone "
+                       "strength, hub dependence, (2,2)-core, country participation."),
     ("org_theme", "Organisation x theme: passage level (organisation named in the theme paragraph, counted in "
-                  "documents) and event level (series whose own or landing text carries the theme)."),
+                  "documents) and event level (series whose own or landing text carries the theme). share, "
+                  "lift and shrunk are blank when the masters were already theme-filtered (see summary.md, C11)."),
     ("org_bridging", "Organisations robustly tied to two or more themes."),
     ("theme_cooccurrence", "Themes together in the same passage, document or series, with a leave-one-site-out "
                            "range."),
@@ -2966,8 +3052,8 @@ def write_org_template(an: Analysis, out: Path) -> None:
                 "example_context_1", "is_organisation", "is_partial_name", "coder"])]
     if an.precision_rows:
         sheets.append(("precision_by_stratum", an.precision_rows,
-                       ["stratum", "N", "n", "k", "precision", "wilson_lo", "wilson_hi", "k_lenient",
-                        "precision_lenient"]))
+                       ["stratum", "N", "n", "k", "precision", "wilson_lo", "wilson_hi", "se", "k_lenient",
+                        "precision_lenient", "lenient_lo", "lenient_hi"]))
     sheets.append(("README", readme, ["text"]))
     yn_ = ["yes", "no", "partial"]
     write_xlsx(out / "org_codes_template.xlsx", sheets, validations={
@@ -2977,7 +3063,8 @@ def write_org_template(an: Analysis, out: Path) -> None:
         "precision_sample": {"is_organisation": yn_, "is_partial_name": ["yes", "no"]}})
     if an.precision_rows:
         an.table("precision_by_stratum", an.precision_rows,
-                 ["stratum", "N", "n", "k", "precision", "wilson_lo", "wilson_hi", "k_lenient", "precision_lenient"])
+                 ["stratum", "N", "n", "k", "precision", "wilson_lo", "wilson_hi", "se", "k_lenient",
+                  "precision_lenient", "lenient_lo", "lenient_hi"])
 
 
 CODEBOOK = [
@@ -3123,7 +3210,8 @@ def summary_md(an: Analysis, sm: dict) -> str:
                     f"{100 * (n['top1_share'] or 0):.0f} % of the clean rows.")
     para.append("Events with a theme in their own listing text: " + ", ".join(
         f"{t} {n['own_text_events'][t]}" for t in th) + "; on any layer: " + ", ".join(
-        f"{t} {n['any_layer_events'][t]}" for t in th) + f" (of {ne}).")
+        f"{t} {n['any_layer_events'][t]}" for t in th) + f" (of all {ne} events; measure any_all in the "
+        "prev_* tables, while any_web counts only the events whose link was read).")
     mf_label = f"'{an.master_filter or 'unknown'}'"
     if an.master_filter == "none" and not an.master_about:
         mf_label += " (older masters, built before the filter existed)"
@@ -3158,8 +3246,10 @@ def summary_md(an: Analysis, sm: dict) -> str:
                     f"{count_of(dg['backbone_nodes'], 'organisation')}. Betweenness: {sm['betweenness']}.")
     prec = an.facts.get("precision")
     if prec:
-        para.append(f"Coded organisation precision (stratified estimate): strict {prec['precision']}, lenient "
-                    f"{prec['precision_lenient']} (n = {prec['n']}).")
+        para.append(f"Coded organisation precision (stratified estimate): strict {prec['precision']} "
+                    f"(95 % interval {prec.get('wilson_lo')} to {prec.get('wilson_hi')}), lenient "
+                    f"{prec['precision_lenient']} ({prec.get('lenient_lo')} to {prec.get('lenient_hi')}; "
+                    f"n = {prec['n']}).")
     else:
         para.append("Organisation names are not yet coded for precision (see org_codes_template.xlsx).")
     L += [" ".join(para), ""]
@@ -3209,10 +3299,12 @@ def summary_md(an: Analysis, sm: dict) -> str:
         ("C10 Term list", "False matches exist (handles, place names, words from other languages). in_handle and "
          "in_event_title are flagged; per-family precision follows from coding."),
     ]
-    if an.master_filter not in ("", "none"):
+    if an.master_filter != "none":
         caveats.append(("C11 Inclusion criterion", "The masters were built with a theme filter, so the 'none' "
-                        "rows of the sensitivity table equal the filtered ones. Rebuild with make_master.py "
-                        "--theme-filter none to compare."))
+                        "rows of the sensitivity table equal the filtered ones, and the event-level share, lift "
+                        "and shrunk columns of org_theme are left blank (their base rate would be inflated). "
+                        "Rebuild with make_master.py --theme-filter none and run analytics.py with "
+                        "--theme-filter source to get both."))
     L += ["## Caveats", ""] + [f"- **{h}.** {txt}" for h, txt in caveats] + [""]
     if sm["skipped"]:
         L += ["## Skipped", ""] + [f"- {k}: {v}" for k, v in sm["skipped"].items()] + [""]
@@ -3237,9 +3329,10 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--themes-file", help="theme file (default: themes_colonialism_racism_fascism.txt here)")
     ap.add_argument("--org-codes", help="curated org_codes.csv or .xlsx (read only)")
     ap.add_argument("--event-codes", help="curated event_codes.csv (read only)")
-    ap.add_argument("--theme-filter", choices=THEME_FILTERS, default="source",
-                    help="inclusion criterion for the network: only sources with a theme hit (source, default), "
-                         "every source of a site / event with a hit, or none (all sources)")
+    ap.add_argument("--theme-filter", choices=THEME_FILTERS, default=None,
+                    help="inclusion criterion for the network: only sources with a theme hit (source), "
+                         "every source of a site / event with a hit, or none (all sources). Default: the "
+                         "filter make_master.py recorded in the masters' about sheet, else source")
     ap.add_argument("--min-confidence", choices=list(CONF_RANK), default="medium",
                     help="confidence for the default network scenario C (default medium)")
     ap.add_argument("--backbone-alpha", type=float, default=0.05, help="disparity filter alpha (default 0.05)")
@@ -3446,6 +3539,8 @@ def selftest() -> int:
     check("wilson(4, 172) low", wilson(4, 172)[0], 0.0091)
     check("wilson(4, 172) high", wilson(4, 172)[1], 0.0584)
     check("wilson(0, 10)", wilson(0, 10), (0.0, 0.2775))
+    check("stratified interval: effective n 20", _stratified_interval(0.5, 0.0125, 40), wilson(10, 20))
+    check("stratified interval: no variance uses n", _stratified_interval(1.0, 0.0, 12), wilson(12, 12))
     G = nx.Graph()
     G.add_edges_from([("E:1", "O:a"), ("E:1", "O:b"), ("E:1", "O:c"), ("E:2", "O:a"), ("E:2", "O:b")])
     P = project(G)

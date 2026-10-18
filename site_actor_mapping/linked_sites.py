@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 import threading
 import time
@@ -122,16 +123,35 @@ class SiteRegistry:
         return None
 
     def save(self, path: Path) -> None:
-        path.write_text(json.dumps([asdict(s) for s in self.sites], indent=2, ensure_ascii=False),
-                        encoding="utf-8")
+        # Through a temporary file: a second Ctrl+C during the save (it also runs while
+        # the first one is handled) never leaves half a file.
+        tmp = path.with_name(path.name + ".tmp")
+        tmp.write_text(json.dumps([asdict(s) for s in self.sites], indent=2, ensure_ascii=False),
+                       encoding="utf-8")
+        os.replace(tmp, path)
 
     @classmethod
     def load(cls, path: Path, include_subdomains: bool) -> Optional["SiteRegistry"]:
         if not path.exists():
             return None
-        raw = json.loads(path.read_text(encoding="utf-8"))
-        sites = [Site(**{**d, "via": [Via(**v) for v in d.get("via", [])]}) for d in raw]
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+            sites = [Site(**{**d, "via": [Via(**v) for v in d.get("via", [])]}) for d in raw]
+        except (OSError, ValueError, TypeError, AttributeError) as exc:
+            log.warning("%s could not be read (%s: %s); it is rebuilt from the cached links",
+                        path.name, type(exc).__name__, exc)
+            return None
         return cls(sites, include_subdomains)
+
+
+def platform_site_key(host: str, url: str) -> str:
+    """Key of a single-page platform site: host and path, plus the query string when
+    there is one, so drive.google.com/open?id=AAA and ?id=BBB (or two
+    campaign-archive.com/?u=..&id=.. newsletters) are two sites, each tied to the
+    events that link it."""
+    p = urlparse(url)
+    key = f"{host}{p.path}".rstrip("/")
+    return f"{key}?{p.query}" if p.query else key
 
 
 def host_matches(host: str, names: Set[str]) -> bool:
@@ -342,6 +362,32 @@ def _why_unreachable(cr: Crawler) -> str:
     return ""
 
 
+def _settle_shared_pdfs(pdf_refs: Dict[int, List[tuple]], cache: PageCache) -> None:
+    """A PDF that several linked sites link (on a third host, say) is cached once,
+    with the referrer of whichever site's thread fetched it first, and so the events
+    it is tied to would depend on which server answered first. Give it the referrer
+    of the highest-ranked site that found it, as a one-at-a-time crawl in ranked
+    order would."""
+    first: Dict[str, str] = {}
+    found_by: Dict[str, Set[int]] = defaultdict(set)
+    for i in sorted(pdf_refs):
+        for url, ref in pdf_refs[i]:
+            first.setdefault(url, ref)
+            found_by[url].add(i)
+    n = 0
+    for url, ref in first.items():
+        if len(found_by[url]) < 2:
+            continue
+        cp = cache.get(url)
+        if cp is not None and cp.referrer != ref:
+            cp.referrer = ref
+            cache.put(cp)
+            n += 1
+    if n:
+        log.info("%d PDFs linked from several linked websites are tied to the most-linked of them",
+                 n)
+
+
 def crawl_linked(targets: Dict[str, List[Via]], cache: PageCache, base_cfg: CrawlConfig,
                  max_sites: Optional[int], max_pages: int, max_depth: int,
                  platform_hosts: Set[str], workers: int = 8,
@@ -384,6 +430,7 @@ def crawl_linked(targets: Dict[str, List[Via]], cache: PageCache, base_cfg: Craw
     stop = threading.Event()
     lock = threading.Lock()
     results: Dict[int, List[Site]] = {}
+    pdf_refs: Dict[int, List[tuple]] = {}
     status_of: Dict[str, str] = {}
     t0 = time.monotonic()
     done = [0]
@@ -420,8 +467,10 @@ def crawl_linked(targets: Dict[str, List[Via]], cache: PageCache, base_cfg: Craw
             log.error("Linked site %s failed: %s: %s", host, type(exc).__name__, exc)
             n, status = 0, f"failed: {exc}"
         aliases = sorted(cr.aliases) if cr is not None else []
+        if cr is not None:
+            pdf_refs[i] = list(getattr(cr, "pdf_referrers", ()))
         if platform:
-            out = [Site(f"{host}{urlparse(u).path}".rstrip("/"), "linked", [u], True,
+            out = [Site(platform_site_key(host, u), "linked", [u], True,
                         targets[u], status=status) for u in urls]
         else:
             out = [Site(host, "linked", urls, False, via, status=status, pages=n, aliases=aliases)]
@@ -466,6 +515,7 @@ def crawl_linked(targets: Dict[str, List[Via]], cache: PageCache, base_cfg: Craw
                 pool.shutdown(wait=False)
             raise
         pool.shutdown()
+    _settle_shared_pdfs(pdf_refs, cache)
 
     sites: List[Site] = []
     for i, host in enumerate(ranked):
@@ -477,7 +527,7 @@ def crawl_linked(targets: Dict[str, List[Via]], cache: PageCache, base_cfg: Craw
         reason = "not crawled (--follow-max-sites)" if i >= limit else "not crawled (stopped)"
         status_of[host] = reason
         if platform:
-            sites += [Site(f"{host}{urlparse(u).path}".rstrip("/"), "linked", [u], True, targets[u],
+            sites += [Site(platform_site_key(host, u), "linked", [u], True, targets[u],
                            status=reason) for u in urls]
         else:
             sites.append(Site(host, "linked", urls, False, [v for u in urls for v in targets[u]],

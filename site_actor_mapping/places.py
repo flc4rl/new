@@ -134,6 +134,17 @@ zeeland limburg groningen
 valais wallis ticino
 sicilia sardinia sardegna
 transylvania silesia slask
+ain aisne allier ardeche ardennes ariege aube aude aveyron bouches-du-rhone calvados cantal charente
+charente-maritime cher correze cote-d-or cotes-d-armor creuse deux-sevres doubs drome essonne eure
+eure-et-loir gard haute-garonne gers gironde herault ille-et-vilaine indre indre-et-loire isere jura
+landes loir-et-cher loire haute-loire loiret lot-et-garonne lozere maine-et-loire manche marne
+haute-marne mayenne meurthe-et-moselle meuse morbihan moselle nievre nord oise orne pas-de-calais
+puy-de-dome pyrenees-atlantiques hautes-pyrenees pyrenees-orientales bas-rhin haut-rhin rhone
+haute-saone saone-et-loire sarthe savoie haute-savoie seine-maritime seine-et-marne yvelines somme
+tarn tarn-et-garonne vaucluse vendee vienne haute-vienne vosges yonne hauts-de-seine
+seine-saint-denis val-de-marne val-d-oise
+occitanie normandie auvergne limousin bourgogne alsace lorraine picardie aquitaine nouvelle-aquitaine
+hauts-de-france grand-est auvergne-rhone-alpes centre-val-de-loire
 """
 
 PLACES = set(COUNTRIES) | set(CITIES) | set(REGIONS)

@@ -24,7 +24,11 @@ time.
 2. **Get the latest version**: `git pull`.
 3. **Virtual environment** (once): `python3 -m venv .venv`. Then, in every new
    Terminal window: `source .venv/bin/activate` (the prompt then starts with
-   `(.venv)`).
+   `(.venv)`). Needs Python 3.9 or newer (3.10 or newer recommended): check
+   with `python3 --version`. If it is older, install Python from python.org
+   or with `brew install python` and use that `python3` for the venv. On a
+   new Mac the first `python3` may ask to install the Command Line Tools;
+   accept, wait for it to finish and run the command again.
 4. **Packages** (once, and again after a `git pull` that changes
    `requirements.txt`): `pip install -r requirements.txt`
 5. **spaCy language models** (once): run the download loop under
@@ -55,6 +59,9 @@ time.
    `master_network.xlsx`, `master_themes.xlsx`, `events.csv`, `report.html`
    and the other files under [Outputs](#outputs). The master files are written
    automatically at the end of the run; `run.log` has the whole log.
+   `report.html`, `organisations.csv` and `mentions.csv` list everything
+   found; only `master_network` applies the theme filter (see
+   [Theme-hit inclusion criterion](#theme-hit-inclusion-criterion)).
 9. **If the run is interrupted** (Ctrl+C, a crash, a closed lid, a lost
    connection): activate the environment again (step 3) and run **exactly the
    same command**. Pages already downloaded are reused; only what is missing
@@ -66,15 +73,31 @@ time.
     ```
 
     See [Analysis tables, charts and network files](#analysis-tables-charts-and-network-files).
-11. **To change the inclusion criterion** without crawling again:
-    `python make_master.py ~/Documents/actor_mapping/full_run -o ~/Documents/actor_mapping/full_run_none --theme-filter none`
-    (see [Theme-hit inclusion criterion](#theme-hit-inclusion-criterion)).
+11. **To change the inclusion criterion** without crawling again, build the
+    master files once more and analyse them:
+
+    ```bash
+    python make_master.py ~/Documents/actor_mapping/full_run -o ~/Documents/actor_mapping/full_run_none --theme-filter none
+    python analytics.py ~/Documents/actor_mapping/full_run_none -o ~/Documents/actor_mapping/full_run_none_analytics
+    ```
+
+    `analytics.py` uses the filter the master files were built with (here
+    `none`) unless you give `--theme-filter`, and finds the original run
+    folder (for `seed_links.json`, `pages.csv` and `sites.csv`) through the
+    masters' `about` sheet; if that folder has moved, add
+    `--run ~/Documents/actor_mapping/full_run`. Analysing the `none` masters
+    with `--theme-filter source` gives the filtered network together with
+    the unfiltered baseline (sensitivity table and the event-level columns of
+    `org_theme`), which the default masters cannot give (see
+    [Theme-hit inclusion criterion](#theme-hit-inclusion-criterion)).
 
 Keep `run_info.json` and `run.log` with the results: they record the command,
 the versions and the spaCy models used, which the methods section needs. To
 record the exact package versions as well: `pip freeze > requirements.lock`.
 
 ## Install
+
+Needs Python 3.9 or newer (3.10 or newer recommended; `python3 --version`).
 
 ```bash
 python3 -m venv .venv && source .venv/bin/activate
@@ -138,6 +161,13 @@ resolved against the folder you run the command from, so running it inside
 `site_actor_mapping/` puts results in `site_actor_mapping/results/` (ignored
 by git, so cached pages are never committed by accident). An absolute path
 such as `~/Documents/climate_camp` works too.
+
+The input files and options are checked before anything is fetched: a
+missing seed PDF, theme, watchlist or stoplist file, a start URL that is not
+a web address, or `--calendar-from` after `--calendar-to` stops the run at
+once with a message. A `--themes`, `--watchlist` or `--stoplist` file that is
+not in the current folder is looked for next to `site_actors.py` (the log
+says so), so the bundled theme file works from any folder.
 
 Every fetched page is cached in `<output-dir>/cache/`, so an interrupted
 crawl resumes where it stopped, and you can re-run the analysis with revised
@@ -288,8 +318,8 @@ master network, together with its organisations. Theme terms that appear only
 in menus, sidebars, footers, text repeated across a site or short labels do
 not count. `master_themes` is never filtered.
 
-`--theme-filter` sets the unit at which a hit is required, on both
-`site_actors.py` and `make_master.py`:
+`--theme-filter` sets the unit at which a hit is required, on
+`site_actors.py`, `make_master.py` and `analytics.py`:
 
 | Value | Organisations of a source are kept when ... |
 |---|---|
@@ -305,12 +335,25 @@ organisations and events were kept out of how many, and the
 and the reason. `sources.csv` lists every source with its theme hits
 (`has_theme_hit`, `theme_hits`, one `theme:` column per theme).
 
+`report.html`, `organisations.csv`, `mentions.csv` and `org_cooccurrence.csv`
+are not filtered: they list everything found. Only `master_network` (and the
+analysis built on it) applies the criterion.
+
 To compare with and without the criterion, build the master files again from
-the same results; nothing is crawled or analysed again:
+the same results; nothing is crawled again:
 
 ```bash
 python make_master.py results/full_run -o results/full_run_none --theme-filter none
+python analytics.py results/full_run_none -o results/full_run_none_analytics
+python analytics.py results/full_run_none -o results/full_run_compare --theme-filter source
 ```
+
+`analytics.py` defaults to the filter recorded in the masters' `about` sheet
+(older masters without one: `source`). On masters that are already filtered
+it cannot measure the unfiltered baseline: the `none` rows of its sensitivity
+table then equal the filtered ones, and the event-level `share`, `lift` and
+`shrunk` columns of `org_theme` are left blank (`summary.md`, caveat C11). The
+third command above (unfiltered masters, `--theme-filter source`) gives both.
 
 ## Event countries
 
@@ -337,8 +380,18 @@ finds something wins (`country_source`):
 Places that are the topic rather than the venue ("solidarity with Ukraine",
 "pour la Palestine") are left out where the wording shows it. An empty
 `country_source` means no country was found. On the two real agendas about
-97% of events are located. To check the resolution rate of a run:
-`python gazetteer.py --events results/full_run/events.csv`.
+97% of events are located. A country named after "those from" or "refugees
+from", or in a clause about a contested project once a venue has been named
+("Tour in the Netherlands ... against the project of a new canal in the North
+of France" gives NL only), counts as the topic; in agenda entry text, an
+undated "Title - Place" line after the entry's last link (usually the next
+event) and blog comment trailers ("RÉPONDRE ...") are ignored. An agenda entry
+that holds two events ("COP29, Baku, Azerbaijan Earth Social Conference 2024
+in Oaxaca, México") gets both countries. To check the resolution rate of a run:
+`python gazetteer.py --events results/full_run/events.csv` (it prints the
+run's own `country_source` counts, then re-resolves every event with the
+current `gazetteer.py`, using the `seed_links.json` next to `events.csv` for
+the entry text; `--seed-links FILE` names another one).
 
 ## Master files
 
@@ -369,11 +422,31 @@ source tied to two events gives two rows.
 - `menus_and_footers`: names found only in menus, headers, footers or text
   repeated on every page of a site, kept apart so site furniture does not
   inflate the network.
+- `ner_only_candidates`: rows whose organisation was found only by spaCy's
+  named-entity recognition with no other evidence anywhere in the corpus
+  (all sources, theme hit or not). They are kept here, with why they are only
+  candidates (`why_candidate`) and in how many sources and sites they occur,
+  but not in the network. A name counts as corroborated when another rule
+  found it, it contains an organisational noun, an acronym was spelt out for
+  it, it ends in a legal form ("RWE AG"), it is a capitalised acronym named
+  in two or more sources, or it is named in the content of three or more
+  sources on two or more websites (or three or more agenda entries).
+  `make_master.py --keep-ner-only` puts them back into the network; a
+  `--watchlist` entry confirms a single name.
 - `sources`: every source read, with its theme hits.
 - `excluded_sources`: sources left out by the theme filter, with their
   organisations and the reason.
-- `about`: how the file was made (filter, counts before and after, the run's
-  command and versions).
+- `about`: how the file was made (filter, counts before and after, the result
+  folders it was built from, the run's command and versions). `analytics.py`
+  reads its filter and folders.
+
+A network name that joins several organisations ("Exxon & Shell",
+"Greenpeace and Civil Rights Defenders") is split into one row per
+organisation when every part is itself a corroborated organisation; names
+such as "Bund für Umwelt und Naturschutz" stay whole. The log gives the
+number of rows split. Results folders made by an older version (no country
+columns in `events.csv`) get their event countries from `gazetteer.py` when
+the masters are built.
 
 **`master_themes`**: one row per theme term found and event: theme, term,
 event, event date, link and key, the country columns, the source link, the
@@ -403,7 +476,8 @@ other settings:
 
 ```bash
 python make_master.py results/run1 results/run2 -o results/master \
-  [--min-confidence medium] [--theme-filter source|site|event|none] [--keep-menu-themes]
+  [--min-confidence medium] [--theme-filter source|site|event|none] [--keep-menu-themes] \
+  [--keep-ner-only]
 ```
 
 `make_master.py` writes its own `run.log` in the output folder.
@@ -474,6 +548,9 @@ host it moved to when its start page redirected elsewhere (`moved_to`).
   ...` in `sites.csv`) unless `--ignore-robots` is given.
 - Several linked websites are crawled at the same time (`--follow-workers`,
   default 8), but each host still gets one request at a time with `--delay`.
+  A PDF that several linked websites link is read once and tied to the
+  events of the most-linked of them, so the result does not depend on which
+  server answered first.
 - Status values in `sites.csv`: `crawled`, `unreachable: <reason>` (e.g.
   `rate-limited (HTTP 429), retried on the next run`, `blocked (HTTP 403)`,
   `not found (HTTP 404)`, `connection failed`), `failed: <error>`,
@@ -523,7 +600,9 @@ Written to `--output-dir`:
 - `report.html`: interactive browser: filter organisations by name, theme,
   type, confidence and mention count; click one to read every passage that
   mentions it, with the name and theme terms highlighted and links to the
-  source pages.
+  source pages. Like `organisations.csv`, `mentions.csv` and
+  `org_cooccurrence.csv`, it lists everything found: only `master_network`
+  applies the theme filter.
 - `events.csv`: one row per event: `event`, `date`, `event_link`,
   `event_key`, `listed_on` (calendar, agenda PDFs), `calendar_months`, the
   country columns (`event_country`, `country_iso`, `country_source`,
@@ -612,7 +691,10 @@ python analytics.py results/full_run -o results/analytics_curated --org-codes or
 It needs `master_network`, `master_themes` and `events.csv`; `sources.csv`,
 `seed_links.json`, `pages.csv` and `sites.csv` are used when present (also
 from every `--run` folder, combined), and analyses that need a missing file are skipped
-and listed in `summary.json`. The output folder receives:
+and listed in `summary.json`. A `make_master.py` output folder holds only the
+master files: without `--run`, the run folders it was built from (named in
+its `about` sheet) are used when they still exist; give `--run` when they
+have moved. The output folder receives:
 
 - `analytics.xlsx` (README and diagnostics sheets first) and the same tables
   as `tables/*.csv`: coverage by stream (agenda, calendar) with confidence
@@ -639,10 +721,41 @@ the event title; C (the default) = organisations at or above
 C_curated = C without the places, site furniture, noise and event names you
 coded in `--org-codes`.
 
-Options: `--theme-filter` (as in `make_master.py`, default `source`; the
-master files may already be filtered, which the summary reports: to analyse
-without the criterion, rebuild them with `make_master.py --theme-filter none`
-first), `--min-confidence`, `--org-codes` and `--event-codes` (curation files;
+Some definitions behind the tables:
+
+- Event-level theme prevalence (`prev_*` tables, column `measure`): `own`
+  (the event's own listing text), `in_title`, and `any_all` (a theme on any
+  layer) are counted over all events of the group; `landing`, `linked` and
+  `any_web` only over the events whose link was read (column `denominator`).
+  `any_all` is the figure in `summary.md`; `any_web` can be lower than `own`
+  because its denominator is smaller.
+- Event theme flags count every theme row outside menus and footers,
+  including rows the pipeline marked `duplicate_of` (a passage seen first
+  under another event); the de-duplication applies to the passage, document
+  and concentration counts only.
+- `link_followed` is true for every event with web-layer rows, even when
+  `sites.csv` (from another run, or with the link host as the main site)
+  does not list its host as read.
+- `bip_betweenness` (`org_centrality`) is shortest-path betweenness on the
+  event-organisation graph, normalised by (n-1)(n-2)/2 over all its nodes as
+  for a one-mode graph (not the bipartite maximum); compare it only within
+  one run.
+- `org_theme`: at event level, `share`, `lift` and `shrunk` compare an
+  organisation's series with the base rate over all sources; they are blank
+  when the masters were already theme-filtered (see
+  [Theme-hit inclusion criterion](#theme-hit-inclusion-criterion)).
+- `precision_by_stratum`: the `ALL` row is the stratified estimate, with a
+  95 % interval (Wilson with the effective sample size, finite population
+  correction) for the strict and lenient precision.
+- Before curation, `charts/05_backbone.png` colours organisations by the
+  `suggested_class` guesses of `org_codes_template.xlsx` (`site_ui?`,
+  `place?`, `company?` ...) and says "uncurated" in its title; with
+  `--org-codes` it uses your `actor_class` codes.
+
+Options: `--theme-filter` (as in `make_master.py`; default: the filter the
+masters were built with, read from their `about` sheet, or `source` for older
+masters; filtered masters cannot be analysed without the criterion, so
+rebuild them with `make_master.py --theme-filter none` first), `--min-confidence`, `--org-codes` and `--event-codes` (curation files;
 examples and column meanings in `analytics_codes_example/README.txt`),
 `--themes-file`, `--backbone-alpha`, `--sample-size`, `--seed`,
 `--no-charts`, `--no-graphs`. When the default network has fewer than five

@@ -59,22 +59,48 @@ def is_transient(status: int) -> bool:
     return status in TRANSIENT_STATUSES or status >= 500
 
 
+def _not_worth_retrying(error) -> bool:
+    """Connection errors a retry a few seconds later will not cure: the host name does
+    not resolve, or a proxy refuses the connection."""
+    try:
+        from urllib3.exceptions import NameResolutionError       # urllib3 2.x
+    except ImportError:                                          # urllib3 1.26
+        NameResolutionError = ()                                 # noqa: N806
+    from urllib3.exceptions import ProxyError
+    if isinstance(error, ProxyError) or (NameResolutionError and isinstance(error, NameResolutionError)):
+        return True
+    text = str(error)
+    return any(s in text for s in ("Name or service not known", "nodename nor servname",
+                                   "getaddrinfo failed", "Failed to resolve", "No address associated"))
+
+
 class _CappedRetry(Retry):
-    """urllib3 Retry that honours Retry-After, but never for longer than MAX_RETRY_AFTER."""
+    """urllib3 Retry that honours Retry-After, but never for longer than MAX_RETRY_AFTER,
+    and does not retry DNS failures or proxy refusals (each retry only added seconds of
+    waiting per unreachable host)."""
 
     def get_retry_after(self, response):  # noqa: D401 - urllib3 hook
         value = super().get_retry_after(response)
         return None if value is None else min(value, MAX_RETRY_AFTER)
 
+    def increment(self, method=None, url=None, response=None, error=None, _pool=None,
+                  _stacktrace=None):
+        if error is not None and _not_worth_retrying(error):
+            from urllib3.exceptions import MaxRetryError
+            raise MaxRetryError(_pool, url, error) from error
+        return super().increment(method=method, url=url, response=response, error=error,
+                                 _pool=_pool, _stacktrace=_stacktrace)
 
-def make_session(user_agent: str) -> requests.Session:
+
+def make_session(user_agent: str, connect: int = 2) -> requests.Session:
     """A requests session that retries connection errors, 429 and 5xx with backoff.
 
     POST is included because the calendar's admin-ajax month requests are reads.
     After the last retry the final error response is returned (not raised), so
-    the caller still sees the status code.
+    the caller still sees the status code. connect: retries after a failed
+    connection (1 for robots.txt, so a host that does not answer is given up sooner).
     """
-    kwargs = dict(total=3, connect=2, read=1, status=3, backoff_factor=1.5,
+    kwargs = dict(total=3, connect=connect, read=1, status=3, backoff_factor=1.5,
                   status_forcelist=[429, 500, 502, 503, 504],
                   allowed_methods=frozenset({"GET", "HEAD", "POST"}),
                   respect_retry_after_header=True, raise_on_status=False)
@@ -268,6 +294,11 @@ class Crawler:
         self.cfg = cfg
         self.cache = cache
         self.session = make_session(cfg.user_agent)
+        self._robots_session: Optional[requests.Session] = None
+        # (PDF URL, the page this crawl found it on), also for PDFs reused from the cache:
+        # lets crawl_linked give a PDF that several linked sites link the same referrer
+        # whichever thread fetched it first
+        self.pdf_referrers: List[Tuple[str, str]] = []
         self.hosts = {registered_host(urlparse(u).netloc) for u in cfg.start_urls}
         self.include_re = [re.compile(p) for p in cfg.include_patterns]
         self.exclude_re = [re.compile(p) for p in cfg.exclude_patterns]
@@ -325,7 +356,10 @@ class Crawler:
             status: Optional[int] = None
             reason = ""
             try:   # the session already retries connection errors, 429 and 5xx
-                resp = self.session.get(base + "/robots.txt", timeout=self.cfg.timeout)
+                if self._robots_session is None:
+                    self._robots_session = make_session(self.cfg.user_agent, connect=1)
+                    self._robots_session.headers.update(self.session.headers)
+                resp = self._robots_session.get(base + "/robots.txt", timeout=self.cfg.timeout)
                 status = resp.status_code
                 text = resp.text if status < 400 else ""
             except requests.RequestException as exc:
@@ -554,6 +588,8 @@ class Crawler:
                             log.warning("HTTP %s, not analysed: %s", page.status, url)
                         continue
                     self.outcomes["ok"] += 1
+                    if page.is_pdf and referrer:
+                        self.pdf_referrers.append((url, referrer))
                     if page.is_pdf and not shared:
                         pdfs += 1
                         if not from_cache:

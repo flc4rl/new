@@ -817,6 +817,8 @@ _TOPIC_NEAR = re.compile(  # directly before the place (an article may come betw
     r"freiheit fur|stop|end|against|contre|gegen|tegen|contro|contra|anti|accord de|accords de|"
     r"treaty of|traite de|agreement of|vertrag von|abkommen von|people of|peuple de|peuples de|"
     r"news from|refugees from|refugies de|migrants from|delegation from|delegation of|"
+    r"those from|people from|everyone from|deserters from|objectors from|soldiers from|"
+    r"deserteurs de|deserteurs d'|objecteurs de|objecteurs d'|"
     r"delegation de|delegacion de|embassy of|ambassade de|ambassade d'|botschaft von|"
     r"consulat de|consulate of|occupied|occupation of|occupation de|invasion of|invasion de|"
     r"bombing of|siege of|blockade of|blocus de)\s*" + _ART + r"$")
@@ -834,6 +836,11 @@ _TOPIC_FAR = re.compile(  # up to three words before the place
     r"migrants|workers|travailleurs|travailleuses|women|femmes|children|enfants|comrades|"
     r"camarades|struggle|struggles|luttes|lutte|resistance|movement|movements|mouvement|"
     r"mouvements|conscientious|from|aus|uit|da|des|of|the|all|those|everyone|who|qui|tous|toutes))*\s*(?:l'|d')?$")
+# "... against the project of a new canal in the North of France": once a venue
+# has been named, places later in a clause about a contested project are its topic.
+_TOPIC_PROJECT = re.compile(
+    r"(?:^|\W)(?:against|contre|gegen|tegen|contro|contra)\s+" + _ART
+    + r"(?:project|projects|projet|projets|projekt|projekte|progetto|proyecto|plans?)\b[^,;:.()\[\]|]*$")
 _TOPIC_AFTER = re.compile(
     r"^\s*(?:agreement|accord|abkommen|treaty|embassy|consulate|government|regierung|gouvernement|"
     r"'s government|war|krieg|guerre|solidarity|solidaritat|solidarite)\b")
@@ -868,6 +875,8 @@ _WORLDWIDE = re.compile(
     r"actions) (?:[\w']+ ){0,3}(?:internationale?s?|international|mondiale?s?|"
     r"global|globale?s?|europeennes?|european|weltweit|mundial|internazionale)|"
     r"internationaler aktionstag|internationale aktionstage|"
+    r"international (?:call|calls) (?:for|to) (?:action|actions|mobili[sz]ation|solidarity)|"
+    r"appel international|internationaler aufruf|"
     r"(?<=, )(?:europe|europa)(?=[.!]?\s*(?:$|[a-z]{0,3}[.!]?\s*$)))(?!\w)")
 
 
@@ -928,6 +937,7 @@ def _find(text: str, with_adj: bool = False, in_tag: bool = False) -> List[_Ment
         if with_adj and (_LANG_BEFORE.search(before) or _LANG_AFTER.search(after)):
             continue
         if (_TOPIC_NEAR.search(before) or _TOPIC_FAR.search(before) or _TOPIC_AFTER.search(after)
+                or (kept and _TOPIC_PROJECT.search(f[kept[-1].end:mt.start]))
                 or (topic_prev is not None and mt.kind == "country" and _CHAIN.search(f[topic_prev.end:mt.start])
                     and (mt.iso in TOPIC_PRONE or _LIST_AND.search(f[topic_prev.end:mt.start])))):
             prev, topic_prev = None, mt
@@ -1081,6 +1091,23 @@ def _places(text: str):
     return [m.iso for m in sel], [m.text for m in sel], method
 
 
+# Text after the entry's last link that reads like the title of another event
+# ("Days against LNG - Bucharest", an undated line the PDF reader attached to this
+# entry), and blog comment trailers ("RÉPONDRE 9. Anonyme").
+_ENTRY_TRAILER = re.compile(r"\s(?:R[ÉE]PONDRE|REPLY|ANTWORTEN)\b.*$", re.S)
+_URL_ANY = re.compile(r"https?://\S+|www\.\S+")
+_OTHER_TITLE = re.compile(r"^\s*[+]?\s*[A-ZÀ-Ý][^:.!?\n]{2,80}\s[-–]\s[A-ZÀ-Ý][\w'’ -]{1,40}\s*$")
+
+
+def _entry_body(text: str) -> str:
+    """The part of an agenda entry's text that belongs to the entry itself."""
+    text = _ENTRY_TRAILER.sub("", text)
+    urls = list(_URL_ANY.finditer(text))
+    if urls and _OTHER_TITLE.match(text[urls[-1].end():]):
+        text = text[:urls[-1].end()]
+    return text
+
+
 def _special(text: str):
     """("ONLINE" | "INT" | "", matched) from online / worldwide wording."""
     clean = _blank_urls(text)
@@ -1163,6 +1190,7 @@ def event_country(name: str, entry_text: str = "", link: str = "", structured: s
     kind, txt = _special(name)
     if kind:
         return _result([kind], "online" if kind == "ONLINE" else "international", [txt])
+    entry_text = _entry_body(entry_text)
     if entry_text.strip():
         isos, tag_matched, special = _tags(entry_text)
         matched = tag_matched
@@ -1248,6 +1276,15 @@ SELFTEST = [
     ("Camp climat en Adriatique, île de Krk, Croatia. Krk island, Croatia.", "", "", "", ["HR"], "name"),
     ("Marches pour la forêt, contre une scierie sur le piémont des Pyrénées", "", "", "", [], "none"),
     ("Mobilisation contre la Banque mondiale, Washington", "", "", "", ["US"], "city"),
+    ("Week of action against the billionaire Bolloré and the far right he promotes",
+     "(29.01- 02.02) - Week of action against the billionaire Bolloré and the far right he promotes: "
+     "https://vimeo.com/1030528809 + https://france.attac.org/x Days against LNG - Bucharest", "", "", [], "none"),
+    ("International Call for Action : Protection and asylum for all those from Russia, Belarus and Ukraine "
+     "who refuse military service.", "", "", "", ["INT"], "international"),
+    ("Tour in the Netherlands with Les Soulèvements and the struggle against the project of a new mega canal "
+     "in the North of France", "", "", "", ["NL"], "name"),
+    ("Manifestation contre le projet de bassines à Sainte-Soline", "", "", "", ["FR"], "city"),
+    ("Climate camp", "Climate camp near Leipzig https://x.org RÉPONDRE 9. Kalle aus Paris", "", "", ["DE"], "entry"),
 ]
 
 
@@ -1267,11 +1304,19 @@ def selftest(verbose: bool = False) -> int:
 
 
 def _evaluate(events_csv: str, seed_links: str = "") -> None:
-    """Resolution rate per method on an events.csv (and optional seed_links.json)."""
+    """Resolution rate per method on an events.csv (and optional seed_links.json,
+    by default the one next to events.csv). When events.csv has the run's own
+    country_source column, its counts are printed first: they are the run's rate."""
     import csv
     import json
+    import os
     from collections import Counter, defaultdict
     entries = defaultdict(list)
+    if not seed_links:
+        near = os.path.join(os.path.dirname(os.path.abspath(events_csv)), "seed_links.json")
+        if os.path.exists(near):
+            seed_links = near
+            print(f"agenda entry text from {near}")
     if seed_links:
         with open(seed_links, encoding="utf-8") as fh:
             data = json.load(fh)
@@ -1280,6 +1325,14 @@ def _evaluate(events_csv: str, seed_links: str = "") -> None:
                 entries[(e.get("name") or "").casefold().strip()].append(" ".join(e.get("lines") or []))
     with open(events_csv, encoding="utf-8-sig", newline="") as fh:
         rows = list(csv.DictReader(fh))
+    if rows and "country_source" in rows[0]:
+        own = Counter((r.get("country_source") or "none") for r in rows)
+        k = sum(1 for r in rows if (r.get("country_iso") or r.get("event_country") or "").strip())
+        print(f"As recorded in the run (country_source column): {len(rows)} events, {k} with a country "
+              f"({100 * k / len(rows):.1f}%)")
+        for meth, c in own.most_common():
+            print(f"  {meth:14s} {c:5d}  {100 * c / len(rows):5.1f}%")
+        print("Re-resolved with this gazetteer.py:")
     methods: Counter = Counter()
     for r in rows:
         link = r.get("event_link") or ""

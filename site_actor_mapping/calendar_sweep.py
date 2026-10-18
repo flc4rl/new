@@ -224,7 +224,7 @@ def parse_month(value: Optional[str]) -> Optional[Tuple[int, int]]:
     if not value:
         return None
     m = re.fullmatch(r"(\d{4})-(\d{1,2})", value.strip())
-    if not m:
+    if not m or not 1 <= int(m.group(2)) <= 12:
         raise ValueError(f"expected YYYY-MM, got {value!r}")
     return int(m.group(1)), int(m.group(2))
 
