@@ -320,11 +320,14 @@ def extract_entries(source: str) -> Tuple[List[Entry], List[PdfLink], List[List[
                 annotated.append(url)
 
             # 2. URLs written out in the text (re-joined when a line wrap broke them)
+            continued = set()   # lines whose first word was glued onto a URL ending the line before
             for k, (top, bottom, text) in enumerate(raw_lines):
                 masked = URL_IN_TEXT.sub(lambda m: " " * len(m.group(0)), text)
                 for m in BARE_URL.finditer(masked):
                     if _is_word_not_url(m.group(0)):      # "migrants.es": a French plural
                         continue
+                    if k in continued and not text[:m.start()].strip():
+                        continue   # "gelaende.org/..." after "https://www.ende-": already joined
                     url = _clean_url(m.group(0))
                     if url and not any(url.split("://", 1)[-1][:30] in a for a in annotated):
                         links.append(PdfLink(source, pno, url, "", text, "", "", "", owners[k]))
@@ -339,12 +342,20 @@ def extract_entries(source: str) -> Tuple[List[Entry], List[PdfLink], List[List[
                         if (raw.endswith(("-", "/", "?", "=", "&", "_")) or re.match(r"^[\w%=&?/.#-]*[/=&%][\w%=&?/.#-]*$", nxt)) \
                                 and not parse_entry_date(raw_lines[k + 1][2], year)[0]:
                             raw += nxt
+                            continued.add(k + 1)
                     url = _clean_url(raw)
                     if not url:
                         continue
                     stem = url.split("://", 1)[-1][:40]
                     if any(stem in a or a.split("://", 1)[-1][:40] in url for a in annotated):
                         continue   # the clickable version of the same link
+                    # A copy-paste fragment cut inside the host ("https://www.climat (https://www.climatestrike.ch)
+                    # estrike.ch"): the written text is only the start of a clickable or written-out link.
+                    cut = raw.split("://", 1)[-1].rstrip("/.,;:")
+                    if "/" not in cut and len(cut) >= 8 and any(
+                            re.match(re.escape(cut) + r"[\w-]", o.split("://", 1)[-1])
+                            for o in annotated + URL_IN_TEXT.findall(text)):
+                        continue
                     links.append(PdfLink(source, pno, url, "", text, "", "", "", owners[k]))
 
     # Names, dates and links per entry

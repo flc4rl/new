@@ -210,7 +210,9 @@ Options for calendars and linked websites are listed under
   Rebellion, Climate Justice Action, Shell Must Fall) with their aliases. It
   is never loaded unless you pass `--watchlist field_watchlist.txt`. Using it
   adds prior knowledge to the network (these groups are then always found and
-  rated high), so report it in the methods section.
+  rated high), so report it in the methods section. Local groups stay
+  separate: "XR Zagreb" is not merged into Extinction Rebellion although the
+  watchlist alias "XR" is inside it; it is a more specific local group.
 - **Stoplist** (`default_stoplist.txt`): names to ignore (social media
   platforms, site furniture, bank details). Add anything the first run shows
   to be noise.
@@ -223,7 +225,7 @@ the master file), which is the main handle for judging precision:
 | Method | What it catches | Example |
 |---|---|---|
 | `watchlist` | Names and aliases you supplied | "MSF" → Médecins Sans Frontières |
-| `pattern` | Capitalised names containing an organisational head noun, in English, Italian, Spanish, French, German, Portuguese, Dutch, Danish and Swedish, also at the end of compound words ("Klimakollektivet", "Klimabündnis"); also a movement acronym followed by a place ("XR Zagreb", "FFF Lisbon") | "Rete Antirazzista Milano", "Migrant Rights Coalition", "Falkirk council" |
+| `pattern` | Capitalised names containing an organisational head noun, in English, Italian, Spanish, French, German, Portuguese, Dutch, Danish and Swedish, also at the end of compound words ("Klimakollektivet", "Klimabündnis"); also a movement acronym (XR, XRY, FFF) followed by a place ("XR Zagreb", "FFF Lisbon") or on its own ("XR - climate occupation in Rome", "organised by XR."), but not before another capitalised word ("XR Youth" is judged as a whole name) | "Rete Antirazzista Milano", "Migrant Rights Coalition", "Falkirk council" |
 | `pattern_after` | A capitalised name followed by a lower-case organisational noun; weak, so it is checked like NER | "the Abolitionist Futures collective" |
 | `appositive` | Names introduced or followed by a descriptor | "the feminist collective **Mujeres Creando**", "**Sea-Watch**, a German NGO", "l'associazione **Naga**" |
 | `ner` | spaCy named-entity recognition (`ORG`) | names without a tell-tale noun, e.g. "Abolitionist Futures" |
@@ -252,6 +254,9 @@ or by a descriptor are checked against the whole corpus before they are kept:
 - a name that a web address spells but that is an event series or made of
   ordinary words ("Camp climat", "Global Day of Action") counts only in the
   paragraph or agenda entry that gives the address;
+- a NER-only name in the location part of an agenda entry ("[Altdorf Forest,
+  Germany]", "camp, Biesenthal, Germany.") is a place, and a street followed
+  by a house number ("Heidenheimerstr. 55") is an address;
 - documents ("... Toolkit", "... Policy") and event names are not organisations;
 - link text must look like a name: not an instruction ("Go to Instagram
   page", "Je fais un don"), a sentence, or an article title, and not a link
@@ -640,7 +645,11 @@ without the criterion, rebuild them with `make_master.py --theme-filter none`
 first), `--min-confidence`, `--org-codes` and `--event-codes` (curation files;
 examples and column meanings in `analytics_codes_example/README.txt`),
 `--themes-file`, `--backbone-alpha`, `--sample-size`, `--seed`,
-`--no-charts`, `--no-graphs`. Curation loop: fill in the `organisations`
+`--no-charts`, `--no-graphs`. When the default network has fewer than five
+organisations (typical of a run on the agenda PDFs alone, where most names
+are low-confidence NER finds), the log, `summary.json` and `summary.md` warn
+that its centrality and backbone figures are not meaningful; use scenario A
+in the sensitivity table or `--min-confidence low` instead. Curation loop: fill in the `organisations`
 sheet of `org_codes_template.xlsx`, save it as `org_codes.csv` and run again
 with `--org-codes org_codes.csv`. `python analytics.py --selftest` checks the
 installation.

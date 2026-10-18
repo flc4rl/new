@@ -175,18 +175,25 @@ _title_key_cache: Dict[str, str] = {}
 
 def _in_title(org_key: str, event_name: str) -> bool:
     """Organisation named in the event title as whole words (for older folders)."""
-    from extract import canonical_key, squash_key, squash_runs
-    k = canonical_key(org_key or "")
+    from extract import _KEY_SHAPE, canonical_key, squash_runs
+    k = org_key or ""
+    # org_key is already a key: keying it again is not idempotent for a glued first word
+    # ("A-camp" has the key "a camp", which keyed again becomes "camp" and would match any
+    # title with "camp" in it). Only re-key values that do not look like a key.
+    if not (_KEY_SHAPE.fullmatch(k) and k == k.casefold()):
+        k = canonical_key(k)
     if not k:
         return False
     t = _title_key_cache.get(event_name)
     if t is None:
-        t = _title_key_cache[event_name] = f" {canonical_key(event_name or '')} "
+        # also keyed with its leading article kept ("A Camp, ..." for the key "a camp")
+        t = _title_key_cache[event_name] = (f" {canonical_key(event_name or '')} "
+                                            f" {canonical_key('zzqx ' + (event_name or ''))[5:]} ")
     if f" {k} " in t:
         return True
     # Spacing variants on word boundaries: "Geef Tegengas" in "Geef Tegen Gas ...".
-    sq = squash_key(k)
-    if len(sq) >= 4 and sq in squash_runs(event_name or ""):
+    sq = re.sub(r"[\W_]+", "", k)   # not squash_key(k), which would key k again
+    if len(sq) >= 4 and sq in (squash_runs(event_name or "") | squash_runs("zzqx " + (event_name or ""))):
         return True
     # "#ShellMustFall": a one-word name at the start of a hashtag.
     return " " not in k and len(k) >= 4 and any(

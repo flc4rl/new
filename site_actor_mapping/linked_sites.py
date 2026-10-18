@@ -369,7 +369,11 @@ def crawl_linked(targets: Dict[str, List[Via]], cache: PageCache, base_cfg: Craw
         log.warning("%d of %d linked websites will NOT be crawled because of --follow-max-sites %d "
                     "(the most-linked are crawled first; links from seed PDFs count too). "
                     "Use --follow-max-sites 0 for no limit.", len(ranked) - limit, len(ranked), max_sites)
-        log.warning("Not crawled: %s", ", ".join(ranked[limit:]))
+        # Name only the first few: with a small limit the full list runs to hundreds of hosts,
+        # and every one of them is in sites.csv anyway.
+        left_out = ranked[limit:]
+        more = f" and {len(left_out) - 20} more" if len(left_out) > 20 else ""
+        log.warning("Not crawled: %s%s (all listed in sites.csv)", ", ".join(left_out[:20]), more)
     if base_cfg.render_js and workers > 1:
         log.info("--render-js: linked sites are crawled one at a time")
         workers = 1

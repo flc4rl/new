@@ -142,6 +142,11 @@ def collapse(text: str) -> str:
     return _WS.sub(" ", text or "").strip()
 
 
+def count_of(k, word: str, plural: str = "") -> str:
+    """'1 organisation', '2 organisations' (for user-facing sentences)."""
+    return f"{k} {word if k == 1 else (plural or word + 's')}"
+
+
 def wilson(k: int, n: int, z: float = 1.96) -> Tuple[Optional[float], Optional[float]]:
     if not n:
         return None, None
@@ -1968,9 +1973,9 @@ def a5_network(an: Analysis) -> None:
         # e.g. a run of the seed agendas only: most entry names are low-confidence NER finds
         n_a = next((r["orgs"] for r in rows if r["theme_filter"] == tf and r["scenario"] == "A"
                     and r["layers"] == "L1-L3" and r["node_level"] == "series"), 0)
-        an.warn("The default network (scenario %s) has only %d organisations (scenario A: %s). Centrality and "
+        an.warn("The default network (scenario %s) has only %s (scenario A: %s). Centrality and "
                 "backbone figures are not meaningful; see the sensitivity table or try --min-confidence low",
-                an.default_sc, n_orgs, n_a)
+                an.default_sc, count_of(n_orgs, "organisation"), n_a)
     a6_centrality(an, ties, G, P, B)
     an.exports = {an.default_sc: (G, B)}
     if an.default_sc != "A":
@@ -2726,10 +2731,13 @@ def chart_backbone(an: Analysis, plt, path: Path) -> None:
     fig, ax = plt.subplots(figsize=(10, 8))
     ax.set_axis_off()
     title = (f"Organisation backbone, scenario {an.default_sc}, alpha {an.a.backbone_alpha} "
-             f"({B.number_of_nodes()} organisations, {B.number_of_edges()} ties)")
+             f"({count_of(B.number_of_nodes(), 'organisation')}, {count_of(B.number_of_edges(), 'tie')})")
     ax.set_title(title, loc="left")
     if not B.number_of_edges():
-        ax.text(0.5, 0.5, "No backbone ties at this alpha", ha="center", va="center", transform=ax.transAxes,
+        # an empty projection (no two organisations share an event) is not the same as a strict alpha
+        msg = ("No backbone ties at this alpha" if an.P.number_of_edges() else
+               "No two organisations share an event series, so there is nothing to project")
+        ax.text(0.5, 0.5, msg, ha="center", va="center", transform=ax.transAxes,
                 color=INK2)
         _save(plt, fig, path)
         return
@@ -3143,10 +3151,11 @@ def summary_md(an: Analysis, sm: dict) -> str:
                 "including those without an event or only in menus) by highest confidence: " + ", ".join(f"{k} {v}" for k, v in conf.items()) + ".")
     if dg:
         para.append(f"The default network (scenario {dg['scenario']}, series level, all layers) has "
-                    f"{dg['series']} event series, {dg['orgs']} organisations and {dg['edges']} ties; its "
-                    f"projection has {dg['proj_edges']} organisation pairs, of which the disparity backbone "
-                    f"(alpha {a.backbone_alpha}) keeps {dg['backbone_edges']} between {dg['backbone_nodes']} "
-                    f"organisations. Betweenness: {sm['betweenness']}.")
+                    f"{dg['series']} event series, {count_of(dg['orgs'], 'organisation')} and "
+                    f"{count_of(dg['edges'], 'tie')}; its projection has "
+                    f"{count_of(dg['proj_edges'], 'organisation pair')}, of which the disparity backbone "
+                    f"(alpha {a.backbone_alpha}) keeps {dg['backbone_edges']} between "
+                    f"{count_of(dg['backbone_nodes'], 'organisation')}. Betweenness: {sm['betweenness']}.")
     prec = an.facts.get("precision")
     if prec:
         para.append(f"Coded organisation precision (stratified estimate): strict {prec['precision']}, lenient "

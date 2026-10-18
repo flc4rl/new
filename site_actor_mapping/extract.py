@@ -288,6 +288,9 @@ ADDRESS_BEFORE = re.compile(
     r"lane|square|straße|strasse|str\.|platz|weg|gasse|allee|viale|piazza|calle|avenida|plaza|rua|"
     r"praça|straat|plein|laan|gade|vej|gatan|vägen|arrêt(?:\s+de\s+bus)?|bus|tram|metro|métro|station|"
     r"gare|halte|haltestelle)(?:\s+(?:de\s+la|de\s+l['’]|de|du|des|d['’]|di|del|della))?\s*$", re.I)
+# A street name followed by a house number: "Heidenheimerstr. 55", "Havnegade 12".
+_STREET_NUMBER = re.compile(r"(?:stra(?:ß|ss)e|str|gasse|weg|gade|vej|straat|laan|gatan|vägen)\.?$", re.I)
+_HOUSE_NUMBER_AFTER = re.compile(r"^\.?\s*(?!(?:19|20)\d\d\b)\d{1,4}[a-z]?\b(?!\.\d)")
 # A house number before the name and a postcode or ", Town" after it: "138/140 Pleasance, Edinburgh".
 _ADDRESS_NUMBER = re.compile(r"(?<![\w.])(?!(?:19|20)\d\d\b)\d{1,5}[a-z]?(?:[/-]\d{1,5})?,?\s*$")
 _POSTCODE_AFTER = re.compile(r"^\s*(?:,\s*)?(?:\d[A-Z]{2}\b|\d{4,5}\b|[A-Z]{1,2}\d{1,2}[A-Z]?\s+\d[A-Z]{2}\b)")
@@ -796,21 +799,27 @@ def is_gazetteer_place(surface: str) -> bool:
     places.py lists or the gazetteer. As in the gazetteer, its CASE_SENSITIVE names
     ("Lingen", "Bure", "Allier") count only when written with a capital letter, and its
     WEAK names ("Nice", "Tours", "Roma", "Essen"), which are also ordinary words or
-    people's names, never count on their own."""
+    people's names, never count on their own. These two rules also apply to names that
+    places.py lists ("Nice", "Tours"), so a WEAK name counts only in a list with a place
+    that is not WEAK ("Nice and Marseille"). (The plain places.py gate, is_place_key, is
+    applied separately in extract().)"""
     parts = [p.strip(" .()[]") for p in _GAZ_LIST_SPLIT.split(surface.strip())]
     parts = [p for p in parts if p]
     if not parts:
         return False
+    strong = False
     for p in parts:
+        k = _GAZ_KEY(p) if _GAZ_KEY is not None else None
+        if k is not None and k in _GAZ_CASE and not p[:1].isupper():
+            return False   # "bure", "allier": ordinary words in lower case
+        weak = k is not None and k in _GAZ_WEAK
         if canonical_key(p) in PLACES_KEYS:
+            strong = strong or not weak
             continue
-        if _GAZ_KEY is None:
+        if (k is None or k not in _GAZ_LOOKUP or k in _GAZ_NOT_PLACE or k.startswith("no ")):
             return False
-        k = _GAZ_KEY(p)
-        if (k not in _GAZ_LOOKUP or k in _GAZ_NOT_PLACE or k.startswith("no ") or k in _GAZ_WEAK
-                or (k in _GAZ_CASE and not p[:1].isupper())):
-            return False
-    return True
+        strong = strong or not weak
+    return strong
 
 
 # --------------------------------------------------------------------------
@@ -1185,6 +1194,10 @@ class _SquashDict(dict):
         return dict.__getitem__(self, found) if found is not None else default
 
 
+# What canonical_key returns: words of letters and digits separated by single spaces.
+_KEY_SHAPE = re.compile(r"\w+(?: \w+)*")
+
+
 def _squash_of_key(key: str) -> str:
     """The squashed form of a canonical key (see squash_key); short keys are kept as they
     are, so that two- and three-letter acronyms are never merged with anything."""
@@ -1500,11 +1513,11 @@ class OrgExtractor:
         cache_dir: keep NER results in cache_dir/ner_cache.sqlite, keyed by model,
         model and spaCy versions and paragraph text, so a re-run (--no-crawl with new
         themes or stop lists) does not run spaCy again on text it has already seen."""
-        self.watchlist = watchlist
+        self.watchlist = watchlist if watchlist is not None else Watchlist.load(None)
         # Organisation keys by squashed form (see merge_key), seeded with the watchlist's
         # own keys so that a watchlist name is always the one its variants merge into.
         self._merge_keys: Dict[str, str] = {}
-        for ckey in watchlist.display:
+        for ckey in self.watchlist.display:
             self.merge_key(ckey)
         self.stop_exact, self.stop_pats = stoplist
         self.use_links = use_links
@@ -1833,8 +1846,9 @@ class OrgExtractor:
                             new_rows.append((hashlib.sha1(f"{mid}\x00{t}".encode("utf-8")).hexdigest(),
                                              rec.to_json()))
                 except Exception as exc:  # noqa: BLE001 - one bad model must not stop the analysis
-                    log.warning("spaCy model %r failed while analysing text (%s: %s); NER is skipped "
-                                "for its language from now on", name, type(exc).__name__, exc)
+                    log.warning("spaCy model %r failed while analysing text (%s: %s); from now on NER "
+                                "uses another installed model for its language, if any, or is skipped "
+                                "for it", name, type(exc).__name__, exc)
                     self.broken_models.add(name)
                     self._models[name] = None
                     self._lru.pop(name, None)
@@ -1988,8 +2002,12 @@ class OrgExtractor:
         first; canonical_key already merges case, accents, umlaut spellings, elided
         articles and hyphens. The display name is chosen later from the surface forms,
         so the most frequent spelling is shown whichever key was seen first. Keys of
-        three letters or fewer are never merged."""
-        key = canonical_key(name)
+        three letters or fewer are never merged.
+
+        A lower-case string of plain words is taken to be a key already and is not
+        keyed again: canonical_key is not idempotent for a glued first word ("A-camp"
+        has the key "a camp", which keyed again would lose its "a" and become "camp")."""
+        key = name if _KEY_SHAPE.fullmatch(name) and name == name.casefold() else canonical_key(name)
         if not key:
             return key
         return self._merge_keys.setdefault(_squash_of_key(key), key)
@@ -2520,7 +2538,19 @@ class OrgExtractor:
                     e = m.start(2) + len(place)
                     cands.append((2, Mention(text[m.start():e], "", {"pattern"}, "movement / campaign",
                                              m.start(), e)))
+                    # A local group is more specific than the movement: a watchlist
+                    # alias "XR" inside "XR Zagreb" does not turn it into "Extinction
+                    # Rebellion" (a watchlist alias for the whole "XR Zagreb" still does).
+                    cands = [(p, c) for p, c in cands if not (
+                        "watchlist" in c.methods and m.start() <= c.start and c.end <= e
+                        and c.end - c.start < e - m.start())]
                     break
+        # "XR - climate occupation in Rome", "XR RÉBELLION NORDIQUE", "organised by XR.":
+        # the acronym on its own (not before a capitalised word such as "XR Spring
+        # Rebellion" or "XR Youth", which the other rules judge as a whole name).
+        for m in _ACRONYM_ALONE.finditer(text):
+            cands.append((3, Mention(m.group(1), "", {"pattern"}, "movement / campaign",
+                                     m.start(1), m.end(1))))
 
         lang = doc.lang_ if doc is not None and doc.lang_ != "xx" else (
             confident_language(text) if len(text.split()) >= 8 else "")
@@ -2639,6 +2669,7 @@ class OrgExtractor:
                 parts = [q for ps, pe in parts for q in self._split_known_left(text, ps, pe, conjunctions)]
                 for ps, pe in parts:
                     s, e = self._trim(text, ps, pe)
+                    s = _leading_place_end(text, s, e)   # "Grenoble, France Stop Micro" -> "Stop Micro"
                     surface = text[s:e]
                     if not surface.strip():
                         continue
@@ -2651,6 +2682,8 @@ class OrgExtractor:
                     if ADDRESS_BEFORE.search(pre_text) or (_ADDRESS_NUMBER.search(pre_text) and (
                             _POSTCODE_AFTER.match(text[e:e + 16]) or _place_follows(text, e))):
                         continue   # "138/140 Pleasance, Edinburgh", "rue de la Papotière", "arrêt de bus X"
+                    if _STREET_NUMBER.search(surface) and _HOUSE_NUMBER_AFTER.match(text[e:e + 8]):
+                        continue   # "Heidenheimerstr. 55": a street
                     m_pc = re.search(r"\s+[A-Z]{1,2}\d{1,2}[A-Z]?$", surface)
                     if m_pc and re.match(r"\s+\d[A-Z]{2}\b", text[e:e + 5]):
                         e = s + m_pc.start()   # "Edinburgh EH8 9RR": a postcode, not part of the name
@@ -2711,6 +2744,11 @@ class OrgExtractor:
                         and ("website" not in m.methods or id(m) in corpus_only)
                         and is_gazetteer_place(m.surface)):
                     continue   # a place the gazetteer knows: "Neckarwestheim", "Castres and Toulouse"
+                if (not m.methods - NER_LIKE_METHODS and m.start >= 0 and not m.surface.isupper()
+                        and m.key not in _GAZ_NOT_PLACE and not self._head_type(TOKEN_RE.findall(m.surface))
+                        and _in_place_slot(text, m.start, m.end)):
+                    continue   # the place of an agenda entry: "[Altdorf Forest, Germany]",
+                    #            "Biesenthal, Germany.", "at Thorens-Glières, France."
                 if _is_generic_name(m.surface) or _is_event_name(m.surface) or _is_document_name(m.surface):
                     continue   # "Working Group", "Media Team"; "International Anti-War Conference";
                     #            "Climate Camp Scotland Safer Spaces Policy"
@@ -2850,6 +2888,43 @@ def _place_follows(text: str, end: int) -> bool:
     """", Edinburgh" / ", Paris": a comma and a place right after position `end`."""
     m = re.match(r"\s*,\s*([^\W\d_][\w’'\-]*)", text[end:end + 40])
     return bool(m) and canonical_key(m.group(1)) in PLACES_KEYS
+
+
+def _is_place_name(surface: str) -> bool:
+    return is_place_key(canonical_key(surface)) or is_gazetteer_place(surface)
+
+
+# The location slot of an agenda entry: "[Altdorf Forest, Germany]", "camp, Biesenthal,
+# Germany.", "at Thorens-Glières, France.", "Frankfurt, Mainkai, Frankfurt am Main."
+_SLOT_OPEN = re.compile(r"(?:^|[,;(\[]|\s[-–—/]|(?<!\w)(?:at|in|near|à|au|près de|pres de|bei|im|"
+                        r"en|te|op|nabij|bij|nel|nella|a))\s*$", re.I)
+_SLOT_PLACE_AFTER = re.compile(r"\s*,\s*([^\W\d_][^,.;\[\]()/]{1,40}?)\s*"
+                               r"(?=$|[.;)\]]|,|\s+https?://|\s*\(|\s+\d)")
+
+
+def _in_place_slot(text: str, s: int, e: int) -> bool:
+    """Is text[s:e] the first part of a location ("X, Country")? It follows a comma, a
+    bracket or a place preposition, and a comma and a known place come right after it,
+    then the end of the slot."""
+    m = _SLOT_PLACE_AFTER.match(text, e, min(len(text), e + 60))
+    return bool(m and _is_place_name(m.group(1)) and _SLOT_OPEN.search(text[max(0, s - 20):s]))
+
+
+def _leading_place_end(text: str, s: int, e: int) -> int:
+    """"Grenoble, France Stop Micro", "Lyon, France Besiege Bayer-Monsanto": in an agenda
+    line whose two languages run together, NER joins the country that ends one location
+    slot to the name that starts the next sentence. Returns the offset where the name
+    starts (or `s`). Only when a place and a comma come right before the span, so that
+    "Attac, France Nature Environnement" is left whole."""
+    toks = list(TOKEN_RE.finditer(text, s, e))
+    before = re.search(r"([^\W\d_][\w’'\-]*(?:\s+[^\W\d_][\w’'\-]*)?)\s*,\s*$", text[max(0, s - 40):s])
+    if len(toks) < 2 or not before or not (_is_place_name(before.group(1))
+                                            or _is_place_name(before.group(1).split()[-1])):
+        return s
+    for k in (2, 1):
+        if k < len(toks) and _is_place_name(text[s:toks[k - 1].end()]) and toks[k].group(0)[:1].isupper():
+            return toks[k].start()
+    return s
 
 
 # Hosting platforms whose sub-domain is the site's own name ("nominesland.wordpress.com").
@@ -3021,6 +3096,10 @@ def _url_slug_words(text: str, links: Sequence["Link"] = ()) -> str:
 MOVEMENT_ACRONYMS = {"XR", "XRY", "FFF", "FfF"}
 _ACRONYM_PLACE = re.compile(r"(?<![\w\-/.@#])(" + "|".join(sorted(MOVEMENT_ACRONYMS, key=len, reverse=True))
                             + r")\s+((?:[A-ZÀ-Þ][\w’'\-]*)(?:[ \-][A-ZÀ-Þ][\w’'\-]*){0,2})")
+# The same acronym on its own: followed by the end of the text, punctuation, a dash, a
+# lower-case word or a word in capitals, never by a capitalised word or a hyphen.
+_ACRONYM_ALONE = re.compile(r"(?<![\w\-/.@#])(" + "|".join(sorted(MOVEMENT_ACRONYMS, key=len, reverse=True))
+                            + r")(?![\w\-‐‑@/])(?!\s+[A-ZÀ-Þ][a-zß-ÿ])")
 
 
 def _has_event_word(surface: str) -> bool:

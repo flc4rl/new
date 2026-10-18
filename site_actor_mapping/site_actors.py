@@ -44,7 +44,7 @@ from crawler import CachedPage, CrawlConfig, Crawler, PageCache, normalise_url, 
 from extract import (
     NER_LIKE_METHODS, Block, OrgExtractor, ParsedPage, ThemeSet, Watchlist, acronym_pairs, block_hash,
     canonical_key, clean_ws, load_stoplist, page_language, parse_html, parse_pdf_text, split_sentences,
-    squash_key, squash_runs,
+    squash_runs,
 )
 from events import EventIndex, EventRef
 from linked_sites import (PLATFORM_HOSTS, Site, SiteRegistry, Via, collect_targets, crawl_linked,
@@ -332,7 +332,8 @@ def seed_blocks(body: str, line_entry: Dict[str, List[int]]) -> Optional[List[Bl
 def load_pages(cache_pages: Iterable[CachedPage], registry: SiteRegistry, strip_regions: bool,
                seed_pdfs: Dict[str, dict], in_window=None, total: int = 0,
                pages: Optional[Dict[str, ParsedPage]] = None,
-               pdf_rows: Optional[List[dict]] = None) -> dict:
+               pdf_rows: Optional[List[dict]] = None,
+               platform_hosts: Optional[Set[str]] = None) -> dict:
     """Parse cached pages that belong to a registered site, plus PDFs found on
     them (wherever hosted), tagging each with its site.
 
@@ -414,7 +415,8 @@ def load_pages(cache_pages: Iterable[CachedPage], registry: SiteRegistry, strip_
         if (site.role == "linked" and not site.platform and cp.depth == 0
                 and registry.site_of(cp.final_url) is None):
             host = registered_host(urlparse(cp.final_url).netloc)
-            if host and not host_matches(host, PLATFORM_HOSTS):
+            # platform_hosts: PLATFORM_HOSTS plus the --follow-single-page hosts
+            if host and not host_matches(host, platform_hosts or PLATFORM_HOSTS):
                 moved.setdefault(host, site)     # a linked site that moved to another domain
         key = cp.final_url
         if key in pages:          # redirects: several requested URLs, one final page
@@ -816,7 +818,8 @@ def run(args: argparse.Namespace, out: Path, info: dict) -> int:
     in_window = month_window(args.calendar_from, args.calendar_to)
     n_cached = sum(1 for _ in cache.root.glob("*.json.gz"))
     log.info("Reading %d cached pages ...", n_cached)
-    loaded_pages = load_pages(cache, registry, args.strip_regions, seed_pdfs, in_window, n_cached)
+    loaded_pages = load_pages(cache, registry, args.strip_regions, seed_pdfs, in_window, n_cached,
+                              platform_hosts=platform_hosts)
     pages_by_url, pdf_rows, meta = loaded_pages["pages"], loaded_pages["pdf_rows"], loaded_pages["meta"]
     orphans, moved = loaded_pages["orphans"], loaded_pages["moved"]
     if args.no_crawl and orphans:
@@ -846,7 +849,7 @@ def run(args: argparse.Namespace, out: Path, info: dict) -> int:
     if registry_rebuilt or moved:
         retry = [cp for cp in (cache.get(u) for u in orphans) if cp is not None]
         again = load_pages(retry, registry, args.strip_regions, seed_pdfs, in_window,
-                           pages=pages_by_url, pdf_rows=pdf_rows)
+                           pages=pages_by_url, pdf_rows=pdf_rows, platform_hosts=platform_hosts)
         meta.update(again["meta"])
         orphans = again["orphans"]
         if args.no_crawl:
@@ -1114,14 +1117,19 @@ def run(args: argparse.Namespace, out: Path, info: dict) -> int:
             return False
         tk = title_keys.get(ref.name)
         if tk is None:
-            tk = title_keys[ref.name] = f" {canonical_key(ref.name)} "
+            # also keyed with its leading article kept, for keys that start with a glued
+            # article ("a camp", the key of "A-camp", in the title "A Camp, anarchist ...")
+            tk = title_keys[ref.name] = (f" {canonical_key(ref.name)} "
+                                         f" {canonical_key('zzqx ' + ref.name)[5:]} ")
         if f" {org_key} " in tk:
             return True
         # Spacing variants on word boundaries: "Geef Tegengas" in "Geef Tegen Gas ...".
         runs = title_runs.get(ref.name)
         if runs is None:
-            runs = title_runs[ref.name] = squash_runs(ref.name)
-        sq = squash_key(org_key)
+            runs = title_runs[ref.name] = squash_runs(ref.name) | squash_runs("zzqx " + ref.name)
+        # org_key is already a key: squash it as it is (squash_key would key it again,
+        # and "a camp", the key of "A-camp", would become "camp")
+        sq = re.sub(r"[\W_]+", "", org_key)
         if len(sq) >= 4 and sq in runs:
             return True
         if " " not in org_key and len(org_key) >= 4 and "#" in ref.name:
