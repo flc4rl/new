@@ -165,7 +165,9 @@ such as `~/Documents/climate_camp` works too.
 The input files and options are checked before anything is fetched: a
 missing seed PDF, theme, watchlist or stoplist file, a start URL that is not
 a web address, or `--calendar-from` after `--calendar-to` stops the run at
-once with a message. A `--themes`, `--watchlist` or `--stoplist` file that is
+once with a message: "Nothing was crawled or changed" and exit code 2. The
+run also stops with exit code 2 when not one page of the start URL can be
+read, before any linked site is crawled. A `--themes`, `--watchlist` or `--stoplist` file that is
 not in the current folder is looked for next to `site_actors.py` (the log
 says so), so the bundled theme file works from any folder.
 
@@ -204,6 +206,7 @@ python site_actors.py https://example.org -o results/example_org --no-crawl \
 | `--no-crawl` | Only analyse what is already cached (no web access) |
 | `--theme-filter` | Inclusion criterion of the master network: `source` (default), `site`, `event` or `none` (see below) |
 | `--keep-menu-themes` | Keep theme terms found in menus, sidebars and site furniture in the main `master_themes` sheet |
+| `--keep-ner-only` | Keep organisations found only by NER (spaCy) with no other evidence in the master network (default: listed in the `ner_only_candidates` sheet) |
 | `--edition-policy` | `nearest` (default) or `all`: how a linked page reached from several editions of a recurring event is tied to them (see [Master files](#master-files)) |
 | `-v` | More detail in the log |
 
@@ -315,8 +318,10 @@ once (`repeat_context`).
 A source (one web page, one PDF, or one entry of an agenda PDF) whose content
 has no colonialism, racism or fascism term (no theme hit) is left out of the
 master network, together with its organisations. Theme terms that appear only
-in menus, sidebars, footers, text repeated across a site or short labels do
-not count. `master_themes` is never filtered.
+in menus, sidebars, headers, footers or short labels (4 words or fewer) do not
+count. A passage repeated in the main content of many pages of a site does
+count, for every page carrying it (flagged `boilerplate` in `theme_hits.csv`).
+`master_themes` is never filtered.
 
 `--theme-filter` sets the unit at which a hit is required, on
 `site_actors.py`, `make_master.py` and `analytics.py`:
@@ -325,12 +330,15 @@ not count. `master_themes` is never filtered.
 |---|---|
 | `source` (default) | the source itself has a theme hit |
 | `event` | any source tied to the same event has a theme hit |
-| `site` | any page of the same website has a theme hit (an agenda PDF counts as one site, so this keeps every entry of an agenda that has a hit anywhere) |
+| `site` | any page of the same website has a theme hit; each agenda entry of a seed PDF is still judged on its own |
 | `none` | always (no inclusion criterion) |
 
 `--focus-themes` limits which themes count. The log, the `about` sheet of
 `master_network.xlsx` and `run_info.json` (`master_files`) say how many rows,
-organisations and events were kept out of how many, and the
+organisations and events the theme filter kept out of how many
+(`network_rows_kept` ...), and how many are in the file after names found
+only by NER went to the `ner_only_candidates` sheet (`network_rows_in_file`,
+`organisations_in_file`, `events_in_file`). The
 `excluded_sources` sheet lists every source left out, with its organisations
 and the reason. `sources.csv` lists every source with its theme hits
 (`has_theme_hit`, `theme_hits`, one `theme:` column per theme).
@@ -413,15 +421,17 @@ source tied to two events gives two rows.
   event), `recurring_event_editions`, `site_linked_from_events`, `found_by`,
   `named_in_event_title` (the name is part of the event's title, often the
   organiser but sometimes just the event name; filter on it as you see fit),
-  `only_in_menus_or_footers`, `source_has_theme`, `example_context`.
+  `only_in_menus_or_footers`, `repeated_on_site` (every mention is in a
+  passage repeated in the main content of many pages of the site, such as
+  an organiser line on every event page; such rows stay in the network),
+  `source_has_theme`, `example_context`.
 - `events`: each event of the network once, with all of its organisations.
 - `all_events`: every event found (agenda entries, calendar, event pages),
   with how well it was covered (`link_followed`, `link_status`,
   `pages_analysed`, `words_analysed`), whether it is in the network
   (`in_network`) and whether the theme filter left it out.
-- `menus_and_footers`: names found only in menus, headers, footers or text
-  repeated on every page of a site, kept apart so site furniture does not
-  inflate the network.
+- `menus_and_footers`: names found only in menus, headers, footers or
+  sidebars, kept apart so site furniture does not inflate the network.
 - `ner_only_candidates`: rows whose organisation was found only by spaCy's
   named-entity recognition with no other evidence anywhere in the corpus
   (all sources, theme hit or not). They are kept here, with why they are only
@@ -534,8 +544,10 @@ host it moved to when its start page redirected elsewhere (`moved_to`).
 - Platforms hosting many organisations (Action Network, Eventbrite, Linktree,
   Google Docs, Drive, Forms, Sites and Groups, petitions, crowdfunders, blog
   platforms ...) are read one page only: the linked page, never the rest of the
-  platform. Add others with `--follow-single-page HOST`, or exclude hosts with
-  `--follow-skip HOST`.
+  platform. Each such page is its own site, keyed by host and path plus the
+  query string when there is one (`drive.google.com/open?id=AAA` and
+  `?id=BBB` are two sites). Add others with `--follow-single-page HOST`, or
+  exclude hosts with `--follow-skip HOST`.
 - `--follow-links all` follows outside links from the main content of every
   page, not only from events.
 - The same outside URL appearing on a large share of pages (a sponsor, a

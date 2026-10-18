@@ -14,9 +14,11 @@ Build the two master files from one or more result folders:
                                           it was covered and whether it is in
                                           the network
                      menus_and_footers    names found only in menus, headers,
-                                          footers or text repeated on every page
-                                          of a site (site furniture), kept apart
-                                          so they do not inflate the network
+                                          footers or sidebars (site furniture),
+                                          kept apart so they do not inflate the
+                                          network. Names in a passage repeated in
+                                          the main content of many pages stay in
+                                          the network (repeated_on_site=True)
                      ner_only_candidates  rows whose organisation was found only by
                                           NER (spaCy) with no other evidence in the
                                           corpus (see OrgEvidence): kept apart so
@@ -36,8 +38,8 @@ Build the two master files from one or more result folders:
 
 Theme filter (--theme-filter, default "source"): a theme hit is the inclusion
 criterion for master_network. Organisations and events are kept only from
-sources with at least one theme term in their content (not only in menus or
-repeated furniture): "source" = the web page, the PDF, or for seed agendas the
+sources with at least one theme term in their content (not only in menus,
+headers, footers or sidebars): "source" = the web page, the PDF, or for seed agendas the
 agenda entry itself; "site" = any page of the same website (an agenda entry
 is still judged on its own, as the agenda PDF counts as one site); "event" = any
 source tied to the same event; "none" keeps everything. master_themes is not
@@ -87,7 +89,7 @@ NETWORK_FIELDS = ["event", "event_date", "event_link", "event_key", *COUNTRY_FIE
                   "source_link", "source_unit", "source_title", "site", "site_role", "layer", "is_pdf",
                   "page_date", "fetched_at", "content_vs_event", "years_after_event",
                   "recurring_event_editions", "site_linked_from_events", "found_by",
-                  "named_in_event_title", "only_in_menus_or_footers", "source_has_theme",
+                  "named_in_event_title", "only_in_menus_or_footers", "repeated_on_site", "source_has_theme",
                   "example_context"]
 EVENT_FIELDS = ["event", "event_date", "event_link", "event_key", *COUNTRY_FIELDS,
                 "n_organisations", "organisations", "n_sources", "sources"]
@@ -317,6 +319,7 @@ NER_ONLY_METHODS = frozenset({"ner", "pattern_after"})   # extract.NER_LIKE_METH
 CANDIDATE_FIELDS = NETWORK_FIELDS + ["corpus_sources", "corpus_sites", "why_candidate"]
 _LEGAL_FORM = re.compile(r"\s(?:AG|SE|plc|PLC|Ltd\.?|Limited|GmbH|LLC|Inc\.?|S\.?A\.?|SpA|S\.p\.A\.|N\.?V\.?|"
                          r"B\.?V\.?|e\.\s?V\.|Oy|Oyj|AB|ASA|A/S|SAS|SARL|Srl|KG|Corp\.?|Corporation)$")
+_CAMEL = re.compile(r"[A-ZÀ-Ý][a-zà-ÿ]+(?:[A-ZÀ-Ý][a-zà-ÿ]+)+")
 _ACRONYM = re.compile(r"[A-Z0-9ÀÂÄÇÉÈÊËÎÏÔÖÙÛÜ][A-Z0-9ÀÂÄÇÉÈÊËÎÏÔÖÙÛÜ&\-]{1,5}")
 
 
@@ -360,8 +363,7 @@ class OrgEvidence:
                 src = m.get("source_unit") or m.get("url", "")
                 self.sources[k].add(src)
                 self.sites[k].add(m.get("site", ""))
-                if not (_true(m.get("boilerplate")) or _true(m.get("in_menu"))
-                        or _true(m.get("menu_or_sidebar")) or m.get("region", "") in FURNITURE_REGIONS):
+                if not _is_menu_mention(m):
                     self.content[k].add((src, m.get("site", ""), m.get("site_role") == "seed"))
                 self.surfaces[k][m.get("organisation", "")] += 1
                 if m.get("org_type"):
@@ -400,6 +402,8 @@ class OrgEvidence:
             return ""
         if _ACRONYM.fullmatch(surface) and n_src >= 2 and not _is_place(surface):
             return ""
+        if _CAMEL.fullmatch(surface) and not _is_place(surface):
+            return ""   # a coined one-word name with an inner capital ("GroenFront", "BlackRock")
         content = self.content.get(key, set())
         seed_entries = {src for src, _, seed in content if seed}
         if ((len({src for src, _, _ in content}) >= 3 and len({site for _, site, _ in content}) >= 2)
@@ -428,6 +432,31 @@ def _is_place(surface: str) -> bool:
         return _is_place_name(surface)
     except ImportError:
         return False
+
+
+def _stoplist_for(res: Path):
+    """The stoplist a run used (run_info.json; the bundled default_stoplist.txt when the
+    folder does not say), as a function name -> True when stoplisted. Older result
+    folders were made before some stoplist entries existed (FAQ, Google Calendar ...):
+    re-reading them applies the current list."""
+    try:
+        from extract import canonical_key, load_stoplist, tidy_surface
+    except ImportError:
+        return lambda name: False
+    path = Path(__file__).with_name("default_stoplist.txt")
+    try:
+        info = json.loads((res / "run_info.json").read_text(encoding="utf-8"))
+        rec = ((info.get("input_files") or {}).get("stoplist") or {}).get("path")
+        if rec and Path(rec).exists():
+            path = Path(rec)
+    except (OSError, ValueError, AttributeError):
+        pass
+    exact, pats = load_stoplist(path)
+
+    def stopped(name: str) -> bool:
+        surface = tidy_surface(name)
+        return canonical_key(surface) in exact or any(p.search(surface) for p in pats)
+    return stopped
 
 
 def _watchlist_keys(res: Path) -> Set[str]:
@@ -480,6 +509,17 @@ def split_coordinated(rows: List[dict], ev: OrgEvidence) -> int:
             keep.append(q)
     rows[:] = keep
     return len(split)
+
+
+def _is_menu_mention(m: dict) -> bool:
+    """A mention in site furniture: a menu, header, footer or sidebar. A passage repeated
+    in the main content of many pages (boilerplate=True, region main) is not furniture:
+    it names, say, the organisers on every event page. Older mentions.csv files without
+    in_menu or region fall back to the boilerplate flag."""
+    if "in_menu" not in m and "region" not in m:
+        return _true(m.get("boilerplate"))
+    return (_true(m.get("in_menu")) or _true(m.get("menu_or_sidebar"))
+            or m.get("region", "") in FURNITURE_REGIONS)
 
 
 def _is_menu_theme(r: dict) -> bool:
@@ -571,7 +611,7 @@ class ThemeFilter:
         if self.mode == "event":
             return "no theme term in any source tied to this event, nor in this source"
         if self.unit_of(m) in self.menu_only_units:
-            return "theme terms only in menus, sidebars, repeated site furniture or short labels"
+            return "theme terms only in menus, sidebars, headers, footers or short labels"
         return "no theme term in this source"
 
 
@@ -581,21 +621,36 @@ class ThemeFilter:
 def network_rows(results: Sequence[Path], min_confidence: str = "low",
                  theme_filter: Optional[ThemeFilter] = None,
                  excluded: Optional[Dict[str, dict]] = None,
-                 before: Optional[Dict[tuple, list]] = None) -> List[dict]:
+                 before: Optional[Dict[tuple, list]] = None,
+                 judge: Optional["ThemeFilter"] = None) -> List[dict]:
     """master_network rows (one per event x organisation x source). Mentions the
     theme filter leaves out are summarised per source in `excluded`; `before`
     receives every row key before the filter: [only in furniture, organisation,
     event id, placeholder event]."""
     rows: "OrderedDict[tuple, dict]" = OrderedDict()
     by_key, by_name = _countries(results)
+    judge = judge or theme_filter
+    n_stopped = [0]
     for res in results:
         conf = {o["org_key"]: o for o in _iter(res / "organisations.csv")}
+        # Older mentions.csv files have no source_has_theme column: record the judgement the
+        # theme filter used (from sources.csv, theme_hits.csv or the page theme counts).
+        can_judge = judge is not None and str(res) not in judge.no_theme_file
+        stopped = _stoplist_for(res)
+        stop_cache: Dict[str, bool] = {}
         for m in _iter(res / "mentions.csv"):
             org = conf.get(m["org_key"], {})
             confidence = org.get("confidence", "")
             if CONFIDENCE_RANK.get(confidence, 0) < CONFIDENCE_RANK[min_confidence]:
                 continue
-            is_bp = _true(m.get("boilerplate")) or _true(m.get("in_menu"))
+            nm = m.get("organisation", "")
+            if nm not in stop_cache:
+                stop_cache[nm] = stopped(nm)
+            if stop_cache[nm]:
+                n_stopped[0] += 1
+                continue
+            is_bp = _is_menu_mention(m)
+            is_rep = _true(m.get("boilerplate"))
             for ev in _events_of(m):
                 if before is not None:
                     b = before.setdefault((_event_id(ev), m["organisation"], m["url"]),
@@ -635,13 +690,14 @@ def network_rows(results: Sequence[Path], min_confidence: str = "low",
                         "named_in_event_title": (bool(ev["in_title"]) if "in_title" in ev
                                                  else _in_title(m.get("org_key", ""), name)),
                         "source_has_theme": (_true(m["source_has_theme"]) if m.get("source_has_theme")
-                                             else ""),
-                        "_methods": Counter(), "_bp": True, "example_context": "", "_ex_bp": True,
+                                             else judge.unit_of(m) in judge.units if can_judge else ""),
+                        "_methods": Counter(), "_bp": True, "_rep": True, "example_context": "", "_ex_bp": True,
                     }
                 r["mentions_on_source"] += 1
                 r["_methods"].update(m.get("methods", "").split("+"))
-                # Menus, headers, footers and text repeated across a site's pages.
+                # Menus, headers, footers and sidebars; passages repeated across a site's pages.
                 r["_bp"] = r["_bp"] and is_bp
+                r["_rep"] = r["_rep"] and is_rep
                 if not r["example_context"] or (r["_ex_bp"] and not is_bp):  # prefer real content
                     r["example_context"] = (m.get("context") or "")[:500]
                     r["_ex_bp"] = is_bp
@@ -649,9 +705,13 @@ def network_rows(results: Sequence[Path], min_confidence: str = "low",
     for r in rows.values():
         r["found_by"] = "; ".join(k for k, _ in r.pop("_methods").most_common() if k)
         r["only_in_menus_or_footers"] = r.pop("_bp")
+        r["repeated_on_site"] = r.pop("_rep") and not r["only_in_menus_or_footers"]
         r.pop("_ex_bp")
         out.append(r)
     out.sort(key=_network_order)
+    if n_stopped[0]:
+        log.info("%d mentions of names on the stoplist (the run's --stoplist, else default_stoplist.txt) "
+                 "were left out; they come from a run made before those entries existed", n_stopped[0])
     return out
 
 
@@ -878,7 +938,7 @@ def build_masters(results: Sequence[Path], out_dir: Path, min_confidence: str = 
     excluded: Dict[str, dict] = {}
     before: Dict[tuple, list] = {}
     kept_net = network_rows(results, min_confidence, tf if theme_filter != "none" else None,
-                            excluded, before)
+                            excluded, before, judge=tf)
     evidence = OrgEvidence(results)
     n_split = split_coordinated(kept_net, evidence)
     if n_split:
@@ -903,7 +963,8 @@ def build_masters(results: Sequence[Path], out_dir: Path, min_confidence: str = 
             net = [r for r in net if id(r) not in cand_ids]
             log.info("%d network rows (%d organisations) found only by NER with no other evidence "
                      "are in the ner_only_candidates sheet of master_network, not in the network "
-                     "(make_master.py --keep-ner-only keeps them; a --watchlist entry confirms a name)",
+                     "(--keep-ner-only on site_actors.py or make_master.py keeps them; a --watchlist entry "
+                     "confirms a name)",
                      len(candidates), len({r["organisation"] for r in candidates}))
     kept_net = net + furniture
     before_content = [b for b in before.values() if not b[0]]
@@ -928,6 +989,11 @@ def build_masters(results: Sequence[Path], out_dir: Path, min_confidence: str = 
                         for r in tf_net if not r["event"].startswith("(")}), len(before_ids)),
     }
     left_out_sources = len({x["source_unit"] for x in excl})
+    # What master_network actually holds (after the NER-only step): the counts above are
+    # taken before it, so they say what the theme filter alone kept.
+    in_file = {"network_rows_in_file": len(net),
+               "organisations_in_file": len({r["organisation"] for r in net}),
+               "events_in_file": len(events)}
     if theme_filter != "none":
         log.info("Theme filter '%s': kept %d of %d network rows, %d of %d organisations and %d of %d "
                  "events; %d %s with organisations but no theme hit %s left out (listed in the "
@@ -943,6 +1009,14 @@ def build_masters(results: Sequence[Path], out_dir: Path, min_confidence: str = 
             else:
                 log.warning("The theme filter left master_network empty: no source has a theme hit. "
                             "Check the --themes file.")
+    n_rows, n_orgs, n_events = in_file.values()
+    log.info("master_network: %d row%s, %d organisation%s, %d event%s%s",
+             n_rows, "" if n_rows == 1 else "s", n_orgs, "" if n_orgs == 1 else "s",
+             n_events, "" if n_events == 1 else "s",
+             "" if theme_filter == "none" and not candidates else " (after %s%s)" % (
+                 f"the theme filter '{theme_filter}'" if theme_filter != "none" else "",
+                 ("%s%d NER-only rows moved to ner_only_candidates" % (
+                     " and " if theme_filter != "none" else "", len(candidates))) if candidates else ""))
     if menu_themes:
         log.info("%d theme rows from menus, sidebars, site furniture and short labels are in the "
                  "menus_and_sidebars sheet of master_themes (--keep-menu-themes keeps them in the main "
@@ -950,6 +1024,7 @@ def build_masters(results: Sequence[Path], out_dir: Path, min_confidence: str = 
     summary = {"theme_filter": theme_filter, "keep_menu_themes": keep_menu_themes,
                "min_confidence": min_confidence,
                **{f"{k}_kept": a for k, (a, _) in n.items()}, **{f"{k}_before_filter": b for k, (_, b) in n.items()},
+               **in_file,
                "sources_left_out": left_out_sources,
                "keep_ner_only": keep_ner_only, "ner_only_candidate_rows": len(candidates),
                "ner_only_candidate_organisations": len({r["organisation"] for r in candidates}),

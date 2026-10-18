@@ -1576,6 +1576,7 @@ class OrgExtractor:
         self._modifier_memo: Dict[str, bool] = {}   # _modifier_word() results, per corpus
         self._title_counts: Counter = Counter()     # folded phrase -> agenda titles that contain it
         self._title_names: Set[str] = set()         # folded title-slot names accepted so far
+        self._pretallied: Counter = Counter()        # paragraphs whose labels prime_agenda() counted
         self._corpus_low = ""
         self._corpus_sites: Dict[str, str] = {}
         self._corpus_prefixes: Set[str] = set()
@@ -1749,14 +1750,18 @@ class OrgExtractor:
                 if lang in SPACY_MODELS and lang not in self.ner_fallbacks:
                     # a language model exists but is not installed (or is broken)
                     wanted = f"{SPACY_MODELS[lang][:-3]}_{self.ner_size}"
-                    log.warning("No usable spaCy model for '%s'; using the multilingual "
+                    log.warning("No usable spaCy model for '%s'; trying the multilingual "
                                 "xx_ent_wiki_sm instead. %s", lang,
                                 "Check with: python -m spacy validate" if self.broken_models & {
                                     f"{SPACY_MODELS[lang][:-3]}_{z}" for z in ("sm", "md", "lg")}
                                 else f"Install with: python -m spacy download {wanted}")
                     self.ner_fallbacks[lang] = {"requested": wanted, "used": "xx_ent_wiki_sm"}
                 return "xx_ent_wiki_sm"
-            self.missing_models.add(SPACY_MODELS.get(lang, f"a spaCy model for '{lang}'"))
+            own = ({f"{SPACY_MODELS[lang][:-3]}_{z}" for z in ("sm", "md", "lg")}
+                   if lang in SPACY_MODELS else set())
+            if not (self.broken_models & (own | {"xx_ent_wiki_sm"})):
+                # Not installed (a broken model or a missing package is reported as such)
+                self.missing_models.add(SPACY_MODELS.get(lang, f"a spaCy model for '{lang}'"))
             return None
         if "en_core_web_sm" in self.broken_models:
             return None
@@ -1806,10 +1811,12 @@ class OrgExtractor:
                            "usually built for another spaCy version: run 'python -m spacy validate' "
                            "and reinstall the models it lists, e.g. python -m spacy download %s --upgrade",
                            ", ".join(other_broken), other_broken[0])
-        if self.ner_fallbacks:
+        # Only fallbacks that actually worked (xx_ent_wiki_sm may have failed as well).
+        used = {lang: v for lang, v in self.ner_fallbacks.items()
+                if v["used"] not in self.broken_models and v["used"] not in self.missing_models}
+        if used:
             logger.warning("NER used another spaCy model than the one asked for (--ner-size %s) for: %s",
-                           self.ner_size, ", ".join(f"{lang} ({v['used']})"
-                                                    for lang, v in sorted(self.ner_fallbacks.items())))
+                           self.ner_size, ", ".join(f"{lang} ({v['used']})" for lang, v in sorted(used.items())))
 
     def paragraph_languages(self, texts: Sequence[str], lang: str = "en") -> List[str]:
         """Language used for NER on each paragraph. Paragraphs of 8 or more words with
@@ -2032,6 +2039,9 @@ class OrgExtractor:
                     continue
                 docs[i] = rec
                 if not tally:
+                    continue
+                if self._pretallied.get(texts[i]):
+                    self._pretallied[texts[i]] -= 1   # counted already by prime_agenda()
                     continue
                 for ent in rec.ents:  # every label a name receives anywhere on the site
                     self.label_votes[canonical_key(tidy_surface(ent.text))][ent.label_] += 1
@@ -2424,13 +2434,17 @@ class OrgExtractor:
             if toks[k].group(0).casefold() not in conjunctions:
                 continue
             left_low = [t.group(0).casefold() for t in toks[:k] if not _is_cap(t.group(0))]
-            if any(w in PURPOSE_PREPOSITIONS for w in left_low):
+            if any(w in PURPOSE_PREPOSITIONS - {"of"} for w in left_low):
                 return [(start, end)]
             j = k + 1
             while j < len(toks) - 1 and toks[j].group(0).casefold() in ARTICLES:
                 j += 1
             if not _is_cap(toks[j].group(0)) or not self._org_elsewhere(text[start:toks[k - 1].end()]):
                 continue
+            if "of" in left_low and not self._org_elsewhere(text[toks[j].start():end]):
+                # "Friends of the Earth and Greenpeace" splits when both halves are named on
+                # their own elsewhere; "Ministry of Justice and Home Affairs" stays whole.
+                return [(start, end)]
             return [(start, toks[k - 1].end())] + self._split_known_left(text, toks[j].start(), end, conjunctions)
         return [(start, end)]
 
@@ -2577,6 +2591,13 @@ class OrgExtractor:
                 right_start += elided.end()
             left_low = [t.group(0).casefold() for t in toks[:k]
                         if not _is_cap(t.group(0)) and t.group(0).casefold() not in ARTICLES]
+            # Both halves named on their own elsewhere (spaCy ORG twice, or the watchlist):
+            # "Friends of the Earth Scotland and Extinction Rebellion" is two organisations.
+            both_known = (_is_cap(toks[j].group(0)) and not elided
+                          and self._org_elsewhere(text[start:left_end])
+                          and self._org_elsewhere(text[right_start:end]))
+            if both_known:
+                return [(start, left_end), (right_start, end)]
             if left_low and left_low[-1] in PURPOSE_PREPOSITIONS:
                 continue
             crossing = any(a < toks[k].start() and b > toks[k].end() for a, b, _ in ents)
@@ -2611,6 +2632,26 @@ class OrgExtractor:
             return False
         return not (_has_event_word(surface) or _is_generic_name(surface) or _is_event_name(surface)
                     or _is_document_name(surface))
+
+    def prime_agenda(self, pages: Sequence[Tuple[Sequence[str], Sequence[Sequence[Link]], str]]) -> int:
+        """Run NER over all agenda pages (seed PDFs: paragraphs, their links, language)
+        before any of them is analysed: their entity labels go into label_votes now (and
+        are not counted again when pipe() meets the same paragraphs), and the group
+        names in their titles are accepted over all entries. Every entry then sees the
+        evidence of all agenda entries, whatever order the agendas are analysed in (it
+        follows their file names). Returns how many title names were accepted."""
+        before = len(self._title_names)
+        for texts, links, lang in pages:
+            texts = [t for t in texts]
+            docs = self._pipe_models(texts, self.paragraph_languages(texts, lang), tally=True)
+            for t in texts:
+                if t:
+                    self._pretallied[t] += 1
+            if self._title_counts:
+                for t, ln, d in zip(texts, links, docs):
+                    if t and agenda_title_span(t):
+                        self._title_slot_spans(t, d.ents if d is not None else [], ln)
+        return len(self._title_names) - before
 
     def _title_slot_spans(self, text: str, ents, links: Sequence[Link]) -> List[Tuple[int, int]]:
         """Group names in the title of an agenda entry that NER tagged as a person or
@@ -3016,7 +3057,10 @@ def coordinated_parts(name: str) -> List[str]:
     if len(pieces) < 2 or not all(pieces):
         return [name]
     left_low = [w.casefold() for w in TOKEN_RE.findall(pieces[0]) if not _is_cap(w)]
-    if any(w in PURPOSE_PREPOSITIONS for w in left_low):
+    # "of" does not block: "Friends of the Earth and Greenpeace" is a list, and the caller
+    # keeps "Ministry of Justice and Home Affairs" whole because "Home Affairs" is not an
+    # organisation of its own.
+    if any(w in PURPOSE_PREPOSITIONS - {"of"} for w in left_low):
         return [name]
     if not all(_is_cap(TOKEN_RE.findall(p)[0]) or p[:1].isdigit() for p in pieces if TOKEN_RE.findall(p)):
         return [name]

@@ -719,8 +719,9 @@ class Analysis:
         self.master_counts = {}
         for what in ("network_rows", "organisations", "events"):
             kept, before = s(self.master_about.get(f"{what}_kept")), s(self.master_about.get(f"{what}_before_filter"))
+            in_file = s(self.master_about.get(f"{what}_in_file"))
             if kept.isdigit() and before.isdigit():
-                self.master_counts[what] = (int(kept), int(before))
+                self.master_counts[what] = (int(kept), int(before), int(in_file) if in_file.isdigit() else None)
                 self.note(f"make_master.py theme filter: {what} kept", f"{kept}/{before}",
                           f"{int(before) - int(kept)} left out before analytics")
         if mf and mf != "none" and tf != mf:
@@ -1099,8 +1100,14 @@ class Analysis:
     def _instance(self, g: dict) -> dict:
         r = g["row"]
         theme, term, sent = r.get("theme", ""), r.get("term", ""), r.get("sentence", "")
-        furniture = (truthy(r.get("boilerplate")) or r.get("region", "") in FURNITURE_REGIONS
-                     or truthy(r.get("menu_or_sidebar")) or g["sheet"] == "menus_and_sidebars")
+        # Same rule as make_master.py: menus, headers, footers and sidebars are furniture.
+        # A passage repeated in the main content of many pages (boilerplate=True with
+        # menu_or_sidebar=False) counts as a theme hit of every page carrying it. Older theme
+        # rows without the menu_or_sidebar column fall back to the boilerplate flag.
+        repeated = truthy(r.get("boilerplate"))
+        furniture = (r.get("region", "") in FURNITURE_REGIONS or truthy(r.get("menu_or_sidebar"))
+                     or g["sheet"] == "menus_and_sidebars"
+                     or (repeated and "menu_or_sidebar" not in r))
         dup = bool(r.get("duplicate_of"))
         family, section = self._family(theme, term)
         low = sent.casefold()
@@ -1108,7 +1115,7 @@ class Analysis:
         inst = {"theme": theme, "term": term, "sentence": sent, "context_before": r.get("context_before", ""),
                 "context_after": r.get("context_after", ""), "source_link": r.get("source_link", ""),
                 "site": r.get("site", ""), "site_role": r.get("site_role", ""), "is_pdf": truthy(r.get("is_pdf")),
-                "region": r.get("region", ""), "furniture": furniture, "dup": dup, "clean": not furniture and not dup,
+                "region": r.get("region", ""), "furniture": furniture, "repeated": repeated, "dup": dup, "clean": not furniture and not dup,
                 "passage_id": sha12(r.get("source_link", "") + "\n" + collapse(sent).casefold()),
                 "term_family": family, "language_section": section,
                 "subtheme": subtheme(theme, term), "stance": stance(term, sent[:max(0, low.find(tl))] if tl in low else ""),
@@ -1205,11 +1212,25 @@ def _derive(an: Analysis) -> None:
             if rf["event_id"]:
                 evs.add(rf["event_id"])
     an.theme_units_set, an.theme_sites, an.theme_events = units, sites, evs
+    tf = an.a.theme_filter
+    trusted = 0
     for t in an.ties:
         src = t["source_has_theme"] if t["source_has_theme"] is not None else t["unit"] in units
-        t["pass"] = {"none": True, "source": src, "site": t["site"] in sites,
+        # Agenda entries of a seed PDF are judged one by one under 'site' too (as in make_master.py).
+        seed = t["site_role"] == "seed" or "#entry-" in t["unit"]
+        t["pass"] = {"none": True, "source": src, "site": src if seed else t["site"] in sites,
                      "event": (t["event_id"] in evs) if t["event_id"] else src}
-    tf = an.a.theme_filter
+        if (t["source_has_theme"] is None and tf != "none" and an.master_filter == tf
+                and t["sheet"] == "event_organisations" and not t["pass"][tf]):
+            # The masters were already filtered with this filter but do not say per row how
+            # each source was judged (e.g. rebuilt from an old folder): trust that selection.
+            t["pass"][tf] = True
+            trusted += 1
+    if trusted:
+        log.info("%d network rows have no source_has_theme value; they were kept because make_master.py "
+                 "already applied the theme filter '%s' to these masters", trusted, tf)
+        an.note("rows kept on make_master.py's theme filter", trusted,
+                "source_has_theme blank; masters already filtered with the same filter")
     real = [t for t in an.ties if t["sheet"] == "event_organisations"]
     kept = [t for t in real if t["pass"][tf]]
     an.filter_counts = {
@@ -1470,7 +1491,8 @@ def core_tables(an: Analysis) -> None:
                     "w": 0.0, "layer": rf["layer"], "tie_level": rf["tie_level"], "document": rf["document"],
                     "site": inst["site"], "is_pdf": inst["is_pdf"],
                     "doc_year": inst["doc_year"] or "undated", "event_year": ev["year"] if ev else "",
-                    "furniture": inst["furniture"], "duplicate": inst["dup"], "clean": inst["clean"], "n_rows": 0,
+                    "furniture": inst["furniture"], "repeated": inst["repeated"], "duplicate": inst["dup"],
+                    "clean": inst["clean"], "n_rows": 0,
                     "in_event_title": inst["in_event_title"], "in_handle": inst["in_handle"],
                     "orgs_in_paragraph_keys": "; ".join(inst["org_keys"]),
                     "context_before": inst["context_before"], "sentence": inst["sentence"],
@@ -1481,6 +1503,7 @@ def core_tables(an: Analysis) -> None:
             u["n_rows"] += 1
             u["clean"] = u["clean"] or inst["clean"]
             u["furniture"] = u["furniture"] and inst["furniture"]
+            u["repeated"] = u["repeated"] and inst["repeated"]
     rows = []
     for u in units.values():
         u["terms"] = "; ".join(dict.fromkeys(u.pop("_terms")))
@@ -1490,7 +1513,7 @@ def core_tables(an: Analysis) -> None:
     an.units = rows
     an.table("theme_units", rows, ["passage_id", "theme", "terms", "term_families", "language_section", "subtheme",
                                    "stance", "event_id", "pseudo_label", "w", "layer", "tie_level", "document", "site",
-                                   "is_pdf", "doc_year", "event_year", "furniture", "duplicate", "clean", "n_rows",
+                                   "is_pdf", "doc_year", "event_year", "furniture", "repeated", "duplicate", "clean", "n_rows",
                                    "in_event_title", "in_handle", "orgs_in_paragraph_keys", "context_before",
                                    "sentence", "context_after", "source_link"])
 
@@ -3163,7 +3186,8 @@ def write_summary(an: Analysis, out: Path, outputs: Dict[str, List[str]], second
                          **{k: {"kept": v[0], "total": v[1], "left_out": v[1] - v[0]}
                             for k, v in an.filter_counts.items()},
                          "excluded_sources_in_master": len(an.excluded_sources),
-                         "make_master_counts": {k: {"kept": v[0], "before_filter": v[1]}
+                         "make_master_counts": {k: {"kept_by_theme_filter": v[0], "before_filter": v[1],
+                                                    "in_master_file": v[2]}
                                                 for k, v in an.master_counts.items()}},
         "curated": yn(an.curated), "has_web_text_method": an.web_method, "country_from": an.country_from,
         "betweenness": getattr(an, "betweenness_method", ""),
@@ -3233,7 +3257,11 @@ def summary_md(an: Analysis, sm: dict) -> str:
     mc = an.master_counts
     if mc:
         para.append("make_master.py's filter had already kept " + ", ".join(
-            f"{v[0]} of {v[1]} {k.replace('_', ' ')}" for k, v in mc.items()) + " before this analysis.")
+            f"{v[0]} of {v[1]} {k.replace('_', ' ')}" for k, v in mc.items()) + " before this analysis" + (
+            " (master_network holds " + ", ".join(f"{v[2]} {k.replace('_', ' ')}" for k, v in mc.items()
+                                                  if v[2] is not None)
+            + " after the NER-only names went to ner_only_candidates)."
+            if any(v[2] is not None and v[2] != v[0] for v in mc.values()) else "."))
     conf = n["organisations_by_max_confidence"]
     para.append("Organisations in the authority list (org_codes_template.xlsx, after the theme filter, "
                 "including those without an event or only in menus) by highest confidence: " + ", ".join(f"{k} {v}" for k, v in conf.items()) + ".")
@@ -3331,7 +3359,8 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--event-codes", help="curated event_codes.csv (read only)")
     ap.add_argument("--theme-filter", choices=THEME_FILTERS, default=None,
                     help="inclusion criterion for the network: only sources with a theme hit (source), "
-                         "every source of a site / event with a hit, or none (all sources). Default: the "
+                         "every source of a site (agenda entries still judged one by one) / event with a hit, or "
+                         "none (all sources). Default: the "
                          "filter make_master.py recorded in the masters' about sheet, else source")
     ap.add_argument("--min-confidence", choices=list(CONF_RANK), default="medium",
                     help="confidence for the default network scenario C (default medium)")
@@ -3626,6 +3655,35 @@ def selftest() -> int:
         an = run(build_parser().parse_args([str(res2), "-o", str(tmp / "out_twice"), "--no-charts",
                                             "--no-graphs"]))
         check("[long] identical row for the same event is a second instance", len(an.instances), 8)
+        # ---- a passage repeated in the main content counts; agenda entries are judged one by one under 'site'
+        res3 = tmp / "res_long_rep"
+        shutil.copytree(tmp / "res_long", res3)
+        fields, th_rows = read_csv(res3 / "master_themes.csv")
+        rep = dict(th_rows[-2], sentence="A camp against racism.", region="main", boilerplate="yes",
+                   menu_or_sidebar="no")
+        old_bp = dict(th_rows[-2], sentence="Old layout repeated text on racism.", region="", boilerplate="yes")
+        write_csv(res3 / "master_themes.csv", th_rows + [rep], fields + ["menu_or_sidebar"])
+        nfields, n_rows = read_csv(res3 / "master_network.csv")
+        e4 = _ST_EVENTS[4]
+        n_rows.append(dict(n_rows[10], event=e4[0], event_date=e4[1], event_link=e4[2], organisation="Unthemed Collective",
+                           event_key=f"pdf:x#{e4[1]}", source_unit=f"{_ST_ECHOS}#entry-5", source_has_theme="no"))
+        write_csv(res3 / "master_network.csv", n_rows, nfields)
+        an = run(build_parser().parse_args([str(res3), "-o", str(tmp / "out_rep"), "--no-charts", "--no-graphs",
+                                            "--theme-filter", "site"]))
+        reps = [i for i in an.instances if i["sentence"] == "A camp against racism."]
+        check("[long] repeated main-content passage is not furniture", [(i["furniture"], i["repeated"])
+                                                                        for i in reps], [(False, True)])
+        passes = {t["organisation"]: t["pass"]["site"] for t in an.ties}
+        check("[long] 'site': unthemed agenda entry left out", passes.get("Unthemed Collective"), False)
+        check("[long] 'site': themed agenda entry kept", passes.get("Antifa Ost"), True)
+        res4 = tmp / "res_older_bp"
+        shutil.copytree(tmp / "res_older", res4)
+        fields, th_rows = read_csv(res4 / "master_themes.csv")
+        write_csv(res4 / "master_themes.csv", th_rows + [dict(th_rows[-2], **{k: v for k, v in old_bp.items()
+                                                                            if k in fields})], fields)
+        an = run(build_parser().parse_args([str(res4), "-o", str(tmp / "out_bp"), "--no-charts", "--no-graphs"]))
+        check("[older] boilerplate without menu_or_sidebar is still furniture",
+              [i["furniture"] for i in an.instances if i["sentence"].startswith("Old layout")], [True])
         # ---- curation loop
         res = tmp / "res_older"
         codes = tmp / "org_codes.csv"

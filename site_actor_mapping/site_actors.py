@@ -77,9 +77,29 @@ LIGHT_MENTION_FIELDS = ("org_key", "methods", "surface_form", "org_type", "repea
                         "link_domain", "co_mentioned_keys", "_block", "_unit")
 
 
+class _HintingParser(argparse.ArgumentParser):
+    """An unquoted file path with spaces ('Agenda militant | ....pdf') splits into several
+    arguments and argparse only says 'unrecognized arguments': add the quoting hint."""
+
+    def error(self, message: str):
+        argv = sys.argv[1:] if self._argv is None else self._argv
+        path_opts = ("--seed-pdf", "--themes", "--watchlist", "--stoplist", "-o", "--output-dir")
+        if "unrecognized arguments" in message and any(a.split("=")[0] in path_opts for a in argv):
+            self.print_usage(sys.stderr)
+            sys.stderr.write(f"{self.prog}: error: {message}\n{QUOTE_HINT}\n")
+            sys.exit(2)
+        super().error(message)
+
+    _argv: Optional[List[str]] = None
+
+    def parse_args(self, args=None, namespace=None):
+        self._argv = None if args is None else list(args)
+        return super().parse_args(args, namespace)
+
+
 def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
-    ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0],
-                                 formatter_class=argparse.ArgumentDefaultsHelpFormatter)
+    ap = _HintingParser(description=__doc__.split("\n\n")[0],
+                        formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     ap.add_argument("start_urls", nargs="*", help="Start URL(s) of the website to crawl (optional "
                                                   "when only --seed-pdf is given)")
     ap.add_argument("--seed-pdf", action="append", default=[], metavar="PDF",
@@ -181,8 +201,11 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
                         "itself; 'site': any page of the same website; 'event': any source tied to "
                         "the same event; 'none': keep everything). Sources left out are listed in "
                         "the excluded_sources sheet")
+    g.add_argument("--keep-ner-only", action="store_true",
+                   help="Keep organisations found only by NER (spaCy) with no other evidence in the "
+                        "master network; by default they are listed in the ner_only_candidates sheet")
     g.add_argument("--keep-menu-themes", action="store_true",
-                   help="Keep theme terms found in menus, sidebars, footers, repeated site furniture "
+                   help="Keep theme terms found in menus, sidebars, headers, footers "
                         "and short labels in master_themes (default: listed in a separate sheet)")
     g.add_argument("--edition-policy", choices=["nearest", "all"], default="nearest",
                    help="A linked page reached from several dated events (editions of a recurring "
@@ -857,6 +880,7 @@ def run(args: argparse.Namespace, out: Path, info: dict) -> int:
     seed_pdfs: Dict[str, dict] = {}     # pdf URI -> {"entries": [...], "line_entry": {page: [...]}}
     stored_links: List[PdfLink] = []
     stored_pdfs: Dict[str, dict] = {}
+    seed_links_damaged = False
     if seed_file.exists():
         try:
             data = json.loads(seed_file.read_text(encoding="utf-8"))
@@ -865,8 +889,11 @@ def run(args: argparse.Namespace, out: Path, info: dict) -> int:
             stored_links = [PdfLink(**d) for d in data["links"]]
             stored_pdfs = dict(data.get("pdfs", {}))
         except (OSError, ValueError, TypeError, KeyError, AttributeError) as exc:
+            seed_links_damaged = True
             log.warning("seed_links.json could not be read (%s: %s): only the seed PDFs given now "
-                        "are used", type(exc).__name__, exc)
+                        "are used%s", type(exc).__name__, exc,
+                        "" if args.seed_pdf else ". It is damaged: run the command again with the same "
+                        "--seed-pdf files to rebuild it")
             stored_links, stored_pdfs = [], {}
     read_now: Dict[str, Tuple[list, dict]] = {}
     given_local: Set[str] = set()
@@ -942,12 +969,15 @@ def run(args: argparse.Namespace, out: Path, info: dict) -> int:
     active_seeds = {u for s in seed_sites for u in s.start_urls}
     registry = SiteRegistry(main_sites + seed_sites, args.include_subdomains)
     registry_rebuilt = False
+    registry_unreadable = False
     if args.no_crawl:
         loaded = SiteRegistry.load(out / "sites.json", args.include_subdomains)
+        registry_unreadable = loaded is None
         if loaded is None:
-            log.warning("sites.json is missing or unreadable (the linked-site crawl was interrupted, or this "
-                        "folder was made by an older version): which cached pages belong to "
-                        "which linked website is rebuilt from the cached links")
+            if not (out / "sites.json").exists():   # (an unreadable one was reported on loading)
+                log.warning("sites.json is missing (the linked-site crawl was interrupted, or this "
+                            "folder was made by an older version): which cached pages belong to "
+                            "which linked website is rebuilt from the cached links")
         else:
             # Seed sites of older runs were keyed by the percent-encoded file name.
             sites = [s for s in loaded.sites if s.role != "seed"]
@@ -1018,8 +1048,9 @@ def run(args: argparse.Namespace, out: Path, info: dict) -> int:
         if extra:
             registry = SiteRegistry(registry.sites + extra, args.include_subdomains)
             registry_rebuilt = True
-            log.warning("%d linked websites with cached pages were missing from sites.json "
-                        "(interrupted crawl?) and were added back from the cached links", len(extra))
+            (log.info if registry_unreadable else log.warning)(
+                "%d linked websites with cached pages were missing from sites.json "
+                "(interrupted crawl?) and were added back from the cached links", len(extra))
     if moved:
         # Linked sites whose start page now redirects to another domain: pages on the
         # new domain belong to the same site (and so to the same events).
@@ -1036,6 +1067,8 @@ def run(args: argparse.Namespace, out: Path, info: dict) -> int:
         orphans = again["orphans"]
         if args.no_crawl:
             registry.save(out / "sites.json")
+    elif registry_unreadable and (out / "sites.json").exists():
+        registry.save(out / "sites.json")   # replace the damaged file, so the next run does not warn again
     if orphans and args.no_crawl:
         oh = Counter(registered_host(urlparse(u).netloc) for u in orphans)
         log.warning("%d cached pages on %d hosts belong to no known site and are NOT analysed "
@@ -1062,6 +1095,8 @@ def run(args: argparse.Namespace, out: Path, info: dict) -> int:
     del pages_by_url, loaded_pages
     if not pages:
         log.error("No pages to analyse in %s", cache.root)
+        if seed_links_damaged and not args.seed_pdf:
+            log.error("seed_links.json is damaged: run again with the same --seed-pdf files to rebuild it")
         return 1
     log.info("Analysing %d pages, including %d PDFs (%d PDFs found in total)",
              len(pages), sum(p.is_pdf for p in pages), len(pdf_rows))
@@ -1133,7 +1168,11 @@ def run(args: argparse.Namespace, out: Path, info: dict) -> int:
     event_fields = ["event", "date", "event_link", "event_key", "listed_on", "calendar_months",
                     "event_country", "country_iso", "country_source", "location_text",
                     "location_structured", "entry_words"]
-    write_csv(out / "events.csv", index.rows(pdf_display), event_fields)
+    if not (out / "events.csv").exists():
+        # A first run writes the event list now; a later run replaces events.csv only with
+        # its final version, so a Ctrl+C during the analysis does not leave this run's
+        # events next to the previous run's mentions and master files.
+        write_csv(out / "events.csv", index.rows(pdf_display), event_fields)
     log.info("Events found: %d", len(index.events))
     by_url = {p.url: p for p in pages}
     sites_by_key = {s.key: s for s in registry.sites}
@@ -1392,10 +1431,24 @@ def run(args: argparse.Namespace, out: Path, info: dict) -> int:
         return {"key": pdf_display(r.key), "name": r.name, "date": r.date, "link": pdf_display(r.link),
                 "layer": layer, "content_vs_event": cve, "years_after_event": years}
 
+    primed = not hasattr(extractor, "prime_agenda")
     repeated_theme_hits = 0     # theme hits in main-content passages repeated across a site
     log.info("Analysing %d pages ...", len(pages))
     prog = Progress("pages analysed", len(pages))
     for pi, page in enumerate(pages, 1):
+        if not primed and page.site_role == "seed":
+            # Seed PDFs come last. Before the first one, NER runs over all of them, so each
+            # agenda entry sees the names and labels of every entry, whatever the order
+            # of the PDFs (their file names).
+            primed = True
+            agenda = []
+            for sp in pages[pi - 1:]:
+                if sp.site_role == "seed":
+                    st = [b.text for b in sp.blocks]
+                    agenda.append((st, [b.links for b in sp.blocks], page_language(st, sp.lang)))
+            n_titles = extractor.prime_agenda(agenda)
+            if n_titles:
+                log.info("%d group names accepted in agenda titles before the agendas were analysed", n_titles)
         texts = [b.text for b in page.blocks]
         lang = page_language(texts, page.lang)   # declared, else most paragraphs' language
         langs[lang] += 1
@@ -1845,7 +1898,8 @@ def run(args: argparse.Namespace, out: Path, info: dict) -> int:
     stats: dict = {}
     try:
         for path in build_masters([out], out, theme_filter=args.theme_filter,
-                                  keep_menu_themes=args.keep_menu_themes, stats=stats):
+                                  keep_menu_themes=args.keep_menu_themes, stats=stats,
+                                  keep_ner_only=args.keep_ner_only):
             log.info("Master file: %s", path)
     except Exception as exc:  # noqa: BLE001 - the CSV results above are complete
         log.error("Master files could not be written (%s: %s); the CSV results in %s are complete. "
@@ -1945,7 +1999,10 @@ def _best_form(forms: Counter) -> str:
     def is_acronym(f: str) -> bool:
         return (bool(re.fullmatch(r"[A-Z0-9&.\-]{2,12}", f))
                 and squashed[re.sub(r"[\W_]+", "", f.casefold())] < 2)
-    return max(forms.items(), key=lambda kv: (not is_acronym(kv[0]), kv[1], len(kv[0])))[0]
+    # Remaining ties do not depend on the order the forms were met: a form not all in
+    # capitals, then the one with more capitalised words ("Nature Community"), then text.
+    return max(forms.items(), key=lambda kv: (not is_acronym(kv[0]), kv[1], len(kv[0]), not kv[0].isupper(),
+                                              sum(w[:1].isupper() for w in kv[0].split()), kv[0]))[0]
 
 
 def _confidence(methods: Counter, n_pages: int) -> str:
@@ -1968,10 +2025,12 @@ def write_csv(path: Path, rows: List[dict], fields: Optional[List[str]] = None) 
         path.write_text("", encoding="utf-8")
         return
     fields = fields or list(rows[0].keys())
-    with path.open("w", newline="", encoding="utf-8-sig") as fh:  # BOM so Excel reads UTF-8
+    tmp = path.with_name(path.name + ".tmp")   # never half a file after a Ctrl+C
+    with tmp.open("w", newline="", encoding="utf-8-sig") as fh:  # BOM so Excel reads UTF-8
         w = csv.DictWriter(fh, fieldnames=fields, extrasaction="ignore")
         w.writeheader()
         w.writerows(rows)
+    os.replace(tmp, path)
 
 
 def write_outputs(out: Path, mentions: List[dict], orgs: List[dict], page_rows: List[dict],

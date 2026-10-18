@@ -89,3 +89,22 @@ Carbon Capture
 Carbon Capture and Storage
 Carbon Capture and Utilisation
 Carbon Capture and Utilization
+# Fuels, gases and technologies that NER tags as organisations (an acronym found in two
+# sources would otherwise pass as corroborated)
+LNG
+LPG
+CNG
+GNL
+GPL
+CCS
+CCUS
+CO2
+# Trade treaties that NER tags as organisations
+TPP
+TTIP
+CETA
+TiSA
+# Web furniture that NER tags as organisations
+FAQ
+FAQs
+re:^(?:the )?history of\b

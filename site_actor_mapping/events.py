@@ -507,6 +507,14 @@ _TIMESTAMP = re.compile(rf"^\d{{1,2}}\s+{_MON}\s+(?P<year>20\d\d)\s+(?:à|at|um|
                         re.I)
 # Section banners: "|||||||| camps/actions 2025 ||||||||", "=== ONLINE AGENDAS ==="
 _BANNER = re.compile(r"^[|=#*~_-]{3,}|[|=#*~_-]{3,}$")
+# Blog furniture in an agenda printed from a WordPress page: the "Reply" link under each
+# comment and the WordPress.com footer ("RÉPONDRE", "CRÉEZ UN SITE WEB OU UN BLOG
+# GRATUITEMENT SUR WORDPRESS.COM.", "NE PAS VENDRE NI PARTAGER MES INFORMATIONS ...").
+_BLOG_FURNITURE = re.compile(
+    r"^(?:R[ÉE]PONDRE|REPLY|ANTWORTEN|ANTWOORDEN|RESPONDER|RISPONDI|RESPONDRE)\b(?:\s*\d+\.?)?\s*(?:$|\d|[A-ZÀ-Ý])"
+    r"|^(?:CR[ÉE]EZ UN SITE WEB|CREATE A (?:FREE )?(?:WEBSITE|BLOG)|BLOG (?:AT|SUR) WORDPRESS|"
+    r"NE PAS VENDRE NI PARTAGER|DO NOT SELL OR SHARE MY PERSONAL)"
+    r"|WORDPRESS\.COM\.?\s*$")
 
 
 def heading_info(line: str) -> Tuple[bool, Optional[int], Optional[int]]:
@@ -536,4 +544,7 @@ def comment_timestamp_year(line: str) -> Optional[int]:
 
 
 def is_banner(line: str) -> bool:
-    return bool(_BANNER.search(line.strip()))
+    """A section banner, or blog furniture (a comment's "Reply" link, the WordPress.com
+    footer): either ends the current agenda entry."""
+    t = line.strip()
+    return bool(_BANNER.search(t) or _BLOG_FURNITURE.search(t))

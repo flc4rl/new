@@ -155,8 +155,14 @@ def _clean_url(raw: str) -> Optional[str]:
 # info?", "Climate Camp Cymru (Wales, UK) - (more information to follow)").
 _PAD_NOTE = re.compile(
     r"\s*(?:->|→|[-–])?\s*\(?\s*(?:where can (?:we|i) find more info(?:rmation)?\s*\??"
-    r"|any website,? link with more info(?:rmation)?\s*\??"
-    r"|more info(?:rmation)? (?:to come|to follow|coming(?: up)?(?: soon)?)(?=\s*(?:[.!)\-–>]|$))\s*[.!]?"
+    r"|(?:\bTBC\b\s*(?:->|→)?\s*)?any website,?\s*(?:links?\s*)?(?:with\s*)?more info(?:rmation)?\s*\??"
+    r"|\bTBC\b\s*(?:->|→)"
+    r"|links?\s*\?"
+    r"|(?:\.\.\.|…)(?=\s*\))"
+    r"|(?<=[.)])\s*more info(?:rmation)?\s*[.:!]?(?=\s*$)"
+    r"|(?:plus d[’']infos? (?:bientôt|à venir)\s*/?\s*)?"
+    r"more info(?:rmation|s)? (?:to come|to follow|coming)(?: up| soon| during \w+| in \w+)*"
+    r"(?=\s*(?:[.!;:,)\-–>]|$))\s*[.!;]?"
     r"|i[’']?ll add more info[^)]*)\s*\)?", re.I)
 
 # The end of a line that runs on into the next one: "REPORTÉES AUX 3-" + "17 AOÛT".
@@ -184,6 +190,7 @@ def _entry_name(entry: Entry) -> str:
     text = re.sub(r"\(\s*(?:https?://|www\.)[^)]*\)", " ", text)   # "(https://...)" duplicates
     text = _strip_bare_urls(URL_IN_TEXT.sub(" ", text))
     text = _PAD_NOTE.sub(" ", text)        # "-> Where can I find more information?"
+    text = re.sub(r"\s+[.,;]+\s*$", "", text)   # a stop left alone by a removed note
     text = re.sub(r"^[\s()\[\]:\-–—,.;/>]+", "", text)
     text = re.sub(r"\s+", " ", text).strip(" :-–—,;/>(")
     # An unmatched ")" near the start is the end of a bracketed note after the date:
@@ -285,8 +292,13 @@ def extract_entries(source: str) -> Tuple[List[Entry], List[PdfLink], List[List[
                     current = new
                     owners.append(current.index)
                     continue
+                prev_line = raw_lines[i - 1][2] if i > 0 else ""
+                # "... climate action day (Friday" + "08.09)": the date closes a bracket
+                # left open on the line before, so it ends that line.
+                closes_bracket = (prev_line.count("(") > prev_line.count(")")
+                                  and re.match(r"^\s*[^()\s][^()]{0,24}\)", text) is not None)
                 if raw and current is not None and i > 0 and owners and owners[-1] == current.index \
-                        and _RUNS_ON.search(raw_lines[i - 1][2]) and not _has_name_text([text], raw):
+                        and (_RUNS_ON.search(prev_line) or closes_bracket) and not _has_name_text([text], raw):
                     # Only a date, ending the line before ("... REPORTÉES AUX 3-" / "17 AOÛT"
                     # / link): the end of the current entry, not a new one.
                     current.lines.append(text)
