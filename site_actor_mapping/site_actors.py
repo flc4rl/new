@@ -1665,6 +1665,9 @@ def run(args: argparse.Namespace, out: Path, info: dict) -> int:
     # Full mention and theme rows go to temporary files as they are produced; only the
     # light columns needed to merge names and count mentions stay in memory.
     mention_rows: List[dict] = []
+    # One example per name of a mention found by weak methods only, outside menus: the
+    # example_context of rejected_names.csv (the light rows do not keep the context).
+    weak_examples: Dict[str, Tuple[str, str]] = {}
     mention_spill = RowSpill(out)
     theme_spill = RowSpill(out)
     page_rows: List[dict] = []
@@ -1971,6 +1974,9 @@ def run(args: argparse.Namespace, out: Path, info: dict) -> int:
                 }
                 mention_spill.add(row)
                 light = {k: row[k] for k in LIGHT_MENTION_FIELDS}
+                if (m.key not in weak_examples and context and not row["in_menu"]
+                        and set(m.methods) <= weak_methods_for(m.surface)):
+                    weak_examples[m.key] = (page.url, context[:400])
                 light["_ev_keys"] = [e.key for e in evs if e.key]
                 light["_page"] = len(page_rows)      # this page's row in pages.csv
                 mention_rows.append(light)
@@ -2016,23 +2022,24 @@ def run(args: argparse.Namespace, out: Path, info: dict) -> int:
     # another mention of it is strong ("Die Welt (2019) ... www.welt.de").
     ordinary_of = getattr(extractor, "ordinary_reason", None)
     weak_of = getattr(extractor, "mention_is_weak", None)
-    ordinary: Dict[str, str] = {}
+    ordinary: Dict[Tuple[str, str], str] = {}
     if ordinary_of is not None and weak_of is not None:
         for r in mention_rows:
             k = r["org_key"]
             if k in rejected or not weak_of(k, r["methods"].split("+"), r.get("surface_form", "")):
                 continue
-            if k not in ordinary:
-                ordinary[k] = ordinary_of(k)
-            if ordinary[k]:
-                r["_dropped"] = ordinary[k]
+            surface = r.get("surface_form", "")
+            if (k, surface) not in ordinary:
+                ordinary[(k, surface)] = ordinary_of(k, surface or None)
+            if ordinary[(k, surface)]:
+                r["_dropped"] = ordinary[(k, surface)]
     for r in mention_rows:
         if r["org_key"] in rejected:
             r["_dropped"] = reasons[r["org_key"]]
     dropped = [r for r in mention_rows if r.get("_dropped")]
     if dropped:
         rejected_rows = _rejected_rows(dropped, mention_rows, rejected,
-                                       getattr(extractor, "REJECT_REASONS", {}))
+                                       getattr(extractor, "REJECT_REASONS", {}), weak_examples)
         by_reason = Counter(x["reason"] for x in rejected_rows)
         n_part = sum(1 for x in rejected_rows if x["scope"] == "weak_mentions")
         log.info("Dropped %d names and %d mentions as ordinary words, places, people etc. (%s)%s; "
@@ -2334,7 +2341,8 @@ REJECTED_FIELDS = ["organisation", "org_key", "scope", "reason", "reason_text", 
 
 
 def _rejected_rows(dropped: List[dict], mention_rows: List[dict], rejected: Set[str],
-                   texts: Dict[str, str]) -> List[dict]:
+                   texts: Dict[str, str],
+                   examples: Optional[Dict[str, Tuple[str, str]]] = None) -> List[dict]:
     """rejected_names.csv: one row per name whose mentions vetting dropped. scope 'name':
     every mention (OrgExtractor.vet_reason); 'weak_mentions': only the mentions found by
     weak methods, the name being an ordinary word (OrgExtractor.ordinary_reason) that
@@ -2346,7 +2354,7 @@ def _rejected_rows(dropped: List[dict], mention_rows: List[dict], rejected: Set[
     out = []
     for k, rs in by_key.items():
         why = rs[0]["_dropped"]
-        ex = next((r for r in rs if not r.get("in_menu") and r.get("context")), rs[0])
+        ex_url, ex_ctx = (examples or {}).get(k) or (rs[0].get("url", ""), "")
         out.append({
             "organisation": Counter(r["surface_form"] for r in rs).most_common(1)[0][0],
             "org_key": k, "scope": "name" if k in rejected else "weak_mentions",
@@ -2355,7 +2363,7 @@ def _rejected_rows(dropped: List[dict], mention_rows: List[dict], rejected: Set[
             "methods_dropped": "; ".join(f"{m} ({n})" for m, n in Counter(
                 m for r in rs for m in r["methods"].split("+") if m).most_common()),
             "pages": len({r["url"] for r in rs}), "sites": len({r["site"] for r in rs}),
-            "example_url": ex.get("url", ""), "example_context": (ex.get("context") or "")[:400],
+            "example_url": pdf_display(ex_url), "example_context": ex_ctx,
         })
     out.sort(key=lambda x: (-x["mentions_dropped"], x["org_key"]))
     return out

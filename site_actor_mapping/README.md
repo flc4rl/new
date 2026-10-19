@@ -130,21 +130,25 @@ these defaults cost:
   0.75 with the new rules, and about 0.85 to 0.9 once the stoplist has been
   reviewed against `org_codes_template.xlsx`.
 - The network shrinks from 32,884 rows and 15,302 organisations to about
-  12,000 rows and 5,700 organisations (a `--no-crawl` re-run of the first full
-  run gave 11,883 rows and 5,722 organisations before the per-mention
-  ordinary-word rule and the other repairs of the same round, which change
-  these figures somewhat); organisation pairs
-  of the projection fall from 3.6 million to under 1 million, and the share of
-  them inside the largest event from 0.46 to about 0.2.
+  8,400 rows and 4,900 organisations in 193 events (projected from the master
+  files of the first full run, range 7,800 to 9,000 rows; a `--no-crawl`
+  re-run gives the exact figures); the other rows move to
+  `context_organisations`. Organisation pairs of the projection fall from 3.6
+  million to under 1 million, and the share of them inside the largest event
+  from 0.46 to about 0.2.
 - Colonialism precision on a stratified sample rises from 79 % to 98 % with
   Global South made descriptive; 98 sources and 1,581 network rows (4.8 %)
   lose their only theme hit.
 - Accepted losses: "Apple" and "Vox" (the case rule); a few local groups known
-  only from link text (e.g. "DGB-Jugend Region Stuttgart"); one-word names the
-  tagger reads as nouns when spaCy alone finds them ("Seebrücke",
-  "Lebenslaute", "Gegenstrom", "Mediapart"; a pattern, appositive, website or
-  `--watchlist` entry keeps them; `rejected_names.csv` lists every name and
-  mention the vetting dropped, with the reason); 31 real
+  only from link text (e.g. "DGB-Jugend Region Stuttgart"); mentions of
+  one-word names the tagger reads as nouns, where spaCy alone finds them. A
+  word the corpus seldom puts after an article or an adjective is treated as a
+  name and kept (Greenpeace, Attac, Lebenslaute, Mediapart); a word mostly used
+  with one ("die Seebrücke", "die Antifa") is not. A pattern, appositive or
+  website keeps only the mention it supports; a `--watchlist` entry keeps every
+  mention. `rejected_names.csv` lists every name and mention the vetting
+  dropped, with the reason and an example, so it is the list to review for
+  names to add to the watchlist; 31 real
   organisations named only in reports (Forbes, Daesh, ECCAR) move to
   `context_organisations`; about 1 in 8 held-out PDFs is misclassified (in 40:
   1 programme wrongly taken for a report, 4 reports missed); about 20 % of the

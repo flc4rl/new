@@ -1759,11 +1759,46 @@ def weak_methods_for(surface: str) -> frozenset:
     return NER_LIKE_METHODS
 
 
+# Articles, determiners and contracted prepositions that put a noun in a phrase ("die Welt",
+# "zur Zeit", "am Freitag", "the Earth", "la Croix"). Words that are also prepositions in
+# another supported language ("de", "a", "en", "o", "i") are left out.
+_DETERMINERS = frozenset("""
+der die das den dem des ein eine einer einen einem eines kein keine keiner keinen keinem
+unser unsere unserer unseren unserem euer eure ihre ihrer ihren ihrem sein seine seiner
+seinen seinem jede jeder jeden jedem dieser diese diesen diesem dieses alle zur zum im am
+vom beim ins ans
+the this these our their its
+le la les un une des du au aux ce cette ces notre nos leur leurs
+il lo gli una uno del della dei degli delle
+el los las unos unas
+het een
+""".split())
+# Prepositions with an adjective-like ending ("gegen Rheinmetall", "neben Greenpeace").
+_NOT_ADJECTIVES = frozenset("gegen unter über hinter neben zwischen ohne wegen außer seit "
+                            "trotz während entgegen gemeinsam".split())
+
+
+def _is_modifier(token: str) -> bool:
+    """Is `token` (the word before a capitalised word) an article or determiner, or a
+    lower-case word with an inflected-adjective ending ("gerechte", "internationalen")?"""
+    w = token.casefold()
+    if w in _DETERMINERS:
+        return True
+    return (len(w) >= 4 and token[:1].islower() and w not in _NOT_ADJECTIVES
+            and w.endswith(("e", "en", "er", "es", "em")))
+
+
+# Parliamentary chambers named by one word ("le Sénat a voté"), which taggers read as nouns.
+_CHAMBERS = frozenset("senat sénat senato senado sejm riksdag riksdagen folketing folketinget "
+                      "storting stortinget eduskunta knesset bundesrat nationalrat".split())
+
+
 def _pos_exempt(surface: str) -> bool:
-    """Institutional compounds ("Bundesregierung") and hyphenated compounds ending in an
-    organisational word ("Rosa-Luxemburg-Stiftung") are never ordinary words."""
+    """Institutional compounds ("Bundesregierung"), parliamentary chambers ("Sénat") and
+    hyphenated compounds ending in an organisational word ("Rosa-Luxemburg-Stiftung")
+    are never ordinary words."""
     w = strip_elision(surface.strip())
-    if _INSTITUTION_COMPOUND.match(w) or _INSTITUTION_HEAD.fullmatch(w):
+    if _INSTITUTION_COMPOUND.match(w) or _INSTITUTION_HEAD.fullmatch(w) or w.casefold() in _CHAMBERS:
         return True
     parts = [x for x in re.split(r"[-‐‑]", w.casefold()) if x]
     return len(parts) >= 2 and (parts[-1] in HEAD_TO_TYPE or parts[-1] in COMPOUND_HEADS)
@@ -2716,6 +2751,7 @@ class OrgExtractor:
         lower: Counter = Counter()
         upper: Counter = Counter()
         alone: Counter = Counter()    # capitalised uses not next to another capitalised word
+        modified: Counter = Counter()  # capitalised uses right after an article or an adjective
         lower_text: Counter = Counter()   # lower-case uses outside web addresses ("wikipedia.org")
         # Each distinct paragraph counts once: calendar day cells, menus and footers repeat
         # the same Title-Case text many times and would outvote the running text.
@@ -2732,6 +2768,8 @@ class OrgExtractor:
                         continue  # sentence-initial and ALL-CAPS words say nothing about case
                     if caps[i]:
                         upper[w.casefold()] += 1
+                        if _is_modifier(toks[i - 1]):
+                            modified[w.casefold()] += 1     # "die Welt", "eine gerechte Welt"
                         if not ((caps[i - 1] and text[found[i - 1].end():found[i].start()].isspace())
                                 or (i + 1 < len(toks) and caps[i + 1]
                                     and text[found[i].end():found[i + 1].start()].isspace())):
@@ -2750,6 +2788,10 @@ class OrgExtractor:
         self.lowercase_words = {w for w, n in lower_text.items() if n >= 3 and n >= 0.25 * alone.get(w, 0)}
         self._lowercase_keys = set(self.lowercase_words)
         self.mid_caps = set(upper)
+        # How often each capitalised word follows an article or an inflected adjective
+        # (see _is_modifier): ordinary nouns nearly always do ("die Welt", "der Zeit",
+        # "eine gerechte Welt"), names seldom ("laut Mediapart", "Lebenslaute blockierte").
+        self._modified = {w: (modified.get(w, 0), n) for w, n in upper.items()}
         self._corpus_text = "\n".join(seen)
         # A lower-case copy of the same length, so phrase positions found in it are valid
         # in the original ("İ" and a few other characters change length when lowered).
@@ -2824,9 +2866,12 @@ class OrgExtractor:
         if self.pos_votes is None:
             self.finish_corpus_votes()
         surface = surface or self.surface_of(key)
-        if " " not in key.strip() and is_weekday(key, surface):
+        # "Die Linke", "Der Spiegel", "Les Verts": an article or a second word makes the
+        # written name more than the bare word, whatever the tagger says about the word.
+        bare = not surface or single_word_name(surface)
+        if bare and " " not in key.strip() and is_weekday(key, surface):
             return "weekday"
-        if self.is_common_pos(key):
+        if bare and self.is_common_pos(key):
             return "pos"
         if self.is_lowercase_word(key, surface):
             return "lowercase_word"
@@ -3006,7 +3051,16 @@ class OrgExtractor:
             return False
         if is_weekday(key, "" if surface == key else surface):
             return True
-        return is_common_vote(self.pos_summary(key))
+        if not is_common_vote(self.pos_summary(key)):
+            return False
+        # The tagger reads some names as nouns ("Mediapart", "Lebenslaute"). A word the
+        # corpus capitalises at least 4 times, and puts after an article or an inflected
+        # adjective in fewer than 15% of them, is used as a name, not as a noun. Measured
+        # on the first full run: Greenpeace 8%, Attac 9%, Lebenslaute 12%, Mediapart 0%;
+        # Klimagerechtigkeit 18%, Solidarität 42%, Zeit 80%, Welt 94%.
+        w = strip_elision(surface.strip()).casefold().strip("’'")
+        mod, caps = getattr(self, "_modified", {}).get(w, (0, 0))
+        return not (caps >= 4 and mod < 0.15 * caps)
 
     def is_lowercase_word(self, key: str, surface: Optional[str] = None) -> bool:
         """Is this one-word name a word the corpus writes in lower case (see
