@@ -37,6 +37,7 @@ RSS
 PDF
 # Calendar export buttons and loading messages
 Google Calendar
+Outlook
 Outlook 365
 Outlook Live
 Outlook.com
