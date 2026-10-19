@@ -108,7 +108,7 @@ brings each part back.
 | Theme filter `source` (unchanged) | Each source (web page, PDF, or one agenda entry) needs a theme hit of its own. New option `direct`: agenda entries, calendar cells, the event's own page and its landing page also count when any source of their event has a theme hit (on the first full run this would bring back 94 agenda entries naming organisations whose event has theme evidence elsewhere) | `--theme-filter direct` to try the looser rule |
 | Descriptive themes | `global_south` and `authoritarianism` are found and recorded (`focus_theme` = `no`) but do not drive the theme filter or the any-theme measures; `analytics.py` reports them in `descriptive_themes` | `--focus-themes colonialism,racism,fascism,global_south,authoritarianism` (on `site_actors.py`) |
 | Layer set `L1-L3s` (`analytics.py`) | The default network uses the listing (L1), the landing page (L2) and pages and PDFs on the event's own host (L3s); pages and PDFs on other hosts (L3x) are in the sensitivity table | `--layers L1-L3` |
-| Ordinary-word rules | One-word names that the part-of-speech tagger reads as ordinary words in their own contexts ("Welt", "Klimakrise", "Freitag") are dropped unless title, pattern, appositive or watchlist evidence, a strong link or a website given in the same paragraph supports them | (see [How organisations are found](#how-organisations-are-found)) |
+| Ordinary-word rules | One-word names that the part-of-speech tagger reads as ordinary words in their own contexts ("Welt", "Klimakrise", "Freitag") are dropped unless title, pattern, appositive or watchlist evidence, a strong link or a website given in the same paragraph supports them. The check is made per mention: "Die Welt (2019) ... www.welt.de" keeps that one mention, not every "die Welt retten". What is dropped is listed in `rejected_names.csv` | (see [How organisations are found](#how-organisations-are-found)) |
 
 What to re-run on an existing results folder (no new crawl is needed; the
 times are for the full run of about 5,600 pages):
@@ -116,7 +116,7 @@ times are for the full run of about 5,600 pages):
 | Command | Time | What it updates |
 |---|---|---|
 | `python make_master.py RUN -o RUN` (the run folder as its own output) | a few minutes | `doc_kind`, participation and the `context_organisations` sheet (attribution is worked out for older folders), the extended stoplist |
-| `python site_actors.py ... --no-crawl` with the same arguments and output folder | about 25 minutes, about 12 with `--ner-workers 4` | everything in the extraction: part-of-speech votes, PDF reflow and pages repeated inside a PDF read once, trimmed fragments and run-on names, the `link`/`link_text` and `website`/`website_elsewhere` split, the theme terms and descriptive themes, page languages; and edition and year attribution, merged duplicate events and document copies. PDF text changes, so most of the NER cache is not reused |
+| `python site_actors.py ... --no-crawl` with the same arguments and output folder | about 25 minutes | everything in the extraction: part-of-speech votes, PDF reflow and pages repeated inside a PDF read once, trimmed fragments and run-on names, the `link`/`link_text` and `website`/`website_elsewhere` split, the theme terms and descriptive themes, page languages; and edition and year attribution, merged duplicate events and document copies. PDF text changes, so most of the NER cache is not reused |
 | `python analytics.py RUN -o OUT` | about 2.5 minutes (was 10) | the faster network code, the L3 split, the backbone chart, communities, standardised prevalence and the curation template |
 
 The `--no-crawl` re-run writes the master files at its end, so
@@ -130,14 +130,21 @@ these defaults cost:
   0.75 with the new rules, and about 0.85 to 0.9 once the stoplist has been
   reviewed against `org_codes_template.xlsx`.
 - The network shrinks from 32,884 rows and 15,302 organisations to about
-  13,000 to 15,000 rows and 7,000 to 8,000 organisations; organisation pairs
+  12,000 rows and 5,700 organisations (a `--no-crawl` re-run of the first full
+  run gave 11,883 rows and 5,722 organisations before the per-mention
+  ordinary-word rule and the other repairs of the same round, which change
+  these figures somewhat); organisation pairs
   of the projection fall from 3.6 million to under 1 million, and the share of
   them inside the largest event from 0.46 to about 0.2.
 - Colonialism precision on a stratified sample rises from 79 % to 98 % with
   Global South made descriptive; 98 sources and 1,581 network rows (4.8 %)
   lose their only theme hit.
 - Accepted losses: "Apple" and "Vox" (the case rule); a few local groups known
-  only from link text (e.g. "DGB-Jugend Region Stuttgart"); 31 real
+  only from link text (e.g. "DGB-Jugend Region Stuttgart"); one-word names the
+  tagger reads as nouns when spaCy alone finds them ("Seebrücke",
+  "Lebenslaute", "Gegenstrom", "Mediapart"; a pattern, appositive, website or
+  `--watchlist` entry keeps them; `rejected_names.csv` lists every name and
+  mention the vetting dropped, with the reason); 31 real
   organisations named only in reports (Forbes, Daesh, ECCAR) move to
   `context_organisations`; about 1 in 8 held-out PDFs is misclassified (in 40:
   1 programme wrongly taken for a report, 4 reports missed); about 20 % of the
@@ -248,7 +255,7 @@ python site_actors.py https://example.org -o results/example_org --no-crawl \
 | `--ner-size` | `sm` (default), `md` or `lg` spaCy models in automatic mode |
 | `--theme-scope` | `any` (default), `page`, `paragraph` or `sentence`: keep only mentions whose page / paragraph / context window contains a theme term |
 | `--focus-themes` | Comma-separated themes that count for `--theme-scope` and `--theme-filter` (default: every theme not marked `#: descriptive` in the theme file; descriptive themes are still recorded, with `focus_theme` = `no`) |
-| `--ner-workers` | Processes that run spaCy over the pages in a pre-pass that fills the NER cache (default 3; 1 = no parallel pre-pass). `--ner-workers 4` halves a full `--no-crawl` re-run |
+| `--ner-workers` | Processes that run spaCy in the pre-pass that fills the NER cache before the analysis (default 1). The pre-pass saves time by loading each model once; more processes mainly add memory, as each loads its own copy of the models. Measured on the two agenda PDFs with an empty NER cache: 9.5 s with 1 process and 8.5 s with 3 for the pre-pass, 26.7 s and 27.1 s for the whole run, and about 570 MB more memory with 3 |
 | `--context-sentences` | Sentences either side of the mention kept as context (default 1) |
 | `--strip-regions` | Drop nav, header, footer and sidebars entirely (by default they are kept but flagged) |
 | `--no-links` | Do not use outbound-link text and logo alt text as names |
@@ -317,7 +324,7 @@ the master file), which is the main handle for judging precision:
 | `link` | Text or logo alt text of links to other websites, when the text spells the linked site's name or the link goes to a site's home page | partner logo strips, "supported by" lists |
 | `link_text` | Any other link text (an article title, a page name linked deep into a site); weak, so it is checked like NER | "DGB-Jugend Region Stuttgart" linking to a sub-page |
 | `website` | A name that a web address given or linked in the same paragraph or agenda entry spells | "Code Rood ... code-rood.org" |
-| `website_elsewhere` | A name that a web address spells when the address is only given elsewhere in the corpus; weak, checked like NER (this is how "Welt", "Zeit" or "Blick" came from welt.de, zeit.de, blick.ch) | "Zeit" with zeit.de linked on another page |
+| `website_elsewhere` | A name that a web address spells when the address is only given elsewhere in the corpus. Weak, checked like NER, for one-word names that are not acronyms (this is how "Welt", "Zeit" or "Blick" came from welt.de, zeit.de, blick.ch); as strong as `website` for names of several words, acronyms and camelCase names ("Ende Gelände", "Amis de la Terre") | "Zeit" with zeit.de linked on another page |
 | `title` | A group named in an agenda entry's title that spaCy tagged as a person or "other", kept when the same name is in at least two titles or spells the entry's website or link | "Shell must fall", "Stay grounded" |
 
 Acronyms defined in the text, e.g. "Independent Workers Union of Great
@@ -335,14 +342,25 @@ the whole corpus before they are kept:
   ordinary word (noun, adjective, verb ...) in at least half of its own
   contexts, or a weekday ("Freitag", "Samstag"), is dropped, unless title,
   pattern, appositive or watchlist evidence, a strong link or a website given
-  in the paragraph itself supports it. Institutional compounds
-  ("Bundesregierung", "Landesregierung") and hyphenated organisation names
-  ("Rosa-Luxemburg-Stiftung") are exempt. `organisations.csv` records the
-  votes: `pos_votes` (contexts tagged) and `pos_common` (of them, read as an
-  ordinary word); both are blank for names of several words;
+  in the paragraph itself supports it. The check is made per mention: each
+  mention found only by weak methods is dropped, even when another mention of
+  the same name is strong ("Die Welt (2019) ... www.welt.de" keeps only that
+  mention); an appositive does not count for a weekday or a name in capitals
+  ("forum FREITAG, SAMSTAG"). The tagger reads the contexts of the weak
+  mentions, and a word in capitals ("RASSISMUS") in title case.
+  Institutional compounds ("Bundesregierung", "Landesregierung",
+  "Umweltbundesamt", "Skogsstyrelsen", "Folketinget") and hyphenated
+  organisation names ("Rosa-Luxemburg-Stiftung") are exempt.
+  `organisations.csv` records the votes: `pos_votes` (contexts tagged) and
+  `pos_common` (of them, read as an ordinary word); both are blank for names
+  of several words and for names never tagged (acronyms, camelCase names,
+  names only strong methods found, languages without a tagger);
 
 - a name made only of words the corpus also writes in lower case ("Climate
-  Justice", "Hydrogen", "Approach") is ordinary language, not a name;
+  Justice", "Hydrogen", "Approach") is ordinary language, not a name. Words
+  are compared as written, and acronyms and camelCase names are exempt, so
+  "naša", "somos" and "país" do not reject NASA, SOMO or El País; a phrase
+  that starts with an article ("Die Linke", "Les Verts", "Le Monde") is a name;
 - a NER-only name must be capitalised somewhere in running text, not only at
   the start of headings and lines ("Réveil", "Accessible");
 - a NER-only name that spaCy labels as a place far more often than as an
@@ -361,8 +379,19 @@ the whole corpus before they are kept:
   to social media, chat or form tools, or site infrastructure;
 - names are cut at title separators ("INEOS - Press Release" → INEOS).
 
+Every name and mention these checks drop is listed in `rejected_names.csv`
+(and the `rejected_names` sheet of `master_network`): the name, `scope`
+(`name`: all its mentions; `weak_mentions`: only the mentions found by weak
+methods, other mentions keep it), `reason` (`weekday`, `pos`,
+`lowercase_word`, `lowercase_phrase`, `first_name_or_place`,
+`place_preposition`, `place_label`, `other_label`), counts and an example. The
+run log gives one count per reason. A real organisation found there can be
+kept with a `--watchlist` entry.
+
 `confidence` is a rough guide: **high** = watchlist, appositive, or found by
-two or more methods (NER and `pattern_after` count as one); **medium** =
+two or more methods (the weak methods `ner`, `pattern_after`, `link_text` and
+`website_elsewhere` count as one; `website` with `website_elsewhere`, and
+`link` with `link_text`, are one method too); **medium** =
 pattern, link or title alone, or found on 3+ pages; **low** = NER,
 `pattern_after` or a web address alone on fewer than 3 pages. Low-confidence
 rows are where to look for false positives (companies, places, people
@@ -541,7 +570,10 @@ source tied to two events gives two rows.
 - `all_events`: every event found (agenda entries, calendar, event pages),
   with how well it was covered (`link_followed`, `link_status`,
   `pages_analysed`, `words_analysed`), whether it is in the network
-  (`in_network`) and whether the theme filter left it out.
+  (`in_network`), how many of its organisations are in the
+  `context_organisations` and `ner_only_candidates` sheets, and whether the
+  theme filter left it out (`left_out_by_theme_filter`: only when the event
+  has no row in the network or in either sheet).
 - `menus_and_footers`: names found only in menus, headers, footers or
   sidebars, kept apart so site furniture does not inflate the network.
 - `ner_only_candidates`: rows whose organisation was found only by spaCy's
@@ -554,7 +586,12 @@ source tied to two events gives two rows.
   in two or more sources, or it is named in the content of three or more
   sources on two or more websites (or three or more agenda entries).
   `make_master.py --keep-ner-only` puts them back into the network; a
-  `--watchlist` entry confirms a single name.
+  `--watchlist` entry confirms a single name. A row of a corroborated name
+  also goes here when the row itself was found only by weak methods and the
+  name is one word read as an ordinary word or a weekday (older folders,
+  made before the per-mention check in `site_actors.py`).
+- `rejected_names`: names and mentions the run's vetting dropped
+  (`rejected_names.csv`, see [How organisations are found](#how-organisations-are-found)).
 - `sources`: every source read, with its theme hits.
 - `excluded_sources`: sources left out by the theme filter, with their
   organisations and the reason.
@@ -597,9 +634,16 @@ page date (`--edition-policy nearest`; the other editions are listed in
 link once scheme, www., date and trailing slash are ignored, or names that
 share at least 40 % of their words once years, digits and bracket tags are
 removed); events that only share a website go to "(other pages of <site>)"
-(`attribution` `site_level`). With `--edition-policy all` a page goes to all
+(`attribution` `site_level`). When one of the events links the site's home page
+(or a language root such as `/en/`), the site is taken as that event's own
+website: a dated page goes to the nearest of the events linking the site, as
+editions of one series even under other names ("Gemeinsam gegen die
+Tierindustrie" and "Camp d'action contre l'industrie de la viande"), and an
+undated page to the event(s) linking the home page. With `--edition-policy all` a page goes to all
 of them (the behaviour of earlier versions). A linked source whose address or
-title names another year than its event's (`source_year`) is `other_year`.
+title names another year than its event's (`source_year`) is `other_year`;
+years more than two after the event are targets ("Kohleausstieg 2030"), and a
+span such as "2024-2027" that contains the event's year is the event's own.
 Exact copies of a document (the same file under `www.` or not, `http` or
 `https`, with or without a trailing slash, or the same text) are marked with
 `duplicate_document_of`; a copy tied to the same event as its original is
@@ -642,7 +686,7 @@ its event, and `--network-scope participation` (the default) keeps in
 | `listing` | an agenda entry or a calendar cell |
 | `page` | the event's own page and the landing page (always), and any other web page |
 | `programme` | a PDF whose title or file name says programme, flyer, call, invitation, timetable or press release (`Programm`, `appel`, `Aufruf` ...), or a PDF of fewer than 3,000 words without such words |
-| `report` | a PDF whose title or file name says report, study, guide, newsletter, brochure (`Bericht`, `rapport`, `Studie` ...), a longer PDF without either kind of word, or a web page naming more than 100 organisations that is not a programme or partner list |
+| `report` | a PDF whose title or file name says report, study, guide, newsletter, brochure (`Bericht`, `rapport`, `Studie` ...), a longer PDF without either kind of word, or a web page naming more than 100 organisations that is not a programme or partner list (a partner, member or coalition page such as "over ons", "wer wir sind", "chi siamo", "Bündnis", "Trägerkreis" stays a `page`) |
 
 A row is context (`participation` = `no`, with the reason in
 `context_reason`) when its source is a `report`; when it comes from "(other
@@ -806,6 +850,8 @@ Written to `--output-dir`:
   and page counts, methods, spelling variants, acronyms, co-occurring themes
   (overall and one column per theme), linked domains, first URL, and for
   one-word names the part-of-speech votes `pos_votes` and `pos_common`.
+- `rejected_names.csv`: names and mentions dropped by the corpus checks, with
+  the reason (see [How organisations are found](#how-organisations-are-found)).
 - `theme_hits.csv`: every theme term found, with its passage, event(s),
   source and whether it sits in a menu or sidebar (the source of
   `master_themes`).
@@ -1012,9 +1058,12 @@ Some definitions behind the tables:
   organisation's series with the base rate over all sources; they are blank
   when the masters were already theme-filtered (see
   [Theme-hit inclusion criterion](#theme-hit-inclusion-criterion)).
-  Organisations named after a theme ("Rassismus", "Nazis", "Antifa", or a name
-  whose head is the theme word) are left out, since they co-occur with it by
-  construction. A pair is `robust` with two documents from two websites (or,
+  An organisation named after a theme ("Rassismus", "Nazis", or a two-word
+  name whose head is the theme word, "SOS Racisme") is left out for that theme
+  only, since it co-occurs with it by construction; its other themes and its
+  bridging are kept. Names of three or more words ("Jeune Garde Antifasciste")
+  and names with a linker before the theme word ("Stand Up To Racism",
+  "Bündnis gegen Rassismus") are kept for every theme. A pair is `robust` with two documents from two websites (or,
   on unfiltered masters, the event-level rule); `org_bridging` lists the
   organisations robust on two or more themes, by series, then documents.
 - `precision_by_stratum`: the `ALL` row is the stratified estimate, with a

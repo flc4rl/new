@@ -1293,7 +1293,20 @@ def _name_columns(para: str) -> str:
         while j < len(lines) and ok[j]:
             j += 1
         if j - i >= 3:
-            out.append(" · ".join(x.strip() for x in lines[i:j]))
+            items: List[str] = []
+            for x in lines[i:j]:
+                x = x.strip()
+                last = TOKEN_RE.findall(items[-1])[-1:] if items else []
+                cont = TOKEN_RE.findall(x)
+                if (last and last[0].casefold() in _OPEN_END_WORDS) or (
+                        len(cont) == 1 and len(TOKEN_RE.findall(items[-1] if items else "")) >= 3
+                        and is_place_key(canonical_key(x))):
+                    # "Conservation Council of" + "Western Australia";
+                    # "Friends of the Earth" + "Europe"
+                    items[-1] += " " + x
+                else:
+                    items.append(x)
+            out.append(" · ".join(items))
             i = j
         else:
             out.append(lines[i])
@@ -1681,10 +1694,27 @@ maandag dinsdag woensdag donderdag vrijdag zaterdag zondag
 segunda terça terca quarta quinta sexta segunda-feira terça-feira quarta-feira quinta-feira sexta-feira
 mandag tirsdag onsdag torsdag fredag lørdag søndag
 """.split())
+# The same as organisation keys: canonical_key folds accents and plural endings
+# ("Tuesday" -> "tusday", "Viernes" -> "vierne"), so keys are tested against both.
+WEEKDAY_KEYS = WEEKDAYS | frozenset(canonical_key(w) for w in WEEKDAYS)
+
+
+def is_weekday(key: str, surface: str = "") -> bool:
+    """A weekday name: the surface as written when it is known ("Freitag", "FREITAG",
+    "Viernes"; not "JUVE", whose key "juve" is also that of "Jueves"), else the key."""
+    if surface:
+        return strip_elision(surface.strip()).casefold() in WEEKDAYS
+    return key in WEEKDAY_KEYS
 # German, Austrian and EU institutions written as one compound ("Bundesregierung",
 # "Bundestag", "Landesregierung", "Staatsanwaltschaft", "Europarat"): their parts are
 # ordinary nouns, but the compound names an institution.
 _INSTITUTION_COMPOUND = re.compile(r"^(?:bundes|landes|staats|europa)\w{3,}$", re.I)
+# State bodies written as one compound ending in an institutional word: German
+# "Umweltbundesamt", "Bundesministerium", "Verwaltungsgericht", Scandinavian
+# "Skogsstyrelsen", "Naturvårdsverket", "Folketinget" (their tagger reading is NOUN).
+_INSTITUTION_HEAD = re.compile(
+    r"\w{2,}(?:(?<!gesamt)(?<!ges)amt|ämter|aemter|ministerium|gericht|gerichtshof|behörde|behoerde|kammer|"
+    r"styrelsen|verket|tinget|direktoratet|departementet|ministeriet)$", re.I)
 _TAGGER_EXCLUDE = ["parser", "ner", "lemmatizer", "senter", "textcat"]
 _TAG_WINDOW = 160     # characters of context kept on each side of the name
 
@@ -1705,21 +1735,35 @@ def single_word_name(surface: str) -> bool:
     """A one-word name that is neither an acronym (all capitals, up to 6 characters)
     nor camelCase or with a digit ("GroenFront", "COP26"): the names whose part of
     speech in their own contexts tells a proper noun ("Greenpeace") from an ordinary
-    word ("Klimakrise", "Welt")."""
+    word ("Klimakrise", "Welt"). A longer word in capitals ("RASSISMUS", "DISKUSSION")
+    is one too: it is tagged in title case (see _pos_votes)."""
     toks = TOKEN_RE.findall(surface)
     if len(toks) != 1:
         return False
     w = strip_elision(toks[0])
     if not w or (w.isupper() and len(w) <= 6):
         return False
-    return not re.search(r"\d", w) and not any(c.isupper() for c in w[1:])
+    if re.search(r"\d", w):
+        return False
+    return w.isupper() or not any(c.isupper() for c in w[1:])
+
+
+def weak_methods_for(surface: str) -> frozenset:
+    """The methods that are weak evidence for this name (NER_LIKE_METHODS). A website
+    given only in another paragraph ("website_elsewhere") is weak for one-word names
+    that are not acronyms ("Welt" for welt.de); for a name of several words, an acronym
+    or a camelCase name ("Ende Gelände", "SOMO", "GroenFront") it is as strong as a
+    website the paragraph itself gives."""
+    if surface and not single_word_name(surface):
+        return NER_LIKE_METHODS - {"website_elsewhere"}
+    return NER_LIKE_METHODS
 
 
 def _pos_exempt(surface: str) -> bool:
     """Institutional compounds ("Bundesregierung") and hyphenated compounds ending in an
     organisational word ("Rosa-Luxemburg-Stiftung") are never ordinary words."""
     w = strip_elision(surface.strip())
-    if _INSTITUTION_COMPOUND.match(w):
+    if _INSTITUTION_COMPOUND.match(w) or _INSTITUTION_HEAD.fullmatch(w):
         return True
     parts = [x for x in re.split(r"[-‐‑]", w.casefold()) if x]
     return len(parts) >= 2 and (parts[-1] in HEAD_TO_TYPE or parts[-1] in COMPOUND_HEADS)
@@ -1766,6 +1810,9 @@ def _pos_votes(samples: Dict[str, List[Tuple[str, str, str]]], resolve=None,
                 continue
             a = max(0, i - _TAG_WINDOW)
             clip = context[a:i + len(surface) + _TAG_WINDOW]
+            word = clip[i - a:i - a + len(surface)]
+            if len(word) > 6 and word.isupper():   # "RASSISMUS": the tagger reads capitals as a name
+                clip = clip[:i - a] + word.capitalize() + clip[i - a + len(word):]
             by_lang[lang][clip].append((key, surface, i - a))
     out: Dict[str, List[int]] = {}
     for lang in sorted(by_lang):
@@ -1958,18 +2005,32 @@ def _second_language(text: str, code: str) -> Tuple[str, List[Tuple[int, int]]]:
     return (lang, spans) if spans else ("", [])
 
 
-def _trim_end(text: str, start: int, end: int) -> int:
+# Short endings of real names ("Plan A", "Generation Y", "Just Say No"): kept when the
+# span comes from an agenda title or a rule (see trim_junk keep_short).
+_SHORT_ENDINGS = {"a", "y", "e", "no"}
+
+
+def _trim_end(text: str, start: int, end: int, keep_short: bool = False) -> int:
     """Drop trailing function and interface words (TRAILING_STRIP) from a span of two or
     more words: "Casino Group A" -> "Casino Group", "Scientist Rebellion Logo" ->
-    "Scientist Rebellion"."""
+    "Scientist Rebellion". With keep_short, a capitalised one-letter word or "No" at
+    the end stays ("Plan A")."""
     while True:
         toks = list(TOKEN_RE.finditer(text, start, end))
         if len(toks) < 2 or toks[-1].group(0).casefold() not in TRAILING_STRIP:
             return end
+        last = toks[-1].group(0)
+        if keep_short and last.casefold() in _SHORT_ENDINGS and last[:1].isupper():
+            return end
         end = toks[-2].end()
 
 
-def trim_junk(surface: str) -> Tuple[int, int]:
+# Openers that are also the first word of names ("Chez Nous", "Across Borders"): cut
+# only before an article ("Across the European Union ...").
+_JUNK_OPENERS_ARTICLE = {"chez", "across"}
+
+
+def trim_junk(surface: str, keep_short: bool = False) -> Tuple[int, int]:
     """(start, end) of the name inside `surface` once "Logo" around it, a role before it
     ("Presseteam von", "Member of the"), an opener ("Neither the", "INTRODUCTION") and
     trailing function words ("A", "At", "Website") are dropped. The whole surface when
@@ -1989,13 +2050,16 @@ def trim_junk(surface: str) -> Tuple[int, int]:
         first = TOKEN_RE.match(surface, start)
         if first and first.group(0).casefold() in _JUNK_OPENERS and first.end() < end:
             nxt = TOKEN_RE.search(surface, first.end(), end)
+            if (first.group(0).casefold() in _JUNK_OPENERS_ARTICLE
+                    and not (nxt and nxt.group(0).casefold() in ARTICLES)):
+                break
             while nxt and nxt.group(0).casefold() in ARTICLES and not _is_cap(nxt.group(0)):
                 nxt = TOKEN_RE.search(surface, nxt.end(), end)   # "Neither the European Union"
             if nxt and _is_cap(nxt.group(0)):
                 start = nxt.start()
                 continue
         break
-    end = _trim_end(surface, start, end)
+    end = _trim_end(surface, start, end, keep_short)
     if not TOKEN_RE.search(surface, start, end):
         return 0, len(surface)
     return start, end
@@ -2067,6 +2131,9 @@ class OrgExtractor:
         self.pos_samples: Dict[str, List[Tuple[str, str, str]]] = defaultdict(list)
         self.pos_votes: Optional[Dict[str, Tuple[int, int]]] = None   # None until tagged
         self._pos_seen: Set[Tuple[str, str]] = set()
+        # Surface forms of each key (up to 6 distinct ones), for the rules that look at
+        # how a name is written (acronym, camelCase, one word): see surface_of().
+        self._key_surfaces: Dict[str, Counter] = {}
         # Two- and three-word names (key -> surface) and their lower-case / capitalised
         # uses in the corpus, counted by finish_corpus_votes() (see is_lowercase_phrase).
         self._phrase_surfaces: Dict[str, str] = {}
@@ -2668,15 +2735,18 @@ class OrgExtractor:
                         if not ((caps[i - 1] and text[found[i - 1].end():found[i].start()].isspace())
                                 or (i + 1 < len(toks) and caps[i + 1]
                                     and text[found[i].end():found[i + 1].start()].isspace())):
-                            alone[canonical_key(w)] += 1     # "the Earth", not "Friends of the Earth"
+                            alone[w.casefold()] += 1     # "the Earth", not "Friends of the Earth"
                     else:
                         lower[w.casefold()] += 1
                         if not urls or not any(a <= found[i].start() < b for a, b in urls):
-                            lower_text[canonical_key(w)] += 1
+                            # the word as written ("naša", "somos" and "país" are not
+                            # "NASA", "SOMO" and "País" folded by canonical_key)
+                            lower_text[w.casefold()] += 1
         self.common_words = {w for w, n in lower.items() if n >= 2 and n >= 0.5 * upper.get(w, 0)}
         # Words written in lower case at least 3 times, and at least a quarter as often as
         # capitalised on their own ("earth", "parliament", "bank"): a one-word name made
         # of one is an ordinary word unless a strong method supports it (see vet()).
+        # Casefolded words as written, not organisation keys (see is_lowercase_word).
         self.lowercase_words = {w for w, n in lower_text.items() if n >= 3 and n >= 0.25 * alone.get(w, 0)}
         self._lowercase_keys = set(self.lowercase_words)
         self.mid_caps = set(upper)
@@ -2724,7 +2794,58 @@ class OrgExtractor:
             return True   # chemical formulae: CO2, CH4, H2O (not "COP27")
         return all(w in self.common_words or w in LEADING_STRIP or w in GENERIC for w in content)
 
-    def vet(self, key: str, methods: Iterable[str]) -> bool:
+    # Why vet() rejects a name (vet_reason) or ordinary_reason() calls it an ordinary
+    # word; the keys are written to rejected_names.csv by site_actors.py.
+    REJECT_REASONS = {
+        "weekday": "a weekday",
+        "pos": "read as an ordinary word (noun, verb ...) by the part-of-speech tagger",
+        "lowercase_word": "a word the corpus writes in lower case",
+        "lowercase_phrase": "a phrase the corpus writes in lower case",
+        "first_name_or_place": "a first name or place spelt like a website given elsewhere",
+        "place_preposition": "mostly written after a place preposition (in, à, bei ...)",
+        "place_label": "labelled a place by spaCy more often than an organisation",
+        "other_label": "labelled a person, law, event ... by spaCy more often than an organisation",
+    }
+
+    def surface_of(self, key: str) -> str:
+        """The most frequent surface form met for `key` ("" when none was recorded)."""
+        forms = self._key_surfaces.get(key)
+        return forms.most_common(1)[0][0] if forms else ""
+
+    def vet(self, key: str, methods: Iterable[str], surface: Optional[str] = None) -> bool:
+        """True when the name is kept; see vet_reason()."""
+        return not self.vet_reason(key, methods, surface)
+
+    def ordinary_reason(self, key: str, surface: Optional[str] = None) -> str:
+        """The ordinary-word rules of vet() alone, for one name whatever its methods:
+        'weekday', 'pos' (part-of-speech votes), 'lowercase_word', 'lowercase_phrase',
+        or "" when none applies. site_actors.py applies them to each mention found by
+        weak methods only, also when other mentions of the name are strong."""
+        if self.pos_votes is None:
+            self.finish_corpus_votes()
+        surface = surface or self.surface_of(key)
+        if " " not in key.strip() and is_weekday(key, surface):
+            return "weekday"
+        if self.is_common_pos(key):
+            return "pos"
+        if self.is_lowercase_word(key, surface):
+            return "lowercase_word"
+        if self.is_lowercase_phrase(key):
+            return "lowercase_phrase"
+        return ""
+
+    def mention_is_weak(self, key: str, methods: Iterable[str], surface: str = "") -> bool:
+        """Are the methods of one mention all weak for this name (weak_methods_for)? An
+        appositive is weak too for a weekday or a name in capitals that the tagger reads
+        as an ordinary word ("forum FREITAG, SAMSTAG")."""
+        ms = set(methods) - {""}
+        weak = set(weak_methods_for(surface or self.surface_of(key)))
+        if "appositive" in ms and (is_weekday(key, surface) or (surface.isupper() and len(surface) > 1
+                                                             and self.is_common_pos(key))):
+            weak.add("appositive")
+        return bool(ms) and not (ms - weak)
+
+    def vet_reason(self, key: str, methods: Iterable[str], surface: Optional[str] = None) -> str:
         """Site-wide check for names found only by NER (and by the weak lower-case-head
         rule "pattern_after", vetted the same way); names also found by another rule, a
         descriptor, a website, a link, an agenda title or the watchlist are kept.
@@ -2747,36 +2868,39 @@ class OrgExtractor:
         The place-preposition check comes first and does not look at the label votes:
         small models label many place names ORG (Kinneil, ZAD, Scholven, Sassnitz).
         Before both, a one-word name is rejected when its part-of-speech votes say it is
-        an ordinary word, or when it is a weekday (see is_common_pos)."""
-        if set(methods) & STRONG_METHODS or set(methods) - NER_LIKE_METHODS:
-            return True   # a rule, a link or a descriptor also supports it
-        if self.pos_votes is None:
-            self.finish_corpus_votes()
-        if self.is_common_pos(key):
-            return False  # a one-word name used as an ordinary word ("Welt", "Klimakrise", "Freitag")
-        if self.is_lowercase_word(key):
-            return False  # "Earth", "Parliament", "Bank": written in lower case in this corpus
-        if self.is_lowercase_phrase(key):
-            return False  # "Social Movements", "System Change": an ordinary phrase here
+        an ordinary word, or when it is a weekday (see is_common_pos); and a name the
+        corpus writes in lower case (is_lowercase_word, is_lowercase_phrase).
+        A website given only in another paragraph ("website_elsewhere") is weak only
+        for one-word names that are not acronyms (weak_methods_for).
+        Returns "" when the name is kept, else a key of REJECT_REASONS."""
+        methods = set(methods) - {""}
+        surface = surface or self.surface_of(key)
+        if methods - weak_methods_for(surface):
+            return ""     # a rule, a link or a descriptor also supports it
+        ordinary = self.ordinary_reason(key, surface)
+        if ordinary:
+            # "Welt", "Klimakrise", "Freitag" (part of speech, weekday); "Earth",
+            # "Parliament" (lower case); "Social Movements", "System Change" (a phrase)
+            return ordinary
         if "website_elsewhere" in methods and " " not in key and (
                 key in FIRST_NAME_KEYS or is_place_key(key) or is_gazetteer_place(key.title())):
-            return False  # "Rachel", "Marianne", "Colorado": the name of a site given elsewhere
+            return "first_name_or_place"  # "Rachel", "Marianne", "Colorado": the name of a site given elsewhere
         after_loc, total = self.locative.get(key, (0, 0))
         if total >= 2 and after_loc / total >= 0.6:
-            return False  # mostly written "in X", "à X", "bei X": a place
+            return "place_preposition"  # mostly written "in X", "à X", "bei X": a place
         votes = self.label_votes.get(key)
         if not votes:
-            return True
+            return ""
         org = sum(n for lab, n in votes.items() if lab in ORG_LABELS)
         place = sum(n for lab, n in votes.items() if lab in {"GPE", "LOC", "FAC"})
         other = sum(n for lab, n in votes.items() if lab in NON_ORG_LABELS)
         # Small models often call coined names people ("Alternatiba" as PER), so
         # person labels count for less than place labels.
         if place >= 2 * org and place >= 3:
-            return False
+            return "place_label"
         # MISC (and an unseen label) does not count against a name: with no non-org
         # label at all, nothing speaks against it.
-        return not (other > 0 and other >= 3 * org and org < 3)
+        return "other_label" if (other > 0 and other >= 3 * org and org < 3) else ""
 
     POS_SAMPLES = 8   # distinct contexts tagged per one-word name
 
@@ -2860,6 +2984,8 @@ class OrgExtractor:
         surface = self._phrase_surfaces.get(key)
         if not surface:
             return False
+        if surface.split()[0].casefold() in ARTICLES:
+            return False   # "Die Linke", "Les Verts", "Le Monde": an article makes it a name
         c = self._phrase_counts.get(tuple(w.casefold() for w in surface.split()))
         return bool(c) and c[0] >= 3 and c[0] >= 0.5 * c[1]
 
@@ -2875,17 +3001,33 @@ class OrgExtractor:
         and hyphenated names ending in an organisational word ("Rosa-Luxemburg-Stiftung")
         are exempt. Callers skip names that a strong method supports (STRONG_METHODS)."""
         samples = self.pos_samples.get(key) or ()
-        surface = samples[0][0] if samples else key
+        surface = samples[0][0] if samples else (self.surface_of(key) or key)
         if " " in key.strip() or _pos_exempt(surface) or _pos_exempt(key):
             return False
-        if key in WEEKDAYS:
+        if is_weekday(key, "" if surface == key else surface):
             return True
         return is_common_vote(self.pos_summary(key))
 
-    def is_lowercase_word(self, key: str) -> bool:
-        """Is this one-word key a word the corpus writes in lower case (see
-        prepare_corpus, lowercase_words)? Institutional compounds are exempt."""
-        return (" " not in key and key in self._lowercase_keys and not _pos_exempt(key))
+    def is_lowercase_word(self, key: str, surface: Optional[str] = None) -> bool:
+        """Is this one-word name a word the corpus writes in lower case (see
+        prepare_corpus, lowercase_words), compared as written (casefolded)? Only for
+        names whose surface is a plain word (single_word_name): acronyms and camelCase
+        names ("NASA", "SOMO", "LeftVision") are not ordinary words whatever their
+        lower-case homographs. Institutional compounds are exempt."""
+        if " " in key or _pos_exempt(key):
+            return False
+        surface = surface or self.surface_of(key)
+        if not surface:
+            return key in self._lowercase_keys
+        if not single_word_name(surface) or _pos_exempt(surface):
+            return False
+        w = strip_elision(surface.strip()).casefold().strip("’'")
+        # the word as written and its plural or singular ("Department" / "departments"),
+        # without folding accents ("País" is not "pais")
+        forms = {w, w + "s", w + "es", w + "e", w + "n", w + "en"}
+        if len(w) > 3 and w.endswith("s"):
+            forms.add(w[:-1])
+        return bool(forms & self._lowercase_keys)
 
     def merge_key(self, name: str) -> str:
         """The organisation key for `name` (a name or a canonical key) in this run.
@@ -3709,7 +3851,7 @@ class OrgExtractor:
                 m.surface = m.surface[:cut.start()]
             m.surface = tidy_surface(m.surface)
             if "watchlist" not in m.methods:
-                js, je = trim_junk(m.surface)
+                js, je = trim_junk(m.surface, keep_short=bool(m.methods & {"title", "pattern"}))
                 if (js, je) != (0, len(m.surface)):
                     if m.start >= 0:
                         m.start, m.end = m.start + js, m.start + je
@@ -3784,7 +3926,12 @@ class OrgExtractor:
                 continue
             accepted.append(m)
         for m in accepted:
-            if lang:
+            forms = self._key_surfaces.setdefault(m.key, Counter())
+            if m.surface in forms or len(forms) < 6:
+                forms[m.surface] += 1
+            # POS samples come from the mentions the ordinary-word rules judge: those
+            # found by weak methods only ("die Welt retten", not "Die Welt (2019)").
+            if lang and not (m.methods - NER_LIKE_METHODS):
                 self._record_pos_sample(m.key, m.surface, text, m.start, lang)
             if m.key not in self._phrase_surfaces and _phrase_shape(m.surface):
                 self._phrase_surfaces[m.key] = m.surface

@@ -31,7 +31,14 @@ Build the two master files from one or more result folders:
                                           NER (spaCy) with no other evidence in the
                                           corpus (see OrgEvidence): kept apart so
                                           nothing is lost, but not in the network
-                                          unless --keep-ner-only is given
+                                          unless --keep-ner-only is given; also
+                                          rows found only by NER of a one-word
+                                          name read as an ordinary word, when
+                                          other rows keep the name
+                     rejected_names       names and mentions the run's vetting
+                                          dropped (rejected_names.csv: ordinary
+                                          words, weekdays, places, people), with
+                                          the reason, for review (newer folders)
                      sources              every source read (web page, PDF,
                                           agenda entry, calendar cell) with its
                                           theme hits
@@ -125,7 +132,8 @@ EVENT_FIELDS = ["event", "event_date", "event_link", "event_key", *COUNTRY_FIELD
 ALL_EVENT_FIELDS = ["event", "date", "event_link", "event_key", *COUNTRY_FIELDS, "listed_on",
                     "calendar_months", "entry_words", "link_followed", "link_status", "pages_analysed",
                     "words_analysed", "org_mentions", "sources_with_theme_hit", "in_network",
-                    "network_organisations", "left_out_by_theme_filter", "location_structured",
+                    "network_organisations", "context_organisations", "ner_only_candidates",
+                    "left_out_by_theme_filter", "location_structured",
                     "merged_from"]
 THEME_FIELDS = ["theme", "term", "event", "event_date", "event_link", "event_key", *COUNTRY_FIELDS,
                 "n_events_for_passage", "layer", "content_vs_event", "years_after_event",
@@ -236,9 +244,14 @@ _REPORT_WORDS = re.compile(
     r"|estatuto|beleidsplan|aanbeveling|recommendation|forderung|faq|strategie|strategy"
     r"|legal[_\- ]?opinion")
 # Pages that name many organisations as the event's own partners, not as a report would.
+# Coalition and member lists ("over ons", "wer wir sind", "Bündnis", "Trägerkreis") name
+# the event's own organisers too.
 _PARTNER_WORDS = re.compile(
     r"(?i)partner|partenaires|unterst[uü]tzer|signataires|signatories|who we are|[uü]ber uns"
-    r"|qui sommes|line-?up|agenda")
+    r"|qui sommes|line-?up|agenda|over ons|wie (?:we|wij) zijn|wer wir sind|chi siamo"
+    r"|qui[eé]nes somos|quem somos|om oss|om os\b|members|mitglieder|membres|miembros|membri|leden"
+    r"|b[uü]ndnis|coalit|alliance|alliantie|allianz|tr[aä]gerkreis|organisers|organizers"
+    r"|organisatoren|organisateurs")
 LONG_PDF_WORDS = 3000      # a PDF without either kind of word is a report from this length
 MANY_ORGS_ON_PAGE = 100    # a web page naming more organisations is a list or report
 
@@ -470,6 +483,13 @@ maandag dinsdag woensdag donderdag vrijdag zaterdag zondag
 segunda terça terca quarta quinta sexta
 """.split())
 CANDIDATE_FIELDS = NETWORK_FIELDS + ["corpus_sources", "corpus_sites", "why_candidate"]
+REJECTED_FIELDS = ["organisation", "org_key", "scope", "reason", "reason_text", "mentions_dropped",
+                   "mentions_kept", "methods_dropped", "pages", "sites", "example_url", "example_context",
+                   "result_folder"]
+try:   # weekday names as organisation keys ("Tuesday" -> "tusday"), see extract.WEEKDAY_KEYS
+    from extract import WEEKDAY_KEYS as _WEEKDAY_KEYS
+except ImportError:
+    _WEEKDAY_KEYS = WEEKDAYS
 _LEGAL_FORM = re.compile(r"\s(?:AG|SE|plc|PLC|Ltd\.?|Limited|GmbH|LLC|Inc\.?|S\.?A\.?|SpA|S\.p\.A\.|N\.?V\.?|"
                          r"B\.?V\.?|e\.\s?V\.|Oy|Oyj|AB|ASA|A/S|SAS|SARL|Srl|KG|Corp\.?|Corporation)$")
 _CAMEL = re.compile(r"[A-ZÀ-Ý][a-zà-ÿ]+(?:[A-ZÀ-Ý][a-zà-ÿ]+)+")
@@ -477,8 +497,24 @@ _ACRONYM = re.compile(r"[A-Z0-9ÀÂÄÇÉÈÊËÎÏÔÖÙÛÜ][A-Z0-9ÀÂÄÇÉ�
 
 
 def _method_names(value: str) -> Set[str]:
-    """"ner (2); pattern (1)" (organisations.csv) or "ner+pattern" (mentions.csv)."""
-    return {re.sub(r"\s*\(\d+\)$", "", m).strip() for m in re.split(r";\s*|\+", value or "")} - {""}
+    """"ner (2); pattern (1)" (organisations.csv), "ner+pattern" (mentions.csv) or
+    "ner; website; split from ..." (found_by of master_network)."""
+    return {re.sub(r"\s*\(\d+\)$", "", m).strip() for m in re.split(r";\s*|\+", value or "")
+            if not m.strip().startswith("split from")} - {""}
+
+
+def _weak_for(weak: frozenset, surface: str) -> frozenset:
+    """`weak` without 'website_elsewhere' for a name of several words, an acronym or a
+    camelCase name (extract.weak_methods_for): only for a one-word name is a website
+    given in another paragraph weak evidence."""
+    try:
+        from extract import weak_methods_for
+        if "website_elsewhere" in weak_methods_for(surface):
+            return weak
+    except ImportError:
+        if not (" " in surface.strip() or _ACRONYM.fullmatch(surface) or _CAMEL.fullmatch(surface)):
+            return weak
+    return frozenset(weak - {"website_elsewhere"})
 
 
 class OrgEvidence:
@@ -561,13 +597,13 @@ class OrgEvidence:
     def why_not(self, key: str) -> str:
         """"" when the name is corroborated, else why it is only a candidate."""
         methods = self.methods.get(key, set())
-        if not methods or methods - self.weak:
+        surface = self.display(key)
+        if not methods or methods - _weak_for(self.weak, surface):
             return ""   # unknown here (keep it) or found by another rule as well
         if key in self.typed or key in self.spelt or key in self.watch:
             return ""
         n_src = len(self.sources.get(key, set()) - {""})
         n_sites = len(self.sites.get(key, set()) - {""})
-        surface = self.display(key)
         if _LEGAL_FORM.search(surface):
             return ""
         if _ACRONYM.fullmatch(surface) and n_src >= 2 and not _is_place(surface):
@@ -581,7 +617,8 @@ class OrgEvidence:
         common = self.ordinary_word(key, surface)
         if broad and not common:
             return ""
-        how = "NER (spaCy)" if methods <= {"ner", "pattern_after"} else "NER (spaCy) or link text"
+        how = ("NER (spaCy)" if methods <= {"ner", "pattern_after"}
+               else "NER (spaCy), link text or a website given elsewhere")
         why = (f"found only by {how}, in {n_src} source{'s' if n_src != 1 else ''} on "
                f"{n_sites} website{'s' if n_sites != 1 else ''}, with no other evidence")
         return f"{why}; {common}" if broad else why
@@ -589,22 +626,43 @@ class OrgEvidence:
     def ordinary_word(self, key: str, surface: str) -> str:
         """Why a one-word name may not use the breadth rule (named in 3 sources on 2
         websites, or in 3 agenda entries), or "": a weekday never; another one-word name
-        that is not an acronym or camelCase only when the part-of-speech tagger mostly
-        read it as a name (pos_votes >= 2, fewer than half of them an ordinary word).
-        Names without votes (folders made before pos_votes existed) keep the older rule."""
+        that is not an acronym or camelCase when the part-of-speech tagger mostly read
+        it as an ordinary word (pos_votes >= 2, at least half of them pos_common).
+        Names without votes (never tagged, or folders made before pos_votes existed)
+        keep the older rule; so do older folders' pos_votes of 0, which meant the same."""
         if " " in key.strip():
             return ""
-        if key.casefold() in WEEKDAYS or surface.casefold() in WEEKDAYS:
+        if (surface.casefold() in WEEKDAYS
+                or (not surface and (key.casefold() in WEEKDAYS or key.casefold() in _WEEKDAY_KEYS))):
             return "a weekday"
         if _ACRONYM.fullmatch(surface) or _CAMEL.fullmatch(surface):
             return ""
-        if key not in self.pos:
+        votes, common = self.pos.get(key, (0, 0))
+        if votes < 2 or common < 0.5 * votes:
             return ""
-        votes, common = self.pos[key]
-        if votes >= 2 and common / votes < 0.5:
+        return f"one word read as an ordinary word in {common} of {votes} contexts"
+
+    def why_not_row(self, row: dict) -> str:
+        """why_not() of the row's organisation; else, when the row itself was found only
+        by weak methods (its found_by) and the name is an ordinary word (ordinary_word:
+        a weekday, or mostly read as a noun, verb ...), why the row is only a candidate:
+        "die Welt retten" next to a name kept elsewhere by "Die Welt (2019) www.welt.de"."""
+        key = row.get("org_key") or ""
+        why = self.why_not(key)
+        if why or not key:
+            return why
+        surface = row.get("organisation") or self.display(key)
+        ms = _method_names(row.get("found_by", ""))
+        common = self.ordinary_word(key, surface)
+        weak = _weak_for(self.weak, surface)
+        if common == "a weekday":
+            weak = weak | {"appositive"}   # "forum FREITAG, SAMSTAG"
+        if not ms or ms - weak:
             return ""
-        return (f"one word read as an ordinary word in {common} of {votes} contexts"
-                if votes else "one word with no part-of-speech reading as a name")
+        if not common:
+            return ""
+        return (f"this row found only by {', '.join(sorted(ms))}; the name is {common}, "
+                "kept elsewhere only where a rule, website or link supports it")
 
     def attested(self, name: str) -> str:
         """org_key of `name` when the corpus or a watchlist knows it as a corroborated
@@ -1065,13 +1123,20 @@ def event_rows(network: List[dict]) -> List[dict]:
     return out
 
 
-def all_event_rows(results: Sequence[Path], network: List[dict], before: Set[str]) -> List[dict]:
+def all_event_rows(results: Sequence[Path], network: List[dict], before: Set[str],
+                   context: Sequence[dict] = (), candidates: Sequence[dict] = ()) -> List[dict]:
     """Every event of events.csv, with whether (and with how many organisations) it is
-    in the network, so shares can be computed over all events, not only those found."""
-    orgs_of: Dict[str, Set[str]] = defaultdict(set)
-    for r in network:
-        orgs_of[_event_id({"key": r.get("event_key"), "name": r["event"], "link": r["event_link"]})].add(
-            r["organisation"])
+    in the network, so shares can be computed over all events, not only those found.
+    context_organisations and ner_only_candidates count the event's organisations in
+    those sheets; left_out_by_theme_filter is True only for an event with organisations
+    before the theme filter and none in the network or either sheet."""
+    def ids(rows) -> Dict[str, Set[str]]:
+        out_: Dict[str, Set[str]] = defaultdict(set)
+        for r in rows:
+            out_[_event_id({"key": r.get("event_key"), "name": r["event"], "link": r["event_link"]})].add(
+                r["organisation"])
+        return out_
+    orgs_of, ctx_of, cand_of = ids(network), ids(context), ids(candidates)
     out, seen = [], set()
     by_key, by_name = _countries(results)
     for res in results:
@@ -1085,8 +1150,10 @@ def all_event_rows(results: Sequence[Path], network: List[dict], before: Set[str
                 continue
             seen.add(eid)
             n = len(orgs_of.get(eid, ()))
+            n_ctx, n_cand = len(ctx_of.get(eid, ())), len(cand_of.get(eid, ()))
             out.append({**e, "in_network": n > 0, "network_organisations": n,
-                        "left_out_by_theme_filter": eid in before and n == 0})
+                        "context_organisations": n_ctx, "ner_only_candidates": n_cand,
+                        "left_out_by_theme_filter": eid in before and n == 0 and n_ctx == 0 and n_cand == 0})
     return out
 
 
@@ -1319,15 +1386,16 @@ def build_masters(results: Sequence[Path], out_dir: Path, min_confidence: str = 
     tf_net = list(net)   # what the theme filter kept, before the NER-only candidates go
     candidates: List[dict] = []
     if not keep_ner_only:
+        cand_ids = set()
         for r in net:
-            why = evidence.why_not(r.get("org_key") or "")
+            why = evidence.why_not_row(r)
             if why:
                 k = r.get("org_key") or ""
+                cand_ids.add(id(r))
                 candidates.append({**r, "corpus_sources": len(evidence.sources.get(k, set()) - {""}),
                                    "corpus_sites": len(evidence.sites.get(k, set()) - {""}),
                                    "why_candidate": why})
         if candidates:
-            cand_ids = {id(r) for r in net if evidence.why_not(r.get("org_key") or "")}
             net = [r for r in net if id(r) not in cand_ids]
             log.info("%d network rows (%d organisations) found only by NER with no other evidence "
                      "are in the ner_only_candidates sheet of master_network, not in the network "
@@ -1352,7 +1420,7 @@ def build_masters(results: Sequence[Path], out_dir: Path, min_confidence: str = 
     del before
     before_ids = {b[2] for b in before_content if not b[3]}
     events = event_rows(net)
-    all_events = all_event_rows(results, net, before_ids)
+    all_events = all_event_rows(results, net, before_ids, context=context, candidates=candidates)
     themes, menu_themes = theme_rows(results, keep_menu_themes, docs)
     sources = source_rows(results, kept_net)
     for x in excluded.values():
@@ -1434,6 +1502,8 @@ def build_masters(results: Sequence[Path], out_dir: Path, min_confidence: str = 
                                   ("result_folders", "; ".join(str(r) for r in results))]
                         + list(summary.items()))
 
+    # Names the run's vetting dropped (rejected_names.csv of newer folders), for review.
+    rejected = [{**x, "result_folder": res.name} for res in results for x in _iter(res / "rejected_names.csv")]
     paths = []
     _write_csv(out_dir / "master_network.csv", net, NETWORK_FIELDS)
     _write_csv(out_dir / "master_network_context.csv", context, NETWORK_FIELDS)
@@ -1446,6 +1516,8 @@ def build_masters(results: Sequence[Path], out_dir: Path, min_confidence: str = 
                                                       ("context_organisations", context, NETWORK_FIELDS),
                                                       ("menus_and_footers", furniture, NETWORK_FIELDS),
                                                       ("ner_only_candidates", candidates, CANDIDATE_FIELDS),
+                                                      *([("rejected_names", rejected, REJECTED_FIELDS)]
+                                                        if rejected else []),
                                                       ("sources", sources, SOURCE_FIELDS),
                                                       ("excluded_sources", excl, EXCLUDED_FIELDS),
                                                       ("about", about, ["item", "value"])]):

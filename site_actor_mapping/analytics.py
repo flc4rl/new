@@ -2812,27 +2812,38 @@ def a6_centrality(an: Analysis, ties: List[dict], G, P, B) -> None:
 # ==========================================================================
 _LINKERS = re.compile(r"(?i)\b(?:gegen|against|contre|contro|contra|tegen|auf|on|sur|for|für|pour|per|para|"
                       r"voor|without|ohne|sans|sin|senza|zonder|of|von|de|des|du|del|della|van|kein|keine|no|"
-                      r"stop|stopp)\b")
+                      r"stop|stopp|to|up|à|al|zu|zum|zur|y|and|und|et|e|en|og|och)\b")
+
+
+def theme_named_themes(an: Analysis, name: str) -> Set[str]:
+    """The focus themes whose term the name is ("Rassismus", "Nazis", "Le racisme") or is
+    headed by in a name of two words ("SOS Racisme", "Coordination Antifasciste"). Such
+    a name co-occurs with that theme by construction, so the (organisation, theme) pair
+    is left out of org_theme; its other themes are kept. Names of three or more words
+    ("Jeune Garde Antifasciste") and names with a linker before the term ("Bündnis gegen
+    Rassismus", "Stand Up To Racism") are kept for every theme."""
+    if not an.ts or not name:
+        return set()
+    text = collapse(name)
+    found = {th: hs for th, hs in an.ts.find(text).items() if th in an.themes and hs}
+    if not found:
+        return set()
+    words = _ART.sub("", text.casefold()).split()
+    if len(words) == 1:
+        return set(found)
+    if len(words) >= 3:
+        return set()
+    out = set()
+    for th, hs in found.items():
+        for a, b, _ in hs:
+            if b >= len(text.rstrip(" .")) - 1 and not _LINKERS.search(text[:a]):
+                out.add(th)
+    return out
 
 
 def theme_named(an: Analysis, name: str) -> bool:
-    """Is the name a focus theme term ("Rassismus", "Nazis", "Le racisme") or headed by
-    one ("Struktureller Rassismus")? Such names co-occur with their theme by
-    construction, so they are left out of org_theme ("Bündnis gegen Rassismus" and
-    "Antifa Ost" are kept)."""
-    if not an.ts or not name:
-        return False
-    text = collapse(name)
-    hits = [h for th, hs in an.ts.find(text).items() if th in an.themes for h in hs]
-    if not hits:
-        return False
-    body = _ART.sub("", text.casefold())
-    if len(body.split()) == 1:
-        return True
-    for a, b, _ in hits:
-        if b >= len(text.rstrip(" .")) - 1 and not _LINKERS.search(text[:a]):
-            return True
-    return False
+    """Is the name named after one of the focus themes (see theme_named_themes)?"""
+    return bool(theme_named_themes(an, name))
 
 
 def a7_org_theme(an: Analysis) -> None:
@@ -2849,8 +2860,8 @@ def a7_org_theme(an: Analysis) -> None:
             if org_dropped(an, k):
                 continue
             if k not in named:
-                named[k] = theme_named(an, an.org_name.get(k, k))
-            if named[k]:
+                named[k] = theme_named_themes(an, an.org_name.get(k, k))
+            if inst["theme"] in named[k]:
                 continue
             a = pas[(k, inst["theme"])]
             a["passages"].add(inst["passage_id"])
@@ -2887,13 +2898,14 @@ def a7_org_theme(an: Analysis) -> None:
     p0 = {t: share(sum(1 for x in all_series if t in series_theme.get(x, ())), len(all_series)) or 0.0 for t in th}
     rows = []
     keys = sorted(set(k for k, _ in pas) | set(org_series))
-    excluded = sorted(k for k in keys if named.setdefault(k, theme_named(an, an.org_name.get(k, k))))
+    excluded = sorted(k for k in keys if named.setdefault(k, theme_named_themes(an, an.org_name.get(k, k))))
     if excluded:
-        an.note("organisations named after a theme (left out of org_theme)", len(excluded),
-                "; ".join(an.org_name.get(k, k) for k in excluded[:12]))
-    keys = [k for k in keys if not named[k]]
+        an.note("organisations named after a theme (left out of org_theme for that theme only)", len(excluded),
+                "; ".join(f"{an.org_name.get(k, k)} ({', '.join(sorted(named[k]))})" for k in excluded[:12]))
     for k in keys:
         for t in th:
+            if t in named[k]:
+                continue   # named after this theme: co-occurs with it by construction
             a = pas.get((k, t))
             ser = org_series.get(k, set())
             n = len(ser)
@@ -4307,6 +4319,10 @@ def summary_md(an: Analysis, sm: dict) -> str:
                         "and shrunk columns of org_theme are left blank (their base rate would be inflated). "
                         "Rebuild with make_master.py --theme-filter none and run analytics.py with "
                         "--theme-filter source to get both."))
+    def _caveat_no(c):
+        m = re.match(r"C(\d+)", c[0])
+        return int(m.group(1)) if m else 999
+    caveats.sort(key=_caveat_no)
     L += ["## Caveats", ""] + [f"- **{h}.** {txt}" for h, txt in caveats] + [""]
     if sm["skipped"]:
         L += ["## Skipped", ""] + [f"- {k}: {v}" for k, v in sm["skipped"].items()] + [""]
@@ -4336,7 +4352,7 @@ def build_parser() -> argparse.ArgumentParser:
                          "page and its landing page count when any source of their event has a hit), source "
                          "(only sources with a theme hit), site / event (every source of a site or event with a "
                          "hit; agenda entries still judged one by one), or none (all sources). Default: the filter "
-                         "make_master.py recorded in the masters' about sheet, else direct")
+                         "make_master.py recorded in the masters' about sheet, else source")
     ap.add_argument("--network-scope", choices=NETWORK_SCOPES, default="participation",
                     help="participation (default): the network uses only rows that are evidence of taking part "
                          "(no linked reports, other pages of a site, rows about another year or copies); all: "

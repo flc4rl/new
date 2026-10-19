@@ -208,6 +208,7 @@ _UPLOAD_DIRS = re.compile(r"/(?:wp-content/uploads|uploads|files|sites/default/f
                           re.I)
 _PERMALINK = re.compile(r"/(20\d\d)/(?:0[1-9]|1[0-2])(?:/(?:0[1-9]|[12]\d|3[01]))?(?=/)")
 _SOURCE_YEAR = re.compile(r"(?<!\d)(20[0-2]\d|203[0-5])(?!\d)")
+_YEAR_SPAN = re.compile(r"(?<!\d)(20[0-3]\d)\s*[-–/_]\s*(20[0-3]\d)(?!\d)")
 
 
 def source_year(url: str, title: str = "", event_years: Iterable[int] = ()) -> Optional[int]:
@@ -216,7 +217,10 @@ def source_year(url: str, title: str = "", event_years: Iterable[int] = ()) -> O
     sites/default/files/2019-05/, /files/2019/) and query strings are ignored, and a
     blog permalink date (/2024/10/01/) counts only when it is more than a year away from
     `event_years`. When several years appear the latest counts, unless one of them is
-    one of `event_years` (the event's own years), which then counts."""
+    one of `event_years` (the event's own years), which then counts; a span of years
+    that contains the event's year ("2024-2027") counts as the event's own. Years more
+    than two after the event are targets ("Kohleausstieg 2030"), not what a source is
+    about, and are ignored; the title is percent-decoded first."""
     path = ""
     if url:
         try:
@@ -228,8 +232,21 @@ def source_year(url: str, title: str = "", event_years: Iterable[int] = ()) -> O
     # year before or after the event is still about it (a call, a report back).
     published = {int(y) for y in _PERMALINK.findall(path)}
     path = _PERMALINK.sub("/", path)
-    years = {int(y) for y in _SOURCE_YEAR.findall(path + " " + (title or ""))}
+    try:
+        title = unquote(title or "")    # "Esperanto%20de%20nivelo...%2028" is no year 2028
+    except (TypeError, ValueError):
+        title = title or ""
+    text = path + " " + title
     own_years = set(event_years or ())
+    # A span that contains the event's year is the event's own ("Beleidsplan_2024-2027").
+    for a, b in _YEAR_SPAN.findall(text):
+        if any(int(a) <= y <= int(b) for y in own_years):
+            return max(y for y in own_years if int(a) <= y <= int(b))
+    years = {int(y) for y in _SOURCE_YEAR.findall(text)}
+    # Years well after the event are targets ("Kohleausstieg 2030", "klimaneutral 2035"),
+    # not the year a source is about.
+    if own_years:
+        years = {y for y in years if y <= max(own_years) + 2}
     if not years and published and own_years:
         years = {y for y in published if not any(abs(y - e) <= 1 for e in own_years)}
     elif not years:

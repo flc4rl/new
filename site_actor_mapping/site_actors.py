@@ -48,7 +48,7 @@ from crawler import CachedPage, CrawlConfig, Crawler, PageCache, normalise_url, 
 from extract import (
     NER_LIKE_METHODS, Block, OrgExtractor, ParsedPage, ThemeSet, Watchlist, acronym_pairs, block_hash,
     canonical_key, clean_ws, is_skip_host, load_stoplist, page_language, parse_html, parse_pdf_text,
-    split_sentences, squash_runs,
+    split_sentences, squash_runs, weak_methods_for,
 )
 from events import EventIndex, EventRef, event_years, same_series, series_components, source_year
 from linked_sites import (PLATFORM_HOSTS, Site, SiteRegistry, Via, collect_targets, crawl_linked,
@@ -191,9 +191,10 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
                    help="Comma-separated theme names that count for --theme-scope and --theme-filter "
                         "(default: every theme not marked '#: descriptive' in the --themes file; "
                         "descriptive themes are still recorded, with focus_theme=no)")
-    g.add_argument("--ner-workers", type=int, default=max(1, min(4, (os.cpu_count() or 2) - 1)),
-                   help="Processes that run spaCy over the pages before the analysis (a pre-pass "
-                        "that fills the NER cache; 1 = no pre-pass in parallel)")
+    g.add_argument("--ner-workers", type=int, default=1,
+                   help="Processes that run spaCy in the NER pre-pass before the analysis (default 1). "
+                        "The pre-pass saves time by loading each model once; more processes mainly "
+                        "add memory (each loads its own copy of the models)")
     g.add_argument("--boilerplate-share", type=float, default=0.2,
                    help="Paragraphs repeated on more than this share of pages are flagged boilerplate")
     g.add_argument("--min-mentions", type=int, default=1,
@@ -669,7 +670,23 @@ def _date_span(text: str) -> Tuple[Optional[dt.date], Optional[dt.date]]:
 _URL_YM = re.compile(r"/((?:19|20)\d{2})/(0[1-9]|1[0-2])/")
 
 
-def choose_edition(refs: List[EventRef], when: Optional[dt.date]
+# The home page of a site, or a language root or named home page ("/", "/en/",
+# "/en/homepage_n/", "/startseite/", "/accueil"): an event that links it gives the site
+# as its own website.
+_HOME_PATH = re.compile(r"/?(?:[a-z]{2}(?:[-_][a-z]{2})?/?)?(?:(?:home(?:[-_]?page)?(?:[-_]\w{1,3})?|startseite|start|"
+                        r"accueil|inicio|inizio|index(?:\.\w{2,5})?)/?)?", re.I)
+
+
+def is_home_page(url: str) -> bool:
+    """Is `url` a site's home page (or a language root or named home page)?"""
+    try:
+        u = urlparse(url or "")
+    except ValueError:
+        return False
+    return bool(u.netloc) and not u.query and bool(_HOME_PATH.fullmatch(u.path or ""))
+
+
+def choose_edition(refs: List[EventRef], when: Optional[dt.date], one_series: bool = False
                    ) -> Tuple[List[EventRef], List[EventRef], List[EventRef]]:
     """Several dated events reach one page. Returns (kept, editions, unrelated):
     when the event nearest `when` (the page's date; else the latest event) is one of
@@ -677,7 +694,9 @@ def choose_edition(refs: List[EventRef], when: Optional[dt.date]
     names sharing most words), `kept` holds it (and events on the same day, which are
     not editions of each other) plus the undated refs, `editions` the other editions
     of its series, and `unrelated` the dated events of other series. When the nearest
-    event is no edition of another, every ref is kept and the other lists are empty."""
+    event is no edition of another, every ref is kept and the other lists are empty.
+    one_series: take all the dated refs as one series (the events linking a site that
+    one of them gives as its own website, see is_home_page)."""
     dated = [(r, _date_span(r.date)[0]) for r in refs]
     dated = [(r, d) for r, d in dated if d is not None]
     if len(dated) < 2:
@@ -688,7 +707,7 @@ def choose_edition(refs: List[EventRef], when: Optional[dt.date]
         best_day = max(d for _, d in dated)
     best = [r for r, d in dated if d == best_day]    # events on the same day are not editions
     series: List[EventRef] = []
-    for comp in series_components([r for r, _ in dated]):
+    for comp in ([[r for r, _ in dated]] if one_series else series_components([r for r, _ in dated])):
         if any(r in best for r in comp):
             series += comp
     editions = [r for r in series if r not in best]
@@ -1353,12 +1372,13 @@ def run(args: argparse.Namespace, out: Path, info: dict) -> int:
     landing_of: Dict[str, Set[tuple]] = {}
     nearest = args.edition_policy == "nearest"
 
-    def pick_edition(refs: List[EventRef], page) -> Tuple[List[EventRef], List[EventRef], List[EventRef]]:
+    def pick_edition(refs: List[EventRef], page, one_series: bool = False
+                     ) -> Tuple[List[EventRef], List[EventRef], List[EventRef]]:
         """Several dated events reach one page: see choose_edition."""
         if not nearest:
             return refs, [], []
         pdate, _ = page_date_of(page)
-        return choose_edition(refs, _date_span(pdate)[0] if pdate else None)
+        return choose_edition(refs, _date_span(pdate)[0] if pdate else None, one_series)
 
     def other_year(page, refs: List[EventRef]) -> List[EventRef]:
         """Linked pages and PDFs whose address or title names a year that is not their
@@ -1449,10 +1469,24 @@ def run(args: argparse.Namespace, out: Path, info: dict) -> int:
                     refs = all_refs
                 else:
                     kept, eds, _unrelated = pick_edition(all_refs, page) if all_refs else ([], [], [])
+                    home_refs = [] if eds else list({
+                        (r.key or r.link, r.name): r for v in vias if is_home_page(v.target)
+                        for r in index.refs(v.event_url or v.target, v.event, v.date or v.month)}.values())
+                    own_site = bool(home_refs)
+                    if own_site:
+                        # An event gives this site as its own website (it links the home
+                        # page). A dated page goes to the nearest of the events linking the
+                        # site, taken as one series even under other names ("Gemeinsam gegen
+                        # die Tierindustrie" and "Camp d'action contre l'industrie de la
+                        # viande"); an undated page to the event(s) linking the home page.
+                        all_refs = all_refs if page_date_of(page)[0] else home_refs
+                        kept, eds, _unrelated = pick_edition(all_refs, page, one_series=True)
                     if eds:   # editions of one recurring event: the nearest one(s)
                         refs = [dataclasses.replace(r, attribution="edition")
                                 for r in kept if _date_span(r.date)[0] is not None]
                         others = eds
+                    elif own_site and nearest:
+                        refs = all_refs   # fewer than two dated events, or all on one day
                     else:
                         # Other pages of a site several events link to belong to none of
                         # them in particular; the linking events are listed separately.
@@ -1670,10 +1704,8 @@ def run(args: argparse.Namespace, out: Path, info: dict) -> int:
             n_pre = extractor.prefetch(
                 (([b.text for b in p.blocks], page_language([b.text for b in p.blocks], p.lang))
                  for p in pages), workers=args.ner_workers)
-            if n_pre:
-                log.info("NER pre-pass: %d paragraphs analysed by spaCy (%d %s) in %s", n_pre,
-                         args.ner_workers, "process" if args.ner_workers == 1 else "processes",
-                         fmt_duration(time.monotonic() - t0))
+            if n_pre:   # extract.py logs the counts; this is the time with page languages
+                log.debug("NER pre-pass took %s", fmt_duration(time.monotonic() - t0))
         except Exception as exc:  # noqa: BLE001 - the page loop runs NER itself
             log.warning("NER pre-pass failed (%s: %s); the pages are analysed one by one",
                         type(exc).__name__, exc)
@@ -1972,18 +2004,56 @@ def run(args: argparse.Namespace, out: Path, info: dict) -> int:
     methods_by_key: Dict[str, Set[str]] = defaultdict(set)
     for r in mention_rows:
         methods_by_key[r["org_key"]].update(r["methods"].split("+"))
-    rejected = {k for k, ms in methods_by_key.items() if not extractor.vet(k, ms)}
-    if rejected:
-        log.info("Dropped %d names spaCy mostly labels as places, people, laws etc.", len(rejected))
-    vetted = [r for r in mention_rows if r["org_key"] not in rejected]
+    reason_of = getattr(extractor, "vet_reason", None)
+    if reason_of is not None:
+        reasons = {k: reason_of(k, ms) for k, ms in methods_by_key.items()}
+        reasons = {k: why for k, why in reasons.items() if why}
+    else:
+        reasons = {k: "vetted" for k, ms in methods_by_key.items() if not extractor.vet(k, ms)}
+    rejected = set(reasons)
+    # The ordinary-word rules also apply to each mention: a mention found by weak methods
+    # only ("die Welt retten") of a name that is an ordinary word is dropped even when
+    # another mention of it is strong ("Die Welt (2019) ... www.welt.de").
+    ordinary_of = getattr(extractor, "ordinary_reason", None)
+    weak_of = getattr(extractor, "mention_is_weak", None)
+    ordinary: Dict[str, str] = {}
+    if ordinary_of is not None and weak_of is not None:
+        for r in mention_rows:
+            k = r["org_key"]
+            if k in rejected or not weak_of(k, r["methods"].split("+"), r.get("surface_form", "")):
+                continue
+            if k not in ordinary:
+                ordinary[k] = ordinary_of(k)
+            if ordinary[k]:
+                r["_dropped"] = ordinary[k]
+    for r in mention_rows:
+        if r["org_key"] in rejected:
+            r["_dropped"] = reasons[r["org_key"]]
+    dropped = [r for r in mention_rows if r.get("_dropped")]
+    if dropped:
+        rejected_rows = _rejected_rows(dropped, mention_rows, rejected,
+                                       getattr(extractor, "REJECT_REASONS", {}))
+        by_reason = Counter(x["reason"] for x in rejected_rows)
+        n_part = sum(1 for x in rejected_rows if x["scope"] == "weak_mentions")
+        log.info("Dropped %d names and %d mentions as ordinary words, places, people etc. (%s)%s; "
+                 "listed in rejected_names.csv", len(rejected_rows), len(dropped),
+                 ", ".join(f"{k} {n}" for k, n in by_reason.most_common()),
+                 f"; {n_part} of the names keep their other, strongly supported mentions" if n_part else "")
+    else:
+        rejected_rows = []
+    write_csv(out / "rejected_names.csv", rejected_rows, REJECTED_FIELDS)
+    del dropped, rejected_rows
+    # A paragraph whose only mention of a name was dropped no longer co-mentions it.
+    kept_in_block = {(r["_block"], r["org_key"]) for r in mention_rows if not r.get("_dropped")}
+    vetted = [r for r in mention_rows if not r.get("_dropped")]
     for r in vetted:
-        r["co_mentioned_keys"] = [k for k in r["co_mentioned_keys"] if k not in rejected]
+        r["co_mentioned_keys"] = [k for k in r["co_mentioned_keys"] if (r["_block"], k) in kept_in_block]
 
     orgs = aggregate(vetted, extractor, acr_display, themes.names, args.min_mentions)
     del vetted
     display = {o["org_key"]: o["organisation"] for o in orgs}
     for r in mention_rows:
-        if r["org_key"] in rejected:
+        if r.pop("_dropped", ""):
             r["organisation"], r["co_mentioned"] = "", ""
             r.pop("co_mentioned_keys", None)
             continue
@@ -2127,8 +2197,10 @@ def run(args: argparse.Namespace, out: Path, info: dict) -> int:
     })
     ner_stats = getattr(extractor, "ner_stats", None) or {}
     if ner_stats:
-        log.info("Named-entity recognition: %d distinct paragraphs analysed by spaCy, %d read from the NER cache",
-                 ner_stats.get("analysed", 0), ner_stats.get("cache", 0))
+        n_pre = ner_stats.get("prefetched", 0)
+        log.info("Named-entity recognition: %d distinct paragraphs analysed by spaCy%s, %d read from the NER cache",
+                 ner_stats.get("analysed", 0) + n_pre, f" ({n_pre} in the pre-pass)" if n_pre else "",
+                 ner_stats.get("cache", 0))
     n_orgs, n_kept, n_pages = len(orgs), len(kept), len(pages)
 
     # Free the large structures before the master files are built (they are read
@@ -2234,7 +2306,7 @@ def aggregate(rows: List[dict], extractor: OrgExtractor, acr_display: Dict[str, 
             "organisation": name,
             "org_key": key,
             "org_type": types.most_common(1)[0][0] if types else "",
-            "confidence": _confidence(methods, len(pages)),
+            "confidence": _confidence(methods, len(pages), name),
             "distinct_mentions": len(distinct),
             "substantive_mentions": len(substantive),
             "total_mentions": len(rs),
@@ -2257,10 +2329,44 @@ def aggregate(rows: List[dict], extractor: OrgExtractor, acr_display: Dict[str, 
     return orgs
 
 
+REJECTED_FIELDS = ["organisation", "org_key", "scope", "reason", "reason_text", "mentions_dropped",
+                   "mentions_kept", "methods_dropped", "pages", "sites", "example_url", "example_context"]
+
+
+def _rejected_rows(dropped: List[dict], mention_rows: List[dict], rejected: Set[str],
+                   texts: Dict[str, str]) -> List[dict]:
+    """rejected_names.csv: one row per name whose mentions vetting dropped. scope 'name':
+    every mention (OrgExtractor.vet_reason); 'weak_mentions': only the mentions found by
+    weak methods, the name being an ordinary word (OrgExtractor.ordinary_reason) that
+    other, strongly supported mentions keep."""
+    by_key: Dict[str, List[dict]] = defaultdict(list)
+    for r in dropped:
+        by_key[r["org_key"]].append(r)
+    kept = Counter(r["org_key"] for r in mention_rows if not r.get("_dropped") and r["org_key"] in by_key)
+    out = []
+    for k, rs in by_key.items():
+        why = rs[0]["_dropped"]
+        ex = next((r for r in rs if not r.get("in_menu") and r.get("context")), rs[0])
+        out.append({
+            "organisation": Counter(r["surface_form"] for r in rs).most_common(1)[0][0],
+            "org_key": k, "scope": "name" if k in rejected else "weak_mentions",
+            "reason": why, "reason_text": texts.get(why, why),
+            "mentions_dropped": len(rs), "mentions_kept": kept.get(k, 0),
+            "methods_dropped": "; ".join(f"{m} ({n})" for m, n in Counter(
+                m for r in rs for m in r["methods"].split("+") if m).most_common()),
+            "pages": len({r["url"] for r in rs}), "sites": len({r["site"] for r in rs}),
+            "example_url": ex.get("url", ""), "example_context": (ex.get("context") or "")[:400],
+        })
+    out.sort(key=lambda x: (-x["mentions_dropped"], x["org_key"]))
+    return out
+
+
 def _pos_columns(extractor, key: str) -> Dict[str, object]:
     """pos_votes and pos_common of organisations.csv: how often the part-of-speech tagger
     read a one-word name in context, and how often as an ordinary word (noun, verb ...).
-    "" for names of several words, or with an extract.py without the tagger votes."""
+    "" for names of several words, names never tagged (acronyms, camelCase, names found
+    only by strong methods, languages without a tagger), or with an extract.py without
+    the tagger votes."""
     fn = getattr(extractor, "pos_summary", None)
     if fn is None or not key or " " in key:
         return {"pos_votes": "", "pos_common": ""}
@@ -2268,7 +2374,9 @@ def _pos_columns(extractor, key: str) -> Dict[str, object]:
         votes, common = fn(key)
     except Exception:  # noqa: BLE001 - a missing vote must not stop the run
         return {"pos_votes": "", "pos_common": ""}
-    return {"pos_votes": int(votes or 0), "pos_common": int(common or 0)}
+    if not votes:   # never tagged (an acronym, camelCase, a strong name): no evidence either way
+        return {"pos_votes": "", "pos_common": ""}
+    return {"pos_votes": int(votes), "pos_common": int(common or 0)}
 
 
 # Methods that count as one weak, NER-like method for the confidence (extract.NER_LIKE_METHODS
@@ -2292,11 +2400,20 @@ def _best_form(forms: Counter) -> str:
                                               sum(w[:1].isupper() for w in kv[0].split()), kv[0]))[0]
 
 
-def _confidence(methods: Counter, n_pages: int) -> str:
+def _confidence(methods: Counter, n_pages: int, name: str = "") -> str:
     strong = {"watchlist", "appositive"}
-    # NER and the weak lower-case-head rule ('pattern_after') count as one method, so
-    # a name they both find is not 'high' on that alone.
     ms = set(methods) - {""}
+    # A website given in another paragraph is as good as one given in the paragraph for
+    # a name of several words or an acronym (extract.weak_methods_for).
+    if "website_elsewhere" in ms and name and "website_elsewhere" not in weak_methods_for(name):
+        ms = (ms - {"website_elsewhere"}) | {"website"}
+    # The same website, or the same link, found in another paragraph is not a second method.
+    if "website" in ms:
+        ms.discard("website_elsewhere")
+    if "link" in ms:
+        ms.discard("link_text")
+    # NER and the other weak methods ('pattern_after', 'link_text', 'website_elsewhere')
+    # count as one method, so a name they both find is not 'high' on that alone.
     if ms & _NER_LIKE:
         ms = (ms - _NER_LIKE) | {"ner"}
     if strong & ms or len(ms) >= 2:
