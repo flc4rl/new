@@ -108,3 +108,83 @@ TiSA
 FAQ
 FAQs
 re:^(?:the )?history of\b
+# Reviewed non-names among the 300 organisations with the most events in a full run
+# (generic words, documents, places, first names, units and products). State bodies,
+# courts and parties stay out of this list ("Supreme Court", "National Guard", "Linke").
+# Generic words and labels
+BIPoC
+Big Tech
+Big Oil
+Open Space
+System Change
+Programm
+Q&A
+Awareness Konzept
+Aktionsbündnis
+Social Movements
+Fortress Europe
+LGBT
+Bewegung für Klimagerechtigkeit
+Islamophobia
+Racial Profiling
+CSAs
+Citizens' Assembly
+Trainer Network
+Zivilem Ungehorsam
+Advisory Committee
+Supervisory Board
+NVDA
+GAFAM
+MEPs
+Molotov
+Berliner
+East African
+Union syndicale
+República
+# Documents, treaties and mechanisms
+REDD
+CDM
+FPIC
+Paris Agreement
+Kyoto Protocol
+Pacte Migratoire
+Sustainable Development Goals
+SDGs
+Nationally Determined Contributions
+NDCs
+European Convention on Human Rights
+Convention
+# Places
+DDR
+CEE
+Cape
+Columbia
+Berkeley
+Alberta
+Atlantic
+Colorado
+Paraguay
+DRC
+Commonwealth
+Soviet Union
+Sowjetunion
+URSS
+Amerika
+Crimea
+Manhattan
+Park Platz
+# First names
+Rachel
+Michaela
+Marianne
+# Units, currencies, projects and other non-names
+MB
+MW
+USD
+CANVA
+EACOP
+Mozambique LNG
+COVID
+COVID-19
+June 11
+Commune de Paris

@@ -38,7 +38,7 @@ from bs4 import BeautifulSoup, Comment, NavigableString, Tag
 
 from crawler import safe_join
 
-from places import COUNTRY_CODES, LANGUAGE_NAMES, PLACES
+from places import COUNTRY_CODES, FIRST_NAMES, LANGUAGE_NAMES, PLACES
 
 log = logging.getLogger(__name__)
 
@@ -365,7 +365,30 @@ LEADING_STRIP = {
     "visite", "visit", "atelier", "rencontre", "soirée", "conférence", "projection", "débat",
     "workshop", "talk", "panel", "screening", "discussion", "presentation", "launch",
     "incontro", "laboratorio", "presentazione", "taller", "charla", "encuentro", "vortrag",
+    # sentence openers and headings before a name: "Neither the European Union nor ...",
+    # "Auch Attac ...", "Selon Greenpeace", "INTRODUCTION Solidarity ..." ("via" is not
+    # here: "Via Campesina")
+    "neither", "across", "ook", "auch", "selon", "laut", "introduction", "einleitung", "bei", "chez",
 }
+_JUNK_OPENERS = {"neither", "across", "ook", "auch", "selon", "laut", "introduction", "einleitung",
+                 "bei", "chez", "unlike", "während", "wenn"}
+# Function and interface words that end a span but not a name: "Casino Group A",
+# "British Film Institute At", "Ende Gelände Logo", "Attac Website" (see _trim, trim_junk).
+TRAILING_STRIP = {"no", "in", "a", "an", "at", "the", "of", "und", "et", "website", "homepage",
+                  "leer", "logo",
+                  # a capitalised word of the next phrase ("Climate Bonds Initiative Is",
+                  # "Réseau Roosevelt Du", "Association Litu Pour")
+                  "is", "are", "was", "to", "for", "with", "für", "pour", "du", "des", "von", "y", "e"}
+# A role before the organisation: "Presseteam von Extinction Rebellion", "Member of the
+# European Parliament", "Mitarbeiterin bei Attac": the span is cut to the organisation.
+ROLE_OF = re.compile(
+    r"(?i)(?:president[ea]?|présidente?|präsident(?:in)?|member|mitglied|membre|director|directeur|"
+    r"directrice|direktor(?:in)?|coordinator|coordinat(?:eur|rice)|koordinator(?:in)?|spokesperson|"
+    r"sprecher|sprecherin|co-?founder|founder|fondat(?:eur|rice)|gründer(?:in)?|cofundador|cofundadora|"
+    r"mitarbeiter|mitarbeiterin|presseteam|chair|head|researcher|professor(?:in)?|vorsitzende[r]?|"
+    r"secretary|secrétaire)"
+    r"\s+(?:of|der|des|von|vom|de|da|do|du|di|del|della|at|bei|beim)\s+"
+    r"(?:(?:the|la|le|les|l['’]|el|il|die|der|des)\s*)?(?=[^\W\d_])")
 # LEADING_STRIP words that also begin real names: dropped only at the start of a sentence
 # or line (see OrgExtractor._trim). NAV_OPENERS are menu and caption words, which may be
 # dropped even when a single name word is left ("Home Greenpeace" -> "Greenpeace").
@@ -623,6 +646,7 @@ class ParsedPage:
     site_role: str = ""       # "main" or "linked"
     lang: str = ""            # declared page language (<html lang>), if any
     via_event: str = ""       # for linked sites: event(s) whose link led there
+    repeated_pages_skipped: int = 0   # for PDFs: pages skipped as copies of an earlier page
 
 
 @dataclass
@@ -760,6 +784,7 @@ def tidy_surface(name: str) -> str:
 
 # PLACES and LANGUAGE_NAMES hold ordinary spellings; names are compared by key, so
 # compare against the keys ("Nantes" -> "nante", "Nederlands" -> "nederland").
+FIRST_NAME_KEYS = frozenset(FIRST_NAMES | {canonical_key(n) for n in FIRST_NAMES})
 PLACES_KEYS = frozenset(PLACES | {canonical_key(p) for p in PLACES})
 LANGUAGE_KEYS = frozenset(LANGUAGE_NAMES | {canonical_key(p) for p in LANGUAGE_NAMES})
 PLACES.update(PLACES_KEYS)        # so other modules comparing canonical keys get the same answer
@@ -838,6 +863,8 @@ URL_LIKE = re.compile(r"(?:https?://|www\.)\S+|@\w[\w.]*"
 # Greek accents are folded before matching, so the stem "φασισ" also finds
 # "φασίστες" and "ναζι" finds "Ναζί". Same length, so match offsets stay valid.
 _GREEK_FOLD = str.maketrans("άέήίόύώΐΰΆΈΉΊΌΎΏ", "αεηιουωϊϋΑΕΗΙΟΥΩ")
+# "#: descriptive" under a [theme] header (see ThemeSet).
+_DESCRIPTIVE_MARK = re.compile(r"#:\s*descriptive\b", re.I)
 
 
 class ThemeSet:
@@ -845,14 +872,22 @@ class ThemeSet:
 
     A line starting with "!" is an exclusion for its theme: a hit that overlaps
     a match of the exclusion is not counted (e.g. "!énfasis" under [fascism]
-    stops "*fasis*" from counting the Spanish word for "emphasis")."""
+    stops "*fasis*" from counting the Spanish word for "emphasis").
+
+    A line "#: descriptive" inside a section marks that theme as descriptive: its
+    hits are found and recorded like any other, but callers leave it out of the
+    theme filter and the any-theme measures (see focus_names). Older versions read
+    the line as a comment."""
 
     MEMO_SIZE = 20000   # paragraphs repeated across pages (menus, footers) are matched once
 
     def __init__(self, themes: Dict[str, List[re.Pattern]], raw: Dict[str, List[str]],
                  needles: Optional[Dict[str, List[Optional[List[str]]]]] = None,
-                 exclude: Optional[Dict[str, List[re.Pattern]]] = None):
+                 exclude: Optional[Dict[str, List[re.Pattern]]] = None,
+                 descriptive: Optional[Set[str]] = None):
         self.themes = themes
+        # Themes marked "#: descriptive" in the file (reported, not used for filtering).
+        self.descriptive: Set[str] = set(descriptive or ())
         self.raw = raw
         # Lower-cased literal parts each term needs; a term whose parts are not all in
         # the text cannot match, so its regex is skipped (most paragraphs have no hit).
@@ -865,17 +900,27 @@ class ThemeSet:
     def names(self) -> List[str]:
         return list(self.themes)
 
+    @property
+    def focus_names(self) -> List[str]:
+        """The themes that are not descriptive, in file order (all of them for a file
+        without "#: descriptive" marks)."""
+        return [t for t in self.themes if t not in self.descriptive]
+
     @classmethod
     def load(cls, path: Optional[Path]) -> "ThemeSet":
         themes: Dict[str, List[re.Pattern]] = {}
         raw: Dict[str, List[str]] = {}
         needles: Dict[str, List[Optional[List[str]]]] = {}
         exclude: Dict[str, List[re.Pattern]] = {}
+        descriptive: Set[str] = set()
         if path is None:
             return cls(themes, raw)
         current = None
         for lineno, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
             line = line.strip()
+            if current is not None and _DESCRIPTIVE_MARK.match(line):
+                descriptive.add(current)
+                continue
             if not line or line.startswith("#"):
                 continue
             m = re.fullmatch(r"\[(.+)\]", line)
@@ -893,7 +938,7 @@ class ThemeSet:
             themes[current].append(cls.compile_term(line))
             raw[current].append(line)
             needles[current].append(cls.term_needles(line))
-        return cls(themes, raw, needles, exclude)
+        return cls(themes, raw, needles, exclude, descriptive)
 
     @staticmethod
     def term_needles(term: str) -> Optional[List[str]]:
@@ -1038,6 +1083,8 @@ def parse_html(html: str, url: str, depth: int, strip_regions: bool) -> ParsedPa
 
 
 def _region_of(tag: Tag, inherited: str) -> str:
+    if tag.name in ("header", "footer") and tag.find_parent(["article", "main"]) is not None:
+        return inherited   # the header or footer of an article (its title, lead, date): content
     if tag.name in REGION_TAGS:
         return tag.name
     role = (tag.get("role") or "").lower()
@@ -1048,9 +1095,17 @@ def _region_of(tag: Tag, inherited: str) -> str:
     return inherited
 
 
+# Inline tags that style words inside a sentence: two of them side by side
+# ("<b>Climate</b> <b>Justice</b>") are not two names.
+_STYLE_TAGS = {"b", "strong", "i", "em", "u", "span", "small", "sup", "sub", "mark", "abbr", "font",
+               "big", "s", "cite", "q", "code", "time", "label"}
+
+
 def _walk(node: Tag, out: List[Block], region: str, base_url: str, own_host: str) -> None:
     buf: List[str] = []
     links: List[Link] = []
+    last_item = ""    # "a": the last thing added was a link or an element holding one; "tag": another
+    #                   inline element; "": text (whitespace between elements does not reset it)
 
     def flush() -> None:
         text = clean_ws(" ".join(buf))
@@ -1063,20 +1118,32 @@ def _walk(node: Tag, out: List[Block], region: str, base_url: str, own_host: str
         if isinstance(child, NavigableString):
             if not isinstance(child, Comment):
                 buf.append(str(child))
+                if str(child).strip():
+                    last_item = ""
             continue
         if not isinstance(child, Tag):
             continue
         if child.name in BLOCK_TAGS or _has_block_child(child):
             flush()
+            last_item = ""
             if child.name not in ("br", "hr"):
                 if child.name == "a":
                     _collect_link(child, links, base_url, own_host)
                 _walk(child, out, _region_of(child, region), base_url, own_host)
             continue
         # Inline element: keep its text in this block, remember links.
-        for a in ([child] if child.name == "a" else child.find_all("a", href=True)):
+        inner = [child] if child.name == "a" else child.find_all("a", href=True)
+        for a in inner:
             _collect_link(a, links, base_url, own_host)
-        buf.append(child.get_text(" "))
+        kind = "a" if (inner or child.name == "img") else ("style" if child.name in _STYLE_TAGS else "tag")
+        text = child.get_text(" ")
+        if text.strip():
+            # A strip of links or logos ("<a>Greenpeace</a> <a>Attac</a> <a>BUND</a>"):
+            # " · " keeps the names apart (it is a hard name boundary, see _spans).
+            if last_item and (kind == "a" or last_item == "a" or (kind == "tag" and last_item == "tag")):
+                buf.append(" · ")
+            last_item = kind if kind != "style" else ""
+        buf.append(text)
     flush()
 
 
@@ -1092,6 +1159,31 @@ def _netloc(url: str) -> str:
         return p.netloc.lower().removeprefix("www.")
     except ValueError:
         return ""
+
+
+# (also in image file names used as alt text: "WILPF-logo", "Logo-PeaceSOS-RGB250")
+_LOGO_BEFORE = re.compile(r"(?i)^logo(?:\s+(?:of|de|der|des|du|van))?(?:\s+|[-_])(?=\S)")
+_LOGO_AFTER = re.compile(r"(?i)(?:\s+|[-_])logo(?:[-_][^\W_]+)*$")
+# A home page path: "", "/", "/index.html", a language root "/en/", "/de", "/fr-fr/".
+_HOME_PATH = re.compile(r"/?(?:index\.\w{2,5}|[a-z]{2}(?:[-_][a-z]{2})?/?(?:index\.\w{2,5})?)?/?", re.I)
+
+
+def strip_logo(text: str) -> str:
+    """Drop the word "Logo" around a name in link, alt and title texts: "Logo of Attac",
+    "Ende Gelände Logo" -> "Attac", "Ende Gelände"."""
+    out = _LOGO_AFTER.sub("", _LOGO_BEFORE.sub("", text))
+    return out if out.strip() else text
+
+
+def link_method(text: str, link: "Link") -> str:
+    """"link" when the link text spells the linked site's name ("Code Rood" to
+    code-rood.org) or the link goes to a site's home page; "link_text" otherwise (an
+    article title or a page name linked deep into a site)."""
+    names = site_names(link.domain) if link.domain else set()
+    if names and (squash_key(text) in names or names & squash_runs(text)):
+        return "link"
+    path = urlparse(link.href).path if link.href else ""
+    return "link" if _HOME_PATH.fullmatch(path) else "link_text"
 
 
 def _collect_link(a: Tag, links: List[Link], base_url: str, own_host: str) -> None:
@@ -1162,24 +1254,146 @@ def _pdf_chunks(para: str, target: int = 600, limit: int = 1500) -> List[str]:
     return chunks
 
 
+# A heading-like PDF line: all in capitals ("INTRODUCTION", "WHO WE ARE") or ending
+# in a colon ("Speakers:"). Nothing is joined to it.
+_PDF_HEADING = re.compile(r"(?:[^a-zß-ÿ]*[A-ZÀ-Þ][^a-zß-ÿ]*|.*:)")
+# Lower-case words that leave a phrase open at the end of a line ("Friends of the").
+_OPEN_END_WORDS = CONNECTORS | {"an", "or", "ou", "oder", "o", "with", "by", "from", "at", "as",
+                                "is", "are", "was", "were", "that", "which", "our", "their", "its"}
+
+
+def _pdf_words(text: str) -> int:
+    return len(text.split())
+
+
+def _name_line(line: str) -> bool:
+    """One line of a column of names ("Conservation Council of Western Australia"): short,
+    no final punctuation, and every word capitalised except connectors ("of", "de")."""
+    line = line.strip()
+    if not (0 < len(line) < 60) or re.search(r"[.,;:!?]$", line):
+        return False
+    words = [w for w in TOKEN_RE.findall(line) if w.casefold() not in CONNECTORS]
+    if not words or len(words) > 8 or not (line[:1].isupper() or line[:1].isdigit()):
+        return False
+    return all(strip_elision(w)[:1].isupper() or w[:1].isdigit() for w in words)
+
+
+def _name_columns(para: str) -> str:
+    """Join the lines of a paragraph with " · " where three or more consecutive lines
+    are a column of names (a signatory list, a partner list), so that they do not run
+    together into one capitalised name; other lines keep their line break."""
+    lines = para.split("\n")
+    if len(lines) < 3:
+        return para
+    ok = [_name_line(x) for x in lines]
+    out: List[str] = []
+    i = 0
+    while i < len(lines):
+        j = i
+        while j < len(lines) and ok[j]:
+            j += 1
+        if j - i >= 3:
+            out.append(" · ".join(x.strip() for x in lines[i:j]))
+            i = j
+        else:
+            out.append(lines[i])
+            i += 1
+    return "\n".join(out)
+
+
+def _short_caps_line(text: str) -> bool:
+    """A short line that starts and ends with a capitalised word: one name of a list."""
+    words = TOKEN_RE.findall(text)
+    return (0 < len(words) <= 6 and strip_elision(words[0])[:1].isupper()
+            and (strip_elision(words[-1])[:1].isupper() or words[-1][:1].isdigit())
+            and not re.search(r"[.,;:!?]$", text.strip()))
+
+
+def _reflow(paras: List[str]) -> List[str]:
+    """Paragraphs of a fragmented PDF page (a narrow-column export where every line or
+    every few words is its own paragraph), joined back: a sentence that continues
+    ("rooted in" / "colonialism" / "and capitalist ...") with a space, a list of short
+    capitalised lines (names) with " · ". Nothing is joined to a heading-like line.
+    Pages whose paragraphs are not mostly fragments are returned as they are."""
+    raw = [p for p in paras if p.strip()]
+    if len(raw) < 3:
+        return raw
+    texts = [clean_ws(p) for p in raw]
+    sizes = sorted(_pdf_words(t) for t in texts)
+    median = sizes[len(sizes) // 2] if len(sizes) % 2 else (sizes[len(sizes) // 2 - 1] + sizes[len(sizes) // 2]) / 2
+    if not (median <= 6 and sum(n <= 4 for n in sizes) >= 0.6 * len(sizes)):
+        return raw
+    out: List[str] = [raw[0]]
+    last_line = texts[0]           # the last original paragraph in out[-1]
+    for t, r in zip(texts[1:], raw[1:]):
+        prev = out[-1].rstrip()
+        # (an acronym on its own line, "BUND", is a name of a list, not a heading)
+        heading = (bool(_PDF_HEADING.fullmatch(last_line)) and bool(re.search(r"[^\W\d_]{2}", last_line))
+                   and (last_line.endswith(":") or len(last_line) >= 8 or len(last_line.split()) >= 2))
+        sep = None
+        if heading or re.search(r"[.!?:]$", prev):
+            sep = None
+        elif re.match(r"[a-zß-ÿ0-9(\[,;:.)\]\-–—'’\"”»%&/]", t):
+            sep = "\n"              # the sentence goes on (a line break reads as a space)
+        elif re.search(r"[,;]$", prev) and not _PDF_HEADING.fullmatch(t):
+            sep = "\n"              # "rooted in Capitalism," / "Colonialism,": a list in a sentence
+        elif _short_caps_line(last_line) and _short_caps_line(t):
+            sep = " · "             # a list of names
+        else:
+            tail = TOKEN_RE.findall(last_line)
+            if tail and tail[-1].islower() and (tail[-1].casefold() in _OPEN_END_WORDS
+                                                or not _PDF_HEADING.fullmatch(t)):
+                # "Friends of the" / "Earth": a phrase left open; "complicity in apartheid" /
+                # "Israel's war": a line ending in a lower-case word goes on
+                sep = "\n"
+        if sep is None:
+            out.append(r)
+        else:
+            out[-1] = (clean_ws(prev) + sep + t) if sep == " · " else (prev + sep + r.strip())
+        last_line = t
+    return out
+
+
 def parse_pdf_text(text: str, url: str, depth: int, title: str = "", date: str = "",
-                   referrer: str = "") -> ParsedPage:
-    """PDF text (pages separated by form feeds) -> paragraph blocks tagged "pdf p.N"."""
+                   referrer: str = "", reflow: bool = True) -> ParsedPage:
+    """PDF text (pages separated by form feeds) -> paragraph blocks tagged "pdf p.N".
+
+    A page whose text (case and spacing ignored) is the same as an earlier page of the
+    same PDF is skipped (slide handouts and exports that repeat every page); the count
+    is kept in ParsedPage.repeated_pages_skipped. With `reflow` (the default; agenda
+    PDFs read line by line use reflow=False), fragmented pages are joined back into
+    sentences and columns of names are separated with " · " (see _reflow, _name_columns)."""
     blocks: List[Block] = []
+    seen: Set[str] = set()
+    skipped = 0
     for page_no, page_text in enumerate(text.split("\f"), 1):
         page_text = re.sub(r"-\n(?=[a-zà-ÿ])", "", page_text)          # re-join hyphenated words
-        for para in re.split(r"\n\s*\n", page_text):
+        norm = clean_ws(page_text).casefold()
+        if norm:
+            digest = hashlib.sha1(norm.encode("utf-8")).hexdigest()
+            if digest in seen:
+                skipped += 1
+                continue
+            seen.add(digest)
+        paras = re.split(r"\n\s*\n", page_text)
+        if reflow:
+            paras = _reflow([_name_columns(p) for p in paras])
+        for para in paras:
             for chunk in _pdf_chunks(para):
                 blocks.append(Block(text=chunk, region=f"pdf p.{page_no}"))
     title = title or Path(urlparse(url).path).name or url
     return ParsedPage(url=url, title=title, date=date, depth=depth, blocks=blocks,
-                      is_pdf=True, referrer=referrer)
+                      is_pdf=True, referrer=referrer, repeated_pages_skipped=skipped)
 
 
 # --------------------------------------------------------------------------
 # Organisation extraction
 # --------------------------------------------------------------------------
 _URL_OR_EMAIL = re.compile(r"(?:https?://|www\.)\S+|[\w.+-]+@[\w-]+(?:\.[\w-]+)+", re.I)
+# The same, and bare domains ("lebenslaute.net", "fr.wikipedia.org/wiki/...").
+_URL_OR_DOMAIN = re.compile(r"(?:https?://|www\.)\S+|[\w.+-]+@[\w-]+(?:\.[\w-]+)+|"
+                            r"\b[\w.-]+\.(?:org|com|net|de|fr|eu|ch|at|nl|be|it|es|uk|info|cz|pt|se|dk|pl|"
+                            r"io|news|blog)\b\S*", re.I)
 
 
 class _SquashDict(dict):
@@ -1332,7 +1546,16 @@ ORG_LABELS = {"ORG"}
 # Methods that are weak evidence on their own: NER, and the lower-case head written after
 # the name ("Falkirk council area"). A name found only by these is place-gated and vetted
 # site-wide; other modules can import this to treat them alike (confidence, routing).
-NER_LIKE_METHODS = frozenset({"ner", "pattern_after"})
+NER_LIKE_METHODS = frozenset({"ner", "pattern_after", "link_text", "website_elsewhere"})
+# Methods that are evidence on their own: a rule with an organisational word or a
+# descriptor, the watchlist, an agenda title, a link to the name's own site or home page,
+# a website the paragraph itself gives. The ordinary-word rules (POS votes, case
+# counts) never reject a name that one of these supports.
+STRONG_METHODS = frozenset({"pattern", "appositive", "watchlist", "title", "link", "website"})
+# Universal POS tags of words that are not proper nouns (spaCy's coarse tags; PROPN,
+# X, SYM and PUNCT are left out).
+COMMON_POS = frozenset({"NOUN", "ADJ", "VERB", "ADV", "PRON", "ADP", "DET", "AUX", "NUM",
+                        "CCONJ", "SCONJ", "INTJ"})
 # Labels that, when given to the same name more often than ORG, show it is not one.
 NON_ORG_LABELS = {"PERSON", "PER", "GPE", "LOC", "FAC", "EVENT", "LAW", "PRODUCT",
                   "WORK_OF_ART", "LANGUAGE"}   # MISC is too broad to count against a name
@@ -1442,34 +1665,223 @@ def _installed(model: str) -> bool:
     return importlib.util.find_spec(model) is not None
 
 
+# --------------------------------------------------------------------------
+# Part-of-speech votes for one-word names (is the word a proper noun here?)
+# --------------------------------------------------------------------------
+# Weekday names in English, German, French, Spanish, Italian, Dutch, Portuguese and
+# Danish: a weekday on its own ("Freitag", "Samstag") is a date, not a name, unless
+# a strong method supports it.
+WEEKDAYS = frozenset("""
+monday tuesday wednesday thursday friday saturday sunday
+montag dienstag mittwoch donnerstag freitag samstag sonnabend sonntag
+lundi mardi mercredi jeudi vendredi samedi dimanche
+lunes martes miércoles miercoles jueves viernes sábado sabado domingo
+lunedì lunedi martedì martedi mercoledì mercoledi giovedì giovedi venerdì venerdi sabato domenica
+maandag dinsdag woensdag donderdag vrijdag zaterdag zondag
+segunda terça terca quarta quinta sexta segunda-feira terça-feira quarta-feira quinta-feira sexta-feira
+mandag tirsdag onsdag torsdag fredag lørdag søndag
+""".split())
+# German, Austrian and EU institutions written as one compound ("Bundesregierung",
+# "Bundestag", "Landesregierung", "Staatsanwaltschaft", "Europarat"): their parts are
+# ordinary nouns, but the compound names an institution.
+_INSTITUTION_COMPOUND = re.compile(r"^(?:bundes|landes|staats|europa)\w{3,}$", re.I)
+_TAGGER_EXCLUDE = ["parser", "ner", "lemmatizer", "senter", "textcat"]
+_TAG_WINDOW = 160     # characters of context kept on each side of the name
+
+
+_PHRASE_TOKEN = re.compile(r"[^\W\d_][\w’'\-&]*|[.!?:;•|\n]")
+_PHRASE_STOPS = frozenset(".!?:;•|\n")
+
+
+def _phrase_shape(surface: str) -> bool:
+    """Two or three plain words, without an acronym or a digit ("Climate Justice",
+    "Open Space"; not "XR Youth", "COP 26")."""
+    words = surface.split()
+    return (2 <= len(words) <= 3 and not re.search(r"[A-Z]{2}|\d", surface)
+            and all(_PHRASE_TOKEN.fullmatch(w) for w in words))
+
+
+def single_word_name(surface: str) -> bool:
+    """A one-word name that is neither an acronym (all capitals, up to 6 characters)
+    nor camelCase or with a digit ("GroenFront", "COP26"): the names whose part of
+    speech in their own contexts tells a proper noun ("Greenpeace") from an ordinary
+    word ("Klimakrise", "Welt")."""
+    toks = TOKEN_RE.findall(surface)
+    if len(toks) != 1:
+        return False
+    w = strip_elision(toks[0])
+    if not w or (w.isupper() and len(w) <= 6):
+        return False
+    return not re.search(r"\d", w) and not any(c.isupper() for c in w[1:])
+
+
+def _pos_exempt(surface: str) -> bool:
+    """Institutional compounds ("Bundesregierung") and hyphenated compounds ending in an
+    organisational word ("Rosa-Luxemburg-Stiftung") are never ordinary words."""
+    w = strip_elision(surface.strip())
+    if _INSTITUTION_COMPOUND.match(w):
+        return True
+    parts = [x for x in re.split(r"[-‐‑]", w.casefold()) if x]
+    return len(parts) >= 2 and (parts[-1] in HEAD_TO_TYPE or parts[-1] in COMPOUND_HEADS)
+
+
+def _tagger_model(lang: str, resolve=None) -> Optional[str]:
+    """The spaCy pipeline that tags `lang` (its own language model; the multilingual
+    xx model has no tagger, so it gives none). `resolve` is OrgExtractor.model_name_for."""
+    name = resolve(lang) if resolve is not None else None
+    if name and not name.startswith("xx_") and name[:2] == SPACY_MODELS.get(lang, "")[:2]:
+        return name
+    if lang not in SPACY_MODELS:
+        return None
+    base = SPACY_MODELS[lang][:-3]
+    for size in ("sm", "md", "lg"):
+        if _installed(f"{base}_{size}"):
+            return f"{base}_{size}"
+    return None
+
+
+def _aligned_pos(doc, surface: str, at: int) -> Optional[str]:
+    """POS of the token of `doc` that is `surface` (case and elided article ignored),
+    the one nearest to character `at` when the word occurs more than once."""
+    target = strip_elision(surface).casefold().strip("’'")
+    best = None
+    for t in doc:
+        if strip_elision(t.text).casefold().strip("’'") == target:
+            d = abs(t.idx - at)
+            if best is None or d < best[0]:
+                best = (d, t.pos_)
+    return best[1] if best else None
+
+
+def _pos_votes(samples: Dict[str, List[Tuple[str, str, str]]], resolve=None,
+               loaded: Optional[Dict[str, object]] = None) -> Dict[str, Tuple[int, int]]:
+    """Tag the samples (key -> [(surface, context, lang)]) language by language with
+    tagger-only pipelines; return key -> (votes, votes in COMMON_POS). Each distinct
+    context is tagged once, one model is kept loaded at a time."""
+    by_lang: Dict[str, Dict[str, List[Tuple[str, str, int]]]] = defaultdict(lambda: defaultdict(list))
+    for key, items in samples.items():
+        for surface, context, lang in items:
+            i = context.casefold().find(strip_elision(surface).casefold())
+            if i < 0:
+                continue
+            a = max(0, i - _TAG_WINDOW)
+            clip = context[a:i + len(surface) + _TAG_WINDOW]
+            by_lang[lang][clip].append((key, surface, i - a))
+    out: Dict[str, List[int]] = {}
+    for lang in sorted(by_lang):
+        name = _tagger_model(lang, resolve)
+        if not name:
+            continue
+        nlp = (loaded or {}).get(name)
+        if nlp is None:
+            try:
+                import spacy
+                nlp = spacy.load(name, exclude=_TAGGER_EXCLUDE)
+            except Exception as exc:  # noqa: BLE001 - no votes for this language, the rest goes on
+                log.debug("No POS votes for '%s': %s could not be loaded (%s)", lang, name, exc)
+                continue
+            if loaded is not None:
+                loaded[name] = nlp
+        texts = list(by_lang[lang])
+        try:
+            for text, doc in zip(texts, nlp.pipe(texts, batch_size=256)):
+                for key, surface, at in by_lang[lang][text]:
+                    pos = _aligned_pos(doc, surface, at)
+                    if pos:
+                        v = out.setdefault(key, [0, 0])
+                        v[0] += 1
+                        v[1] += pos in COMMON_POS
+        except Exception as exc:  # noqa: BLE001
+            log.warning("POS tagging with %s failed (%s: %s); no votes for '%s'",
+                        name, type(exc).__name__, exc, lang)
+        if loaded is None:
+            del nlp
+    return {k: (v[0], v[1]) for k, v in out.items()}
+
+
+def common_word_votes(items: Iterable[Tuple[str, str, str, str]], max_per_key: int = 8) -> Dict[str, Tuple[int, int]]:
+    """Part-of-speech votes for one-word names, without an OrgExtractor (analytics).
+    items: (key, surface, context, lang). Up to `max_per_key` distinct contexts per key
+    are tagged with the language's own spaCy tagger; the vote is the POS of the word in
+    each context. Returns key -> (number of votes, votes for a common part of speech,
+    see COMMON_POS). Languages without a tagger model give no entry."""
+    samples: Dict[str, List[Tuple[str, str, str]]] = defaultdict(list)
+    seen: Set[Tuple[str, str, str]] = set()
+    for key, surface, context, lang in items:
+        if not key or not context or len(samples[key]) >= max_per_key:
+            continue
+        if (key, context, lang) in seen:
+            continue
+        seen.add((key, context, lang))
+        samples[key].append((surface, context, lang))
+    return _pos_votes(samples)
+
+
+def is_common_vote(votes: Tuple[int, int]) -> bool:
+    """At least 2 votes and at least half of them for a common part of speech."""
+    n, c = votes
+    return n >= 2 and c >= 0.5 * n
+
+
 _LANG_NOISE = re.compile(r"https?://\S+|www\.\S+|\S+@\S+|\b\d+(?:er|ère|e|ème|st|nd|rd|th|°)\b", re.I)
 
 
 # Letters used by only one or two of the supported languages; a word containing one
 # counts as two more hits for those languages ("Obóz klimatyczny odbędzie się w sierpniu").
-_LANG_LETTERS = {"pl": "łśźżęąń", "ro": "șțăşţ", "cs": "řůě", "sk": "ľĺŕ", "hu": "őű", "hr": "đ",
+# (Romanian is written with the comma forms ș ț; the cedilla forms ş ţ are Turkish.)
+_LANG_LETTERS = {"pl": "łśźżęąń", "ro": "șță", "cs": "řůě", "sk": "ľĺŕ", "hu": "őű", "hr": "đ",
                  "da": "øæ", "nb": "øæ", "lt": "ėįųū"}
 
 
+# One-letter words next to a full stop are abbreviations ("U.S.", "e.g."), not the
+# Croatian "u" or the Slovenian "s".
+_LANG_ABBREV = re.compile(r"\b[^\W\d_]\.(?=[^\W\d_]?\.?)")
+# Turkish (no spaCy model): its letters and commonest words. Three or more signals mean
+# the paragraph is not Romanian, whatever its letters.
+_TURKISH = re.compile(r"[şğıŞĞİ]|\b(?:ve|bir|ile|için|olarak)\b")
+
+
 def language_scores(text: str) -> Counter:
-    """Function-word hits per language (web addresses and ordinals such as "1er" removed),
-    plus two for a language whose own letters appear in a word."""
-    words = re.findall(r"[^\W\d_]+", _LANG_NOISE.sub(" ", text).lower())[:3000]
-    scores = Counter({lang: sum(w in hints for w in words) for lang, hints in _LANG_HINTS.items()})
+    """Function-word hits per language (web addresses, ordinals such as "1er" and
+    one-letter abbreviations such as "U.S." removed), plus two for a language whose own
+    letters appear in a word. A language with only one distinct function word scores at
+    most 1 (one repeated "i" or "a" is no evidence)."""
+    words = re.findall(r"[^\W\d_]+", _LANG_ABBREV.sub(" ", _LANG_NOISE.sub(" ", text)).lower())[:3000]
+    scores: Counter = Counter()
+    for lang, hints in _LANG_HINTS.items():
+        hit = [w for w in words if w in hints]
+        scores[lang] = len(hit) if len(set(hit)) >= 2 else min(len(hit), 1)
     letters = set("".join(words))
     for lang, own in _LANG_LETTERS.items():
         if letters.intersection(own):
             scores[lang] += 2
+    if scores.get("ro") and len(_TURKISH.findall(text)) >= 3:
+        scores["ro"] = 0
     return scores
+
+
+# Language codes pages declare by mistake (country codes): "se" (Northern Sami) for
+# Swedish, "dk" for Danish ...
+DECLARED_LANGUAGE_FIXES = {"se": "sv", "dk": "da", "gr": "el", "cz": "cs", "ua": "uk", "si": "sl", "jp": "ja"}
+
+
+def _declared_code(declared: str) -> str:
+    code = (declared or "").lower().replace("_", "-").split("-")[0]
+    code = DECLARED_LANGUAGE_FIXES.get(code, code)
+    return code if re.fullmatch(r"[a-z]{2}", code) else ""
+
+
+def _supported_language(code: str) -> bool:
+    return code in _LANG_HINTS or code in SPACY_MODELS
 
 
 def detect_language(text: str, declared: str = "", prior: str = "") -> str:
     """Two-letter language code: the page's declared language, else a guess from
     function words. With `prior` (the page or document language) the guess must
     beat the prior by two function words; texts without evidence get the prior."""
-    declared = (declared or "").lower().replace("_", "-").split("-")[0]
-    if re.fullmatch(r"[a-z]{2}", declared):
-        return declared
+    declared = _declared_code(declared)
+    if declared and (_supported_language(declared) or not confident_language(text)):
+        return declared   # an unsupported code ("eo") only when the text says nothing else
     scores = language_scores(text)
     top = max(scores.values()) if scores else 0
     if top == 0:
@@ -1498,13 +1910,17 @@ def confident_language(text: str, fallback: str = "", min_hits: int = 2, margin:
 
 
 def page_language(texts: Sequence[str], declared: str = "") -> str:
-    """Language of a page or document: the declared one, else the most common
-    confident language of its paragraphs (agenda lines, blocks), else a guess
-    from all the text."""
-    declared_code = (declared or "").lower().replace("_", "-").split("-")[0]
-    if re.fullmatch(r"[a-z]{2}", declared_code):
+    """Language of a page or document: the declared one (codes declared by mistake
+    corrected, see DECLARED_LANGUAGE_FIXES; a code without function words or a spaCy
+    model, such as "eo", only when no paragraph gives clear evidence of another), else
+    the most common confident language of its paragraphs (agenda lines, blocks), else
+    a guess from all the text."""
+    declared_code = _declared_code(declared)
+    if declared_code and _supported_language(declared_code):
         return declared_code
     votes = Counter(lang for lang in (confident_language(t) for t in texts if len(t.split()) >= 5) if lang)
+    if declared_code and not votes:
+        return declared_code   # an unsupported code ("eo", "ja") when no paragraph says otherwise
     if votes:
         return votes.most_common(1)[0][0]
     return detect_language(" ".join(texts[:200]))
@@ -1542,6 +1958,49 @@ def _second_language(text: str, code: str) -> Tuple[str, List[Tuple[int, int]]]:
     return (lang, spans) if spans else ("", [])
 
 
+def _trim_end(text: str, start: int, end: int) -> int:
+    """Drop trailing function and interface words (TRAILING_STRIP) from a span of two or
+    more words: "Casino Group A" -> "Casino Group", "Scientist Rebellion Logo" ->
+    "Scientist Rebellion"."""
+    while True:
+        toks = list(TOKEN_RE.finditer(text, start, end))
+        if len(toks) < 2 or toks[-1].group(0).casefold() not in TRAILING_STRIP:
+            return end
+        end = toks[-2].end()
+
+
+def trim_junk(surface: str) -> Tuple[int, int]:
+    """(start, end) of the name inside `surface` once "Logo" around it, a role before it
+    ("Presseteam von", "Member of the"), an opener ("Neither the", "INTRODUCTION") and
+    trailing function words ("A", "At", "Website") are dropped. The whole surface when
+    nothing is to be dropped, or when dropping would leave nothing."""
+    start, end = 0, len(surface)
+    m = _LOGO_BEFORE.match(surface)
+    if m:
+        start = m.end()
+    m = _LOGO_AFTER.search(surface, start)
+    if m:
+        end = m.start()
+    while True:
+        role = ROLE_OF.match(surface, start, end)
+        if role and _is_cap(surface[role.end():end]):
+            start = role.end()
+            continue
+        first = TOKEN_RE.match(surface, start)
+        if first and first.group(0).casefold() in _JUNK_OPENERS and first.end() < end:
+            nxt = TOKEN_RE.search(surface, first.end(), end)
+            while nxt and nxt.group(0).casefold() in ARTICLES and not _is_cap(nxt.group(0)):
+                nxt = TOKEN_RE.search(surface, nxt.end(), end)   # "Neither the European Union"
+            if nxt and _is_cap(nxt.group(0)):
+                start = nxt.start()
+                continue
+        break
+    end = _trim_end(surface, start, end)
+    if not TOKEN_RE.search(surface, start, end):
+        return 0, len(surface)
+    return start, end
+
+
 class OrgExtractor:
     NER_MEMO_SIZE = 200_000   # distinct (model, paragraph) results kept in memory
     # spaCy models kept loaded at once. A model takes about 70 MB (sm) to 600 MB (lg);
@@ -1571,6 +2030,8 @@ class OrgExtractor:
         self.ner_size = ner_size
         self._models: Dict[str, object] = {}
         self.common_words: Set[str] = set()
+        self.lowercase_words: Set[str] = set()      # keys of words written in lower case, see prepare_corpus()
+        self._lowercase_keys: Set[str] = set()
         self.mid_caps: Optional[Set[str]] = None   # None until prepare_corpus() runs
         self._corpus_text = ""                      # distinct paragraphs, for phrase case counts
         self._modifier_memo: Dict[str, bool] = {}   # _modifier_word() results, per corpus
@@ -1594,12 +2055,22 @@ class OrgExtractor:
         self._model_ids: Dict[str, str] = {}
         self._name_for: Dict[str, Optional[str]] = {}
         self._ner_memo: Dict[Tuple[str, str], NerDoc] = {}
+        self._memo_cap = self.NER_MEMO_SIZE         # raised by prefetch() when there is no cache
         self._call_results: Dict[Tuple[str, str], NerDoc] = {}   # see pipe()
         self.ner_stats: Counter = Counter()          # "analysed" by spaCy, read from "cache"
         self._db = None
         if cache_dir is not None:
             self._db = self._open_cache(Path(cache_dir) / "ner_cache.sqlite")
         self.label_votes: Dict[str, Counter] = defaultdict(Counter)
+        # Contexts of one-word names (key -> [(surface, sentence, language)], up to
+        # POS_SAMPLES distinct ones), tagged by finish_corpus_votes() into pos_votes.
+        self.pos_samples: Dict[str, List[Tuple[str, str, str]]] = defaultdict(list)
+        self.pos_votes: Optional[Dict[str, Tuple[int, int]]] = None   # None until tagged
+        self._pos_seen: Set[Tuple[str, str]] = set()
+        # Two- and three-word names (key -> surface) and their lower-case / capitalised
+        # uses in the corpus, counted by finish_corpus_votes() (see is_lowercase_phrase).
+        self._phrase_surfaces: Dict[str, str] = {}
+        self._phrase_counts: Dict[Tuple[str, ...], List[int]] = {}
         self.locative: Dict[str, List[int]] = defaultdict(lambda: [0, 0])   # key -> [after "in/à/bei…", total]
         desc = "|".join(re.escape(d).replace(r"\ ", r"[\s\-]+") for d in DESCRIPTORS)
         # "the feminist collective Mujeres Creando" / "the NGO called Sea-Watch"
@@ -2059,8 +2530,102 @@ class OrgExtractor:
                 groups[new].append(i)
         return list(groups.items())
 
+    def prefetch(self, pages: Iterable[Tuple[List[str], str]], workers: int = 1) -> int:
+        """Run NER ahead of the page loop: every paragraph of `pages` ((texts, page
+        language) pairs) is routed as pipe() would route it (paragraph languages, and the
+        second-language pass of bilingual paragraphs), de-duplicated per model, and each
+        model is loaded once and run over all its texts (nlp.pipe, batch_size=64,
+        n_process=workers). Texts already in the memo or the persistent cache are
+        skipped. The results go to the memo and the cache without counting labels, so
+        the later pipe() calls give the same results (and label votes) as without the
+        prefetch, without loading or freeing models. Returns the number of texts
+        analysed."""
+        if self.spacy_model.lower() == "none":
+            return 0
+        auto = self.spacy_model.lower() == "auto"
+        groups: Dict[str, Dict[str, None]] = defaultdict(dict)
+        for texts, lang in pages:
+            texts = list(texts)
+            for t, code in zip(texts, self.paragraph_languages(texts, lang or "en")):
+                if not t:
+                    continue
+                name = self.model_name_for(code)
+                if name:
+                    groups[name][t] = None
+                if auto and name and len(t.split()) >= 12:
+                    c, _ = _second_language(t, code)
+                    if c and "en" in (c, code):
+                        other = self.model_name_for(c)
+                        if other and other != name:
+                            groups[other][t] = None
+        total = sum(len(v) for v in groups.values())
+        if self._db is None and total > self._memo_cap:
+            self._memo_cap = total + self.NER_MEMO_SIZE   # keep them all for the page loop
+        import time
+        t0, done = time.time(), 0
+        for name, tdict in groups.items():
+            mid = self._model_id(name)
+            todo = [t for t in tdict if (mid, t) not in self._ner_memo]
+            if todo and self._db is not None:
+                keys = {t: hashlib.sha1(f"{mid}\x00{t}".encode("utf-8")).hexdigest() for t in todo}
+                stored = self._cache_get(list(keys.values()))
+                todo = [t for t in todo if keys[t] not in stored]
+            if not todo:
+                continue
+            nlp = self._load(name)
+            if nlp is None:
+                continue   # pipe() falls back to another model for these texts
+            n_proc = max(1, int(workers or 1))
+            rows: List[Tuple[str, str]] = []
+            try:
+                try:
+                    stream = zip(todo, nlp.pipe(todo, batch_size=64, n_process=n_proc)
+                                 if n_proc > 1 else nlp.pipe(todo, batch_size=64))
+                    for t, doc in stream:
+                        rec = NerDoc.from_spacy(doc)
+                        self._remember(mid, t, rec)
+                        done += 1
+                        if self._db is not None:
+                            rows.append((hashlib.sha1(f"{mid}\x00{t}".encode("utf-8")).hexdigest(), rec.to_json()))
+                            if len(rows) >= 2000:
+                                self._cache_put(rows)
+                                rows = []
+                except Exception as exc:  # noqa: BLE001
+                    if n_proc == 1:
+                        raise
+                    log.warning("NER with %d processes failed (%s: %s); analysing in one process",
+                                n_proc, type(exc).__name__, exc)
+                    left = [t for t in todo if (mid, t) not in self._ner_memo]
+                    for t, doc in zip(left, nlp.pipe(left, batch_size=64)):
+                        rec = NerDoc.from_spacy(doc)
+                        self._remember(mid, t, rec)
+                        done += 1
+                        if self._db is not None:
+                            rows.append((hashlib.sha1(f"{mid}\x00{t}".encode("utf-8")).hexdigest(), rec.to_json()))
+            except Exception as exc:  # noqa: BLE001 - pipe() reports and handles a failing model
+                log.warning("NER prefetch with spaCy model %r stopped (%s: %s); the page loop "
+                            "analyses the rest", name, type(exc).__name__, exc)
+            if rows:
+                self._cache_put(rows)
+        self.ner_stats["prefetched"] += done
+        self._call_results = {}
+        log.info("NER prefetch: %d paragraphs analysed with %d model(s) in %.1f s (%d process%s)",
+                 done, len(groups), time.time() - t0, max(1, int(workers or 1)),
+                 "" if max(1, int(workers or 1)) == 1 else "es")
+        return done
+
+    def _cache_put(self, rows: List[Tuple[str, str]]) -> None:
+        if self._db is None or not rows:
+            return
+        import sqlite3
+        try:
+            self._db.executemany("INSERT OR REPLACE INTO ner (k, v) VALUES (?, ?)", rows)
+            self._db.commit()
+        except sqlite3.Error as exc:
+            self._cache_failed(exc)
+
     def _remember(self, mid: str, text: str, rec: "NerDoc") -> None:
-        if len(self._ner_memo) >= self.NER_MEMO_SIZE:
+        if len(self._ner_memo) >= self._memo_cap:
             self._ner_memo.clear()
         self._ner_memo[(mid, text)] = rec
         self._call_results[(mid, text)] = rec
@@ -2083,17 +2648,37 @@ class OrgExtractor:
         language unless a rule with an organisational noun supports it."""
         lower: Counter = Counter()
         upper: Counter = Counter()
+        alone: Counter = Counter()    # capitalised uses not next to another capitalised word
+        lower_text: Counter = Counter()   # lower-case uses outside web addresses ("wikipedia.org")
         # Each distinct paragraph counts once: calendar day cells, menus and footers repeat
         # the same Title-Case text many times and would outvote the running text.
         seen = list(dict.fromkeys(texts))
         for text in seen:
+            urls = [m.span() for m in _URL_OR_DOMAIN.finditer(text)] if ("." in text or "@" in text) else []
             for s, e in split_sentences(text):
-                for i, m in enumerate(TOKEN_RE.finditer(text, s, e)):
-                    w = strip_elision(m.group(0))       # "d’Attac" counts as "Attac"
+                found = list(TOKEN_RE.finditer(text, s, e))
+                toks = [strip_elision(m.group(0)) for m in found]   # "d’Attac" counts as "Attac"
+                # capitalised and joined to the previous / next word by spaces only
+                caps = [bool(w[:1].isupper()) for w in toks]
+                for i, w in enumerate(toks):
                     if i == 0 or w.isupper() or not w:
                         continue  # sentence-initial and ALL-CAPS words say nothing about case
-                    (upper if w[:1].isupper() else lower)[w.casefold()] += 1
+                    if caps[i]:
+                        upper[w.casefold()] += 1
+                        if not ((caps[i - 1] and text[found[i - 1].end():found[i].start()].isspace())
+                                or (i + 1 < len(toks) and caps[i + 1]
+                                    and text[found[i].end():found[i + 1].start()].isspace())):
+                            alone[canonical_key(w)] += 1     # "the Earth", not "Friends of the Earth"
+                    else:
+                        lower[w.casefold()] += 1
+                        if not urls or not any(a <= found[i].start() < b for a, b in urls):
+                            lower_text[canonical_key(w)] += 1
         self.common_words = {w for w, n in lower.items() if n >= 2 and n >= 0.5 * upper.get(w, 0)}
+        # Words written in lower case at least 3 times, and at least a quarter as often as
+        # capitalised on their own ("earth", "parliament", "bank"): a one-word name made
+        # of one is an ordinary word unless a strong method supports it (see vet()).
+        self.lowercase_words = {w for w, n in lower_text.items() if n >= 3 and n >= 0.25 * alone.get(w, 0)}
+        self._lowercase_keys = set(self.lowercase_words)
         self.mid_caps = set(upper)
         self._corpus_text = "\n".join(seen)
         # A lower-case copy of the same length, so phrase positions found in it are valid
@@ -2160,9 +2745,22 @@ class OrgExtractor:
           count for less than place labels: small models often tag coined group names
           as people).
         The place-preposition check comes first and does not look at the label votes:
-        small models label many place names ORG (Kinneil, ZAD, Scholven, Sassnitz)."""
-        if set(methods) - NER_LIKE_METHODS:
+        small models label many place names ORG (Kinneil, ZAD, Scholven, Sassnitz).
+        Before both, a one-word name is rejected when its part-of-speech votes say it is
+        an ordinary word, or when it is a weekday (see is_common_pos)."""
+        if set(methods) & STRONG_METHODS or set(methods) - NER_LIKE_METHODS:
             return True   # a rule, a link or a descriptor also supports it
+        if self.pos_votes is None:
+            self.finish_corpus_votes()
+        if self.is_common_pos(key):
+            return False  # a one-word name used as an ordinary word ("Welt", "Klimakrise", "Freitag")
+        if self.is_lowercase_word(key):
+            return False  # "Earth", "Parliament", "Bank": written in lower case in this corpus
+        if self.is_lowercase_phrase(key):
+            return False  # "Social Movements", "System Change": an ordinary phrase here
+        if "website_elsewhere" in methods and " " not in key and (
+                key in FIRST_NAME_KEYS or is_place_key(key) or is_gazetteer_place(key.title())):
+            return False  # "Rachel", "Marianne", "Colorado": the name of a site given elsewhere
         after_loc, total = self.locative.get(key, (0, 0))
         if total >= 2 and after_loc / total >= 0.6:
             return False  # mostly written "in X", "à X", "bei X": a place
@@ -2179,6 +2777,115 @@ class OrgExtractor:
         # MISC (and an unseen label) does not count against a name: with no non-org
         # label at all, nothing speaks against it.
         return not (other > 0 and other >= 3 * org and org < 3)
+
+    POS_SAMPLES = 8   # distinct contexts tagged per one-word name
+
+    def _record_pos_sample(self, key: str, surface: str, text: str, start: int, lang: str) -> None:
+        """Keep the sentence around a one-word name (see single_word_name) for its POS
+        votes; up to POS_SAMPLES distinct (sentence, language) contexts per key."""
+        if not lang or start < 0 or not single_word_name(surface):
+            return
+        samples = self.pos_samples.get(key)
+        if samples is not None and len(samples) >= self.POS_SAMPLES:
+            return
+        sent = text
+        if len(text) > 2 * _TAG_WINDOW:
+            for a, b in split_sentences(text):
+                if a <= start < b:
+                    sent = text[a:b]
+                    break
+        mark = (key, hashlib.sha1(f"{lang}\x1f{sent}".encode("utf-8")).hexdigest())
+        if mark in self._pos_seen:
+            return
+        self._pos_seen.add(mark)
+        self.pos_samples[key].append((surface, sent, lang))
+
+    def finish_corpus_votes(self) -> int:
+        """Tag the contexts collected for one-word names (with tagger-only spaCy
+        pipelines, language by language) and keep key -> (votes, common votes) in
+        pos_votes. Safe to call more than once: later calls only tag keys that have no
+        votes yet. Returns the number of keys with votes. vet() calls it if needed."""
+        import time
+        if self.spacy_model.lower() == "none":
+            self._count_phrases()
+            self.pos_votes = self.pos_votes or {}
+            return len(self.pos_votes)
+        self._count_phrases()
+        votes = dict(self.pos_votes or {})
+        todo = {k: v for k, v in self.pos_samples.items() if v and k not in votes}
+        if todo:
+            t0 = time.time()
+            resolve = self.model_name_for if self.spacy_model.lower() == "auto" else None
+            new = _pos_votes(todo, resolve)
+            votes.update(new)
+            n_common = sum(1 for k in new if is_common_vote(new[k]))
+            log.info("Part-of-speech votes for %d one-word names (%d used as ordinary words) "
+                     "in %.1f s", len(new), n_common, time.time() - t0)
+        self.pos_votes = votes
+        return len(votes)
+
+    def _count_phrases(self) -> None:
+        """One pass over the corpus: lower-case uses ("climate justice") and capitalised
+        uses not at the start of a sentence nor after another capitalised word ("for
+        Climate Justice", not "Nordic Climate Justice") of every two- and three-word
+        name met so far."""
+        want = {tuple(w.casefold() for w in s.split()) for s in self._phrase_surfaces.values()}
+        want -= set(self._phrase_counts)
+        if not want or not self._corpus_text:
+            return
+        counts = {k: [0, 0] for k in want}
+        prev_tok = ""
+        toks = _PHRASE_TOKEN.findall(self._corpus_text)
+        low = [t.casefold() for t in toks]
+        for i in range(len(toks)):
+            for n in (2, 3):
+                k = tuple(low[i:i + n])
+                c = counts.get(k) if len(k) == n else None
+                if c is None:
+                    continue
+                g = toks[i:i + n]
+                if all(w == w.casefold() for w in g):
+                    c[0] += 1
+                elif g[0][:1].isupper() and i > 0:
+                    prev_tok = toks[i - 1]
+                    if prev_tok not in _PHRASE_STOPS and not prev_tok[:1].isupper():
+                        c[1] += 1
+        self._phrase_counts.update(counts)
+
+    def is_lowercase_phrase(self, key: str) -> bool:
+        """Is this two- or three-word name an ordinary phrase of the corpus: written in
+        lower case at least 3 times and at least half as often as capitalised in a
+        sentence ("Climate Justice", "Social Movements")? Only for names found by weak
+        methods alone (vet() asks only for those)."""
+        surface = self._phrase_surfaces.get(key)
+        if not surface:
+            return False
+        c = self._phrase_counts.get(tuple(w.casefold() for w in surface.split()))
+        return bool(c) and c[0] >= 3 and c[0] >= 0.5 * c[1]
+
+    def pos_summary(self, key: str) -> Tuple[int, int]:
+        """(votes, votes for a common part of speech) of a one-word name; (0, 0) when
+        it has none."""
+        return (self.pos_votes or {}).get(key, (0, 0))
+
+    def is_common_pos(self, key: str) -> bool:
+        """Is this one-word name an ordinary word in its own contexts: a weekday, or at
+        least 2 POS votes with at least half of them a common part of speech (noun,
+        adjective, verb...; see COMMON_POS)? Institutional compounds ("Bundesregierung")
+        and hyphenated names ending in an organisational word ("Rosa-Luxemburg-Stiftung")
+        are exempt. Callers skip names that a strong method supports (STRONG_METHODS)."""
+        samples = self.pos_samples.get(key) or ()
+        surface = samples[0][0] if samples else key
+        if " " in key.strip() or _pos_exempt(surface) or _pos_exempt(key):
+            return False
+        if key in WEEKDAYS:
+            return True
+        return is_common_vote(self.pos_summary(key))
+
+    def is_lowercase_word(self, key: str) -> bool:
+        """Is this one-word key a word the corpus writes in lower case (see
+        prepare_corpus, lowercase_words)? Institutional compounds are exempt."""
+        return (" " not in key and key in self._lowercase_keys and not _pos_exempt(key))
 
     def merge_key(self, name: str) -> str:
         """The organisation key for `name` (a name or a canonical key) in this run.
@@ -2276,6 +2983,10 @@ class OrgExtractor:
         of a sentence or line, and never when that would leave a lone organisational
         word or (for most of them) a single word."""
         while True:
+            role = ROLE_OF.match(text, start, end)
+            if role and _is_cap(text[role.end():end]):
+                start = role.end()       # "Presseteam von Extinction Rebellion" -> "Extinction Rebellion"
+                continue
             m = TOKEN_RE.match(text, start)
             if not m or m.end() >= end:
                 break
@@ -2300,7 +3011,7 @@ class OrgExtractor:
             if not nxt or nxt.start() >= end:
                 break
             start = nxt.start()
-        return start, end
+        return start, _trim_end(text, start, end)
 
     @staticmethod
     def _head_type(tokens: Sequence[str]) -> Optional[str]:
@@ -2450,10 +3161,14 @@ class OrgExtractor:
 
     def _org_elsewhere(self, surface: str) -> bool:
         """Has spaCy labelled this exact name ORG at least twice in the paragraphs seen so
-        far (this page included), and more often than any non-organisation label?"""
+        far (this page included), and more often than any non-organisation label? (A
+        one-word name the POS votes show to be an ordinary word, once they are tagged,
+        is not.)"""
         key = canonical_key(tidy_surface(surface))
         if key in self.watchlist.canonical:
             return True   # a watchlist name ("Greenpeace" in "Greenpeace and Civil Rights Defenders")
+        if self.pos_votes is not None and self.is_common_pos(key):
+            return False
         votes = self.label_votes.get(key)
         if not votes:
             return False
@@ -2783,7 +3498,6 @@ class OrgExtractor:
         # Names of the websites this paragraph gives or links to: a capitalised phrase that
         # spells one of them is that site's organisation ("Code Rood … code-rood.org").
         sites = _sites_of([m.group(1) for m in _URL_HOST.finditer(text)] + [ln.domain for ln in links if ln.domain])
-        corpus_only: Set[int] = set()    # website names known only from other paragraphs
         if not table:
             here = (self._website_names(text, sites, {n[:k] for n in sites for k in range(1, len(n) + 1)})
                     if sites else [])
@@ -2792,11 +3506,12 @@ class OrgExtractor:
                 found += [(w, False) for w in self._website_names(text, self._corpus_sites, self._corpus_prefixes)
                           if not any(a < w[1] and w[0] < b for a, b, _ in here)]
             for (ws, we, host), local in found:
-                m = Mention(text[ws:we], "", {"website"}, self._head_type(TOKEN_RE.findall(text[ws:we])) or "",
-                            ws, we, link_domain=host)
-                if not local:
-                    corpus_only.add(id(m))
-                cands.append((2, m))
+                # A website given only in another paragraph or agenda entry is weaker
+                # evidence ("website_elsewhere", vetted like NER) than one this paragraph
+                # gives or links to ("website").
+                cands.append((2, Mention(text[ws:we], "", {"website" if local else "website_elsewhere"},
+                                         self._head_type(TOKEN_RE.findall(text[ws:we])) or "",
+                                         ws, we, link_domain=host)))
 
         for s, e, _ in ([] if table else self._spans(text, lang)):
             s, e = self._trim(text, s, e)
@@ -2868,6 +3583,29 @@ class OrgExtractor:
                         cands.append((2, Mention(text[ps:pe], "", {"pattern_after" if after_head else "pattern"},
                                                  ptyp, ps, pe)))
 
+        # A column of names (lines of a PDF joined with " · " by parse_pdf_text, a strip of
+        # adjacent links): when at least half of its items carry an organisational head
+        # ("Indigenous Environmental Network"), it is a list of organisations, and the
+        # other items that are one whole capitalised name ("Corporación Regional
+        # Yariguíes") are taken as names too.
+        if not table and text.count(" · ") >= 2:
+            items, pos = [], 0
+            for piece in text.split(" · "):
+                a, b = pos + len(piece) - len(piece.lstrip()), pos + len(piece.rstrip())
+                pos += len(piece) + 3
+                sp = self._spans(text[a:b], lang)
+                if len(sp) == 1 and self._trim(text, a + sp[0][0], a + sp[0][1]) == (a, b):
+                    toks = TOKEN_RE.findall(text[a:b])
+                    items.append((a, b, toks if 2 <= len(toks) <= 8 else None))
+                else:
+                    items.append((a, b, None))
+            headed = sum(1 for _, _, toks in items if toks and self._head_type(toks))
+            if headed >= 2 and 2 * headed >= len(items):
+                for a, b, toks in items:
+                    if (toks and not self._head_type(toks) and not is_place_key(canonical_key(text[a:b]))
+                            and not is_gazetteer_place(text[a:b])):
+                        cands.append((2, Mention(text[a:b], "", {"pattern"}, "", a, b)))
+
         if doc is not None and not table:
             german = doc.lang_ == "de" and doc.has_annotation("POS")
             locative_lang = LOCATIVE_BY_LANG.get(doc.lang_)
@@ -2890,12 +3628,14 @@ class OrgExtractor:
                 if cut:
                     ent_end = cut.start()
                 parts, pos, after_bracket = [], ent.start_char, set()
-                for piece in re.split(r"(,\s+|\s*(?:[\[\]|]+\s*/?|\)\s*/)\s*|"
+                # " · " (a column of names joined by parse_pdf_text, or adjacent links) is a
+                # hard boundary between two names.
+                for piece in re.split(r"(,\s+|\s*·\s*|\s*(?:[\[\]|]+\s*/?|\)\s*/)\s*|"
                                       r"(?<=[A-Z0-9])\s+(?:and|et|und|y|e|en|og|och|&)\s+(?=[A-Z0-9]{2,10}\b))",
                                       text[ent.start_char:ent_end]):
                     if re.fullmatch(r"\s*(?:[\[\]|]+\s*/?|\)\s*/)\s*", piece or "-"):
                         after_bracket.add(pos + len(piece))
-                    elif piece and not re.fullmatch(r",\s+|\s+(?:and|et|und|y|e|en|og|och|&)\s+", piece):
+                    elif piece and not re.fullmatch(r",\s+|\s*·\s*|\s+(?:and|et|und|y|e|en|og|och|&)\s+", piece):
                         parts.append((pos, pos + len(piece)))
                     pos += len(piece or "")
                 parts = [q for ps, pe in parts for q in self._split_known_left(text, ps, pe, conjunctions)]
@@ -2943,13 +3683,19 @@ class OrgExtractor:
 
         if self.use_links:
             for ln in links:
-                t = tidy_surface(ln.text)
+                t = strip_logo(tidy_surface(ln.text))
                 if not link_text_is_name(t, ln.domain):
                     continue
                 idx = text.find(ln.text) if ln.text else -1
                 s, e = (idx, idx + len(ln.text)) if idx >= 0 else (-1, -1)
+                if idx >= 0 and t != ln.text and text.find(t, s, e) >= 0:
+                    s = text.find(t, s, e)          # "Attac Logo" in the text: the name only
+                    e = s + len(t)
                 toks = [x.group(0) for x in TOKEN_RE.finditer(t)]
-                cands.append((4, Mention(t, "", {"link"}, self._head_type(toks) or "", s, e,
+                # "link": the text spells the linked site's name or the link goes to a home
+                # page; any other link text ("Tönnies und seine Kritiker" to a news article)
+                # is weak evidence, "link_text", vetted like NER.
+                cands.append((4, Mention(t, "", {link_method(t, ln)}, self._head_type(toks) or "", s, e,
                                          link_domain=ln.domain)))
 
         # Resolve overlaps: highest priority, then longest span wins; overlapping
@@ -2962,6 +3708,12 @@ class OrgExtractor:
                     m.end = m.start + cut.start()
                 m.surface = m.surface[:cut.start()]
             m.surface = tidy_surface(m.surface)
+            if "watchlist" not in m.methods:
+                js, je = trim_junk(m.surface)
+                if (js, je) != (0, len(m.surface)):
+                    if m.start >= 0:
+                        m.start, m.end = m.start + js, m.start + je
+                    m.surface = tidy_surface(m.surface[js:je])
             if starts_with_cta(m.surface.split()) and not m.methods & {"watchlist", "website"}:
                 continue   # "Sign Up Now", "Join the ...": an instruction
             if not m.key:
@@ -2975,9 +3727,7 @@ class OrgExtractor:
                     continue   # a language menu: "Deutsch English Español Français Italiano"
                 if "pattern" not in m.methods and is_place_key(m.key):
                     continue   # a bare place name: "Genève", "Hambach", "Suisse", "In Germany the movement"
-                if (not m.methods - NER_LIKE_METHODS - {"website"}
-                        and ("website" not in m.methods or id(m) in corpus_only)
-                        and is_gazetteer_place(m.surface)):
+                if not m.methods - NER_LIKE_METHODS and is_gazetteer_place(m.surface):
                     continue   # a place the gazetteer knows: "Neckarwestheim", "Castres and Toulouse"
                 if (not m.methods - NER_LIKE_METHODS and m.start >= 0 and not m.surface.isupper()
                         and m.key not in _GAZ_NOT_PLACE and not self._head_type(TOKEN_RE.findall(m.surface))
@@ -2995,14 +3745,14 @@ class OrgExtractor:
                 # campclimat.eu, which the French agenda uses for every climate camp) nor
                 # an event series ("Tour de Natur"): only the entry that gives the site
                 # ties such a name to it.
-                site_named = "website" in m.methods
-                if site_named and "pattern" not in m.methods and id(m) in corpus_only and (
+                site_named = bool(m.methods & {"website", "website_elsewhere"})
+                if "website_elsewhere" in m.methods and "pattern" not in m.methods and (
                         _has_event_word(m.surface)
                         or (self.mid_caps is not None and self.is_ordinary_words(m.surface))):
-                    m.methods.discard("website")
+                    m.methods.discard("website_elsewhere")
                     if not m.methods:
                         continue
-                    site_named = False
+                    site_named = "website" in m.methods
                 if (site_named and "pattern" not in m.methods and self.mid_caps is not None
                         and self.is_ordinary_words(m.surface)
                         and not self._phrase_case_counts(" ".join(TOKEN_RE.findall(m.surface)))):
@@ -3015,7 +3765,7 @@ class OrgExtractor:
                     if (m.methods == {"ner"} and self.mid_caps is not None
                             and not self.capitalised_in_running_text(m.surface)):
                         continue
-                if m.methods <= {"ner", "link"} and (_has_verb_words(m.surface) or (
+                if m.methods <= {"ner", "link", "link_text"} and (_has_verb_words(m.surface) or (
                         _mostly_lowercase(m.surface) and not self._head_type(TOKEN_RE.findall(m.surface)))):
                     continue   # "Résistance ne devait pas être": a phrase, not a name
             hit = None
@@ -3033,6 +3783,11 @@ class OrgExtractor:
                     hit.link_domain = hit.link_domain or m.link_domain
                 continue
             accepted.append(m)
+        for m in accepted:
+            if lang:
+                self._record_pos_sample(m.key, m.surface, text, m.start, lang)
+            if m.key not in self._phrase_surfaces and _phrase_shape(m.surface):
+                self._phrase_surfaces[m.key] = m.surface
         return accepted
 
 ARTICLES = {"the", "die", "der", "das", "la", "le", "les", "l", "il", "lo", "gli", "el", "los",
@@ -3287,10 +4042,16 @@ def _is_generic_name(surface: str) -> bool:
             and all(w in heads or w in GENERIC or w in GENERIC_MULTI for w in content))
 
 
+# "COP28", "La COP30", "COP 26" (not "ANV-COP21", "Action Non-Violente COP21")
+_COP_EVENT = re.compile(r"(?:(?:la|le|the|die|der|el|a)\s+)?COP\s?\d{1,2}", re.I)
+
+
 def _is_event_name(surface: str) -> bool:
     """An event, not an organisation: the first or last word is an event word ("Shell AGM",
     "Rassemblement des Glières"), or a conference word is anywhere ("World Congress on
-    Climate Justice")."""
+    Climate Justice"), or it is a Social Forum or a COP ("World Social Forum", "COP28")."""
+    if _COP_EVENT.fullmatch(surface.strip()) or re.search(r"(?i)\bsocial\s+forum\b", surface):
+        return True
     content = [w.casefold() for w in TOKEN_RE.findall(surface) if w.casefold() not in CONNECTORS]
     return bool(content) and (content[0] in EVENT_WORDS or content[-1] in EVENT_WORDS
                               or (len(content) >= 2 and content[-1] in EVENT_LAST_WORDS
@@ -3303,14 +4064,75 @@ DOCUMENT_LAST_WORDS = {"toolkit", "handbook", "guide", "guidelines", "policy", "
                        "flyer", "brochure", "factsheet", "booklet"}
 
 
+# Heads of treaties, laws and agreements: the last word ("Paris Agreement", "Kyoto
+# Protocol", "Energy Charter Treaty", also on its own: "Convention"), the word before an
+# "of"/"on"/"de" phrase ("Convention on Biological Diversity", "Accord de Paris"), or
+# the first word of a French, Spanish or Italian title ("Pacte Migratoire").
+DOCUMENT_HEADS = {"convention", "conventions", "agreement", "agreements", "protocol", "protocols",
+                  "treaty", "treaties", "declaration", "declarations", "directive", "directives",
+                  "charter", "accord", "accords", "pact", "abkommen", "gesetz", "vertrag", "tratado",
+                  "tratados", "traité", "traités", "pacte", "protocole", "déclaration", "convenio",
+                  "acuerdo", "trattato", "accordo", "convenzione"}
+# ... the last word of a name of two or more words only ("Sustainable Development Goals",
+# "Digital Services Act", "European Green Deal")
+DOCUMENT_HEADS_IN_NAME = {"goals", "contributions", "act", "acts", "deal", "regulation", "law"}
+DOCUMENT_FIRST_WORDS = {"accord", "accords", "pacte", "traité", "convention", "déclaration", "protocole",
+                        "directive", "tratado", "acuerdo", "convenio", "trattato", "accordo", "convenzione"}
+_DOCUMENT_OF = {"of", "on", "for", "de", "du", "des", "sur", "pour", "sobre", "para", "di", "del", "zur",
+                "über", "against", "contre", "between", "entre"}
+# German compounds that end in a law or treaty word ("Lieferkettengesetz", "Pariser
+# Klimaschutzabkommens", "Gesellschaftsvertrag").
+_DOCUMENT_COMPOUND = re.compile(r"(?i)\w{3,}(?:gesetz|gesetze|gesetzes|abkommens?|vertrags?|richtlinie|verordnung)$")
+# Organisations and bodies named after a document ("Glasgow Agreement", a network; the
+# "Convention Citoyenne pour le Climat", a citizens' assembly).
+_DOCUMENT_NAMED_ORGS = {"glasgow agreement", "convention citoyenne pour le climat", "convention citoyenne"}
+
+
+# Head words that also describe what a treaty or law is about ("Digital Services Act",
+# "Safer Space Agreement", "European Union Industrial Emissions Directive", "Information
+# Society Directive"): they do not make such a name an organisation.
+_DOCUMENT_WEAK_HEADS = {"union", "society", "service", "services", "space", "spaces", "espace", "spazio",
+                        "espacio", "project", "projet", "projekt", "proyecto", "progetto"}
+
+
+def _org_head_in(words: Sequence[str]) -> bool:
+    """Does one of the words name an organisation (a head word, or a German/Dutch
+    compound ending in one: "Klimabündnis")?"""
+    for w in words:
+        low = strip_elision(w).casefold()
+        if low in DOCUMENT_HEADS or low in DOCUMENT_HEADS_IN_NAME or low in _DOCUMENT_WEAK_HEADS:
+            continue
+        if low in HEAD_TO_TYPE or low in COMPOUND_HEADS:
+            return True
+        if len(low) > 6 and any(low.endswith(h) for h in COMPOUND_HEADS if h not in WEAK_COMPOUND_HEADS):
+            return True
+    return False
+
+
 def _is_document_name(surface: str) -> bool:
     """A document, not an organisation: the last word is a document word and no word is
     an organisational head ("Climate Camp Scotland Safer Spaces Policy", "Trespass
-    (Scotland) Act"; not "Institute for European Environmental Policy")."""
+    (Scotland) Act"; not "Institute for European Environmental Policy"), or a treaty or
+    law (see DOCUMENT_HEADS: "Paris Agreement", "Convention on Biological Diversity",
+    "Accord de Paris", "Sustainable Development Goals"), unless an organisational word
+    is in the name ("Coalition for the Treaty", "Fossil Fuel Non-Proliferation Treaty
+    Initiative", "Secretariat of the Convention")."""
     words = TOKEN_RE.findall(surface)
-    if len(words) < 2 or words[-1].isupper() or words[-1].casefold() not in DOCUMENT_LAST_WORDS:
+    if not words or words[-1].isupper():
         return False
-    return not any(strip_elision(w).casefold() in HEAD_TO_TYPE for w in words[:-1])
+    low = [strip_elision(w).casefold() for w in words]
+    treaty = (low[-1] in DOCUMENT_HEADS
+              or (len(words) >= 2 and (low[-1] in DOCUMENT_HEADS_IN_NAME or low[0] in DOCUMENT_FIRST_WORDS))
+              or bool(_DOCUMENT_COMPOUND.match(words[-1]))
+              or any(w in DOCUMENT_HEADS and low[i + 1] in _DOCUMENT_OF and not words[i].isupper()
+                     for i, w in enumerate(low[:-1])))
+    if treaty:
+        if canonical_key(surface) in _DOCUMENT_NAMED_ORGS:
+            return False
+        return not _org_head_in(words)
+    if len(words) < 2 or low[-1] not in DOCUMENT_LAST_WORDS:
+        return False
+    return not any(w in HEAD_TO_TYPE for w in low[:-1])
 
 
 # ---- Agenda entry titles ("title slots") -------------------------------------------

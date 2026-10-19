@@ -338,8 +338,14 @@ def _why_unreachable(cr: Crawler) -> str:
     o = cr.outcomes
     codes = sorted(k for k in o if isinstance(k, int))
     if o["robots-unreachable"]:
-        if all(r.startswith("connection failed") for _, r in cr.robots_blocked):
+        reasons = [r for _, r in cr.robots_blocked]
+        causes = [r.split(": ", 1)[1] for r in reasons if r.startswith("unreachable: ")]
+        if causes and len(causes) == len(reasons):
+            return causes[0]                 # DNS, refused, timeout, TLS certificate error
+        if all(r.startswith("connection failed") for r in reasons):
             return "connection failed"
+        if any(r.startswith("robots.txt server error") for r in reasons):
+            return "robots.txt server error (retry on the next run)"
         return "robots.txt could not be read (treated as disallowed)"
     if 429 in codes:
         return "rate-limited (HTTP 429), retried on the next run"
@@ -460,7 +466,8 @@ def crawl_linked(targets: Dict[str, List[Via]], cache: PageCache, base_cfg: Craw
             cr.stop = stop
             n = cr.crawl()
             why = "" if n else _why_unreachable(cr)
-            status = "crawled" if n else f"unreachable: {why}" if why else "unreachable"
+            status = ("crawled" if n else why if why.startswith("robots.txt server error")
+                      else f"unreachable: {why}" if why else "unreachable")
             if stop.is_set():          # Ctrl-C stopped this site before it was finished
                 status = "interrupted (partly crawled)"
         except Exception as exc:  # noqa: BLE001 - one broken site should not stop the run

@@ -687,6 +687,23 @@ CODE_ALIASES = {"UK": "GB", "EL": "GR", "ITA": "IT", "FRA": "FR", "GER": "DE", "
                 "PRT": "PT", "DNK": "DK", "SWE": "SE", "NOR": "NO", "FIN": "FI", "GBR": "GB",
                 "IRL": "IE", "CZE": "CZ", "GRC": "GR", "NRW": "DE", "BRD": "DE", "CAT": "ES",
                 "USA": "US", "INT": "INT", "INTL": "INT", "EU": "INT", "EUR": "INT"}
+# ISO 3166 alpha-3 codes of the countries above, accepted inside bracket tags only
+# ("Earth Social Conference (COL + ONL)" is in Colombia). Codes that are also English
+# words or month abbreviations in capitals (AND, ARE, CAN, MAR, PER) are left out.
+ALPHA3 = {
+    "ALB": "AL", "ARM": "AM", "ARG": "AR", "AUS": "AU", "AZE": "AZ",
+    "BIH": "BA", "BGR": "BG", "BOL": "BO", "BRA": "BR", "BLR": "BY", "COD": "CD",
+    "CHL": "CL", "CHN": "CN", "COL": "CO", "CYP": "CY", "DZA": "DZ", "ECU": "EC", "EST": "EE",
+    "EGY": "EG", "GEO": "GE", "HRV": "HR", "HUN": "HU", "IDN": "ID", "ISR": "IL", "IND": "IN",
+    "IRQ": "IQ", "IRN": "IR", "ISL": "IS", "JPN": "JP", "KEN": "KE", "LBN": "LB", "LIE": "LI",
+    "LTU": "LT", "LUX": "LU", "LVA": "LV", "LBY": "LY", "MDA": "MD", "MNE": "ME",
+    "MKD": "MK", "MLT": "MT", "MEX": "MX", "NGA": "NG", "NZL": "NZ", "PHL": "PH",
+    "PSE": "PS", "ROU": "RO", "SRB": "RS", "RUS": "RU", "SVN": "SI", "SVK": "SK", "SMR": "SM",
+    "SEN": "SN", "SYR": "SY", "TUN": "TN", "TUR": "TR", "UKR": "UA", "UGA": "UG", "VEN": "VE",
+    "XKX": "XK", "ZAF": "ZA",
+}
+# Online markers in tags ("(ONL)" is the calendar's abbreviation).
+ONLINE_TAGS = ("online", "onl", "en ligne", "virtual", "zoom", "webinar")
 # Codes recognised outside brackets only as a whole comma slot ("Brussels, BE"),
 # minus those that are ordinary words in capitals ("NO", "IT", "IS", "IN", "ME").
 SLOT_CODE_EXCLUDE = {"NO", "IT", "IS", "IN", "ME", "AM", "BY", "TO", "AS", "OR", "SO", "DO", "GO",
@@ -1050,8 +1067,9 @@ def _tags(text: str):
             up = tok.upper()
             if not tok:
                 continue
-            if (tok.isupper() or len(tok) <= 3) and (up in COUNTRIES or up in CODE_ALIASES):
-                code = CODE_ALIASES.get(up, up)
+            if (tok.isupper() or len(tok) <= 3) and (up in COUNTRIES or up in CODE_ALIASES
+                                                     or (tok.isupper() and up in ALPHA3)):
+                code = CODE_ALIASES.get(up) or ALPHA3.get(up) or up
                 if code == "INT":
                     special = special or "INT"
                     matched.append(m.group(0))
@@ -1059,7 +1077,7 @@ def _tags(text: str):
                     found.append(code)
                 continue
             ft = fold(tok)
-            if ft in ("online", "en ligne", "virtual", "zoom", "webinar"):
+            if ft in ONLINE_TAGS:
                 special = "ONLINE" if special != "INT" else special
                 matched.append(m.group(0))
                 continue
@@ -1219,6 +1237,9 @@ SELFTEST = [
     ("Climate camp (Amsterdam, NL)", "", "", "", ["NL"], "tag"),
     ("Week of action [NL/BE]", "", "", "", ["NL", "BE"], "tag"),
     ("Festival of revolutions [Online]", "", "", "", ["ONLINE"], "online"),
+    ("Questioning ads (ONL)", "", "https://www.example.nl/ads", "", ["ONLINE"], "online"),
+    ("Interpreting for social movements (ONL)", "", "", "", ["ONLINE"], "online"),
+    ("Earth Social Conference (COL + ONL)", "", "", "", ["CO"], "tag"),
     ("Anti-EPH Action Days [INT]", "", "", "", ["INT"], "international"),
     ("March from Clavière (Italy) to Briançon (France)", "", "", "", ["IT", "FR"], "tag"),
     ("Appel pour des journées d'actions contre un transport d'uranium entre l'Allemagne et la France",

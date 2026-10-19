@@ -203,3 +203,50 @@ NATIONALITIES = {
 }
 PLACES |= NATIONALITIES | {"india", "china", "japan", "nigeria", "brazil", "mexico", "australia", "canada",
                            "south africa", "new zealand", "indonesia", "philippines", "colombia", "peru"}
+
+# States and provinces of North America, oceans and seas: places that NER and website
+# names offer as one-word organisations ("Colorado" for colorado.gov, "Atlantic").
+WORLD_REGIONS = {
+    "alabama", "alaska", "arizona", "arkansas", "california", "colorado", "connecticut", "delaware",
+    "florida", "hawaii", "idaho", "illinois", "indiana", "iowa", "kansas", "kentucky", "louisiana",
+    "maine", "maryland", "massachusetts", "michigan", "minnesota", "mississippi", "missouri", "montana",
+    "nebraska", "nevada", "new hampshire", "new jersey", "new mexico", "north carolina", "north dakota",
+    "ohio", "oklahoma", "oregon", "pennsylvania", "rhode island", "south carolina", "south dakota",
+    "tennessee", "texas", "utah", "vermont", "virginia", "west virginia", "wisconsin", "wyoming",
+    "alberta", "ontario", "quebec", "manitoba", "saskatchewan", "nova scotia", "british columbia",
+    "atlantic", "pacific", "arctic", "antarctica", "mediterranean", "caribbean", "baltic", "amazonia",
+}
+PLACES |= WORLD_REGIONS
+
+# Common first names (English, German, French, Spanish, Italian, Dutch, Portuguese,
+# Scandinavian). A one-word name that is only the name of a website given in another
+# paragraph ("Rachel" for rachel.org, "Marianne" for marianne.net) is a person's name
+# more often than an organisation's (see extract.OrgExtractor.vet).
+FIRST_NAMES = set("""
+james john robert michael william david richard joseph thomas charles christopher daniel matthew anthony
+mark donald steven paul andrew joshua kevin brian george timothy ronald edward jason jeffrey ryan jacob
+gary nicholas eric jonathan stephen larry justin scott brandon benjamin samuel frank gregory raymond
+alexander patrick jack dennis jerry tyler aaron jose adam nathan henry peter zachary douglas harold
+mary patricia jennifer linda elizabeth barbara susan jessica sarah karen lisa nancy betty margaret
+sandra ashley kimberly emily donna michelle carol amanda dorothy melissa deborah stephanie rebecca
+sharon laura cynthia kathleen amy angela shirley anna brenda pamela emma nicole helen samantha
+katherine christine debra rachel carolyn janet catherine maria heather diane ruth julie olivia joyce
+virginia victoria kelly lauren christina joan evelyn judith megan andrea cheryl hannah jacqueline
+martha gloria teresa ann sara madison frances kathryn janice jean abigail alice judy sophia grace
+denise amber doris marilyn danielle beverly isabella theresa diana natalie brittany charlotte marie
+kayla alexis lori
+hans klaus jürgen jurgen wolfgang michael stefan andreas thomas peter frank uwe dieter günter gunter
+horst manfred bernd ralf werner karl heinz helmut gerhard sabine petra monika ursula andrea claudia
+susanne birgit gabriele karin heike martina renate christa ingrid elke angelika anja katrin julia
+lena lea leonie hannah johanna lukas felix jonas leon maximilian niklas tobias florian sebastian
+jean pierre michel philippe alain nicolas christophe patrick daniel bernard eric laurent frédéric
+frederic olivier stéphane stephane sylvie nathalie isabelle catherine françoise francoise valérie
+valerie sandrine sophie christine marianne céline celine camille manon chloé chloe léa clara lucie
+juan carlos luis miguel antonio manuel francisco javier pedro pablo sergio jorge alejandro carmen
+lucia lucía elena laura marta paula cristina rosa isabel pilar dolores
+giuseppe giovanni francesco marco luca andrea alessandro matteo lorenzo paolo roberto stefano
+giulia chiara francesca sara valentina alessia federica martina silvia elisa
+jan pieter kees henk willem joost bram sanne anouk femke lotte
+joão joao pedro tiago rui ana mariana beatriz inês ines
+lars anders nils erik olaf sven henrik mette anne ingrid astrid karin kristina michaela
+""".split())

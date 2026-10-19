@@ -1,0 +1,410 @@
+# Standing themes: colonialism, racism, fascism and their variations, in
+# English, Italian, Spanish, French, German, Portuguese, Dutch, Danish, Swedish,
+# Norwegian, Polish, Czech, Slovak, Slovenian, Croatian/Serbian, Greek, Romanian,
+# Finnish, Catalan, Basque, Ukrainian/Russian, Lithuanian and Hungarian.
+#
+# Deliberately broader than frame_analysis/taxonomy.py: activist websites use
+# the adjectives ("colonial violence", "racist borders") analytically, so
+# they are included here. Remove them if you want the stricter definition.
+#
+# Syntax (see example_themes.txt): term* = prefix; *term* = also inside
+# compound words (Technofascism, Ökofaschismus, klimaatracisme, neokolonial);
+# re: = regular expression. Overlapping matches count once (the longest).
+# !term = exclusion: a hit of this theme that overlaps a match of the
+# exclusion is not counted ("!énfasis" keeps "*fasis*" off the Spanish word
+# for "emphasis"). Greek accents are ignored when matching.
+#
+# A line "#: descriptive" directly under a [theme] header marks a descriptive
+# theme: its hits are still recorded (theme_hits.csv, master_themes with
+# focus_theme=no) and reported apart in the analytics, but they do not count for
+# the theme filter or the any-theme measures. Older versions of the scripts read
+# the line as a comment. To count a descriptive theme again, delete its line or
+# run with --focus-themes and list it (for example
+# --focus-themes colonialism,racism,fascism,global_south,authoritarianism).
+
+[colonialism]
+# --- any language: word stems, also inside compounds
+*colonial*
+*coloniz*
+*colonis*
+*kolonial*
+# French and Portuguese plurals that *colonial* misses: coloniaux, néocoloniaux, coloniais
+*coloniaux*
+*coloniais*
+*kolonis*
+*koloniaal*
+*koloniale*
+*kolonisatie*
+*imperialis*
+*imperialism*
+*impérialis*
+*imperialisme*
+*dekoloni*
+*descoloni*
+*décoloni*
+*decoloni*
+# --- English
+settler state*
+empire
+empires
+# "empire" is mostly a business empire (media, fossil, Bolloré, Křetínský), a
+# historical state (Roman, Byzantine, Ottoman) or a campaign name ("the Logistics
+# Empire"); those senses are excluded, the political sense stays.
+!re:(?:media|business|fossil(?:\s+fuel)?|coal|energy|industrial|logistics?|logistic|logists|digital|financial|billion[- ]dollar|housing|automobile|commercial|technofascist)\s+empires?
+!re:(?:empire|imperio|império|impero)s?\s+(?:m[ée]diatiques?|industri(?:el|al)|[ée]conomique|[ée]nerg[ée]tique|logistique|marchand|nucl[ée]aire|automobile|de\s+la\s+presse|du\s+pire|du\s+logement|du\s+b[ée]ton|of\s+(?:logistics|cows|destruction|financiers)|dos\s+combust[ií]veis|Bollor[ée]|K[řr]et[ií]nsk[ýy]|Drahi|MSC|State)
+!re:(?:Bollor[ée]|K[řr]et[ií]nsk[ýy]|LVMH|Murdoch|Drahi|MSC|Taib|Babi[šs]|Tyka[čc]|Sev\.en(?:\s+Energy)?|Sinar\s+Mas)(?:['’]\s*s)?\s+(?:\w+\s+){0,2}empires?
+!re:(?:his|her|their|son|sa|seu|sein|ihr)\s+(?:\w+\s+)?(?:empire|império|imperio|impero)s?
+!re:(?:Roman|Byzantine|Ottoman|Austro-Hungarian|Habsburg|Babylonian|Muslim|Brazilian|Osmanische)\s+empires?
+!re:(?:empire|imperio|impero|império)s?\s+(?:romano|romain|bizantino|byzantin|ottoman|otomano|musulm[áa]n)|(?:antiguo|antigo)\s+imp[ée]rio
+!re:Inland\s+Empire|Empire\s+Knouto|Empire\s+of\s+Cows|imperio\s+musulm[áa]n
+# Optional: species and plants "(re)colonising" a habitat (ecology reports such as
+# IPBES or WWF) are not colonialism. Delete these four lines to count them.
+!re:(?:species|esp[eè]ces?|plants?|plantes?|vegetation|v[ée]g[ée]tation|wildlife|Eucalyptus(?:\s+\w+)?|wolves|beavers?|seagrass|corals?)\s+(?:\w+\s+){0,3}(?:re)?coloni[sz]\w*
+!re:(?:re)?coloni[sz](?:ation|ing|ed|es?|er)\s+(?:by|of|des?|par)\s+(?:(?:the|native|new|alien|invasive|les|la|l')\s*)?(?:species|esp[eè]ces?|plants?|plantes?|habitats?|vegetation|v[ée]g[ée]tation|wildlife|birds?|fish|wolves|beavers?|seagrass|corals?)
+!re:(?:natural|naturelle?|passive|active|successful)\s+recoloni[sz]\w*|recoloni[sz]\w*\s+(?:by|of)\s+(?:\w+\s+)?(?:species|populations?)
+!re:recoloni[sz]\w*(?=[^.;]{0,200}\b(?:soils?|species|habitats?|propagules|vegetation|nutrients|seeds?|pollinat\w+)\b)
+land back
+indigenous sovereignty
+# "reparations" alone is often about repairing ecosystems; only the political
+# phrases count.
+climate reparations
+re:(?:colonial|historic(?:al)?|slavery|racial)\s+reparations
+re:reparations\s+for\s+(?:slavery|colonial\w*|empire)
+reparatory justice
+Françafrique
+climate debt
+# --- Italian / Spanish / French / Portuguese
+impero
+imperio
+império
+debito climatico
+deuda climática
+dette climatique
+dívida climática
+# Reparations: in these languages the word also means "repair", so only the
+# political phrases count.
+riparazioni storiche
+riparazioni coloniali
+reparación histórica
+reparaciones históricas
+reparaciones coloniales
+réparations historiques
+réparations coloniales
+réparation historique
+reparações históricas
+reparações coloniais
+# --- German
+Klimaschuld*
+Reparationen
+# --- Dutch
+herstelbetalingen
+klimaatschuld
+re:\bkolonie(?:s|ën|n)?\b
+# --- Danish / Swedish (kolonialisme, kolonialism, imperialisme, afkolonisering,
+#     extraktivism are covered by the stems above)
+klimagæld
+klimatskuld
+# --- Norwegian / Polish / Czech / Slovak / Slovenian / Croatian / Romanian / Finnish /
+#     Catalan / Basque / Lithuanian / Hungarian (most "kolonial-" forms are covered above)
+*imperializm*
+*imperializem*
+*imperijaliz*
+*kolonijal*
+*dekolonizac*
+*dekolonijal*
+*gyarmat*
+*neokolon*
+# --- Greek / Ukrainian / Russian
+*αποικιοκρατ*
+*αποικιακ*
+*ιμπεριαλισ*
+*αποαποικιοπ*
+*колоніал*
+*колониал*
+*імперіал*
+*империал*
+*деколоніз*
+*деколониз*
+
+[racism]
+# --- any language: stems, also inside compounds
+*racis*
+*razzis*
+*rassis*
+*racism*
+*racisme*
+*raciali*
+*racializ*
+*razzializ*
+*racialis*
+*rassifizier*
+*xenofob*
+*xenophob*
+*xénophob*
+*xenófob*
+*vreemdelingenhaat*
+*islamofob*
+*islamophob*
+*islamfeindlich*
+*antisemit*
+*antisémit*
+*anti-semit*
+*afrophob*
+*suprematis*
+*supremacis*
+*suprémacis*
+# --- English
+racial justice
+racial capitalism
+racial violence
+white supremac*
+white privilege
+environmental racism
+climate apartheid
+anti-blackness
+# apartheid, also "anti-apartheid", "Apartheidstaat", "apartheidas", "aparthejd"
+*apartheid*
+*aparthejd*
+*απαρτχαιντ*
+*апартеид*
+*апартеїд*
+# racialised groups named as such: BIPoC, BPoC, PoC (case-sensitive: not "poc")
+BIPoC
+BPoC
+re:(?-i:(?<![\w-])PoC(?![\w-]))
+re:people\s+of\s+colou?r
+personnes? de couleur
+racial discrimination
+racial segregation
+discrimination raciale
+ségrégation raciale
+discriminación racial
+segregación racial
+discriminazione razziale
+segregazione razziale
+discriminação racial
+segregação racial
+rassistische Diskriminierung
+Rassentrennung
+re:\bRassen(?:hass|krieg|lehre|ideologie|theorie|wahn|gesetze|politik|hygiene|kunde)\w*
+# antigypsyism / antiziganism (Roma and Sinti)
+*antiziganis*
+*antigypsyis*
+*antitsiganis*
+*anticiganis*
+*antigitanis*
+re:hostile\s+environment\s+(?:polic\w*|agenda|measures)|Windrush
+racial profiling
+# --- German / Dutch
+Fremdenfeindlich*
+etnisch profileren
+etnische profilering
+witte suprematie
+wit privilege
+# Note: Dutch/Danish "racisme", "antiracisme", "klimaatracisme" etc. are covered by *racis*.
+# --- Danish / Swedish
+*rasis*
+# Spanish "paráfrasis", "perífrasis", "antífrasis" are not racism
+!*frasis*
+!*fràsis*
+# not racism: "ostracism", "conspiracist", Esperanto "kuracisto" (doctor), Turkish /
+# Indonesian "demokrasi", German "Fahrerassistenz", the company Farasis
+!*ostracis*
+!*conspiracis*
+!*kuracist*
+!demokrasi*
+!*assistenz*
+!Farasis*
+fremmedhad
+fremmedfjendsk*
+främlingsfientlig*
+främlingsfientlighet
+etnisk profilering
+vit överhöghet
+hvid overherredømme
+# --- Norwegian / Polish / Czech / Slovak / Slovenian / Croatian / Romanian / Finnish /
+#     Catalan / Basque / Lithuanian / Hungarian (rasisme, rasism, rasismus, rasismi: *rasis*)
+*rasiz*
+*rasszis*
+*rasszizm*
+*arrazakeri*
+*arrazist*
+*ksenofob*
+*ksenofóbi*
+*antysemit*
+*antisemitism*
+fremmedfiendtlig*
+muukalaisviha*
+idegengyűlölet
+# --- Greek / Ukrainian / Russian
+*ρατσισ*
+*ρατσιστ*
+*ξενοφοβ*
+*αντισημιτ*
+*расизм*
+*расист*
+*ксенофоб*
+*антисеміт*
+*антисемит*
+
+[fascism]
+# --- any language: stems, also inside compounds (Technofascism, ecofascism ...)
+*fascis*
+*faschis*
+*fascism*
+*fascisme*
+*fascista*
+*facist*
+antifa
+# "nazi*" would also match Italian nazionale/Nazioni Unite and Croatian naziv
+re:(?<!\w)nazi(?!on|v)\w*
+*nazionalsocialis*
+*nationalsozialis*
+neo-nazi*
+neonazi*
+*neonazi*
+# --- English
+far right
+far-right
+extreme right
+radical right
+alt-right
+white nationalis*
+ethnonationalis*
+# --- Italian / Spanish / Portuguese / French
+estrema destra
+ultradestra
+ultraderecha
+extrema derecha
+extrema direita
+ultradireita
+extrême droite
+extrême-droite
+# --- German
+Rechtsextrem*
+Rechtsradikal*
+# --- Danish / Swedish (fascisme, antifascisme, fascism, nazism are covered above)
+højreekstrem*
+yderste højre
+højreradikal*
+högerextrem*
+extremhöger*
+yttersta högern
+högerradikal*
+# --- Norwegian / Polish / Czech / Slovak / Slovenian / Croatian / Romanian / Finnish /
+#     Catalan / Basque / Lithuanian / Hungarian
+høyreekstrem*
+ytre høyre
+*faszyz*
+*faszyst*
+*fašis*
+*fašiz*
+*fašist*
+*fasis*
+# Spanish "énfasis" (emphasis) is not fascism
+!*énfasis*
+!*enfasis*
+# Greek "απόφαση" (decision): αποφάσισε, αποφασισμένοι, αποφασιστικότητα
+!*αποφασ*
+# Basque "nazio" (nation), the names Nazım / Nazim / Nazir, Spanish "naciste" (you were born)
+!re:(?<!\w)nazio\w*
+!re:(?<!\w)naz[iı]m(?!\w)
+!re:(?<!\w)nazir(?!\w)
+!re:(?<![\w-])naciste(?!\w)
+*fasiz*
+*feixis*
+*faxis*
+*faxist*
+skrajna prawica
+skrajnej prawicy
+krajn* pravic*
+skrajna desnica
+skrajne desnice
+krajnja desnica
+ekstremna desnica
+krajnje desnice
+extrema dreaptă
+extremei drepte
+äärioikeisto*
+extrema dreta
+ultradreta
+eskuin muturra*
+kraštutin* dešin*
+szélsőjobb*
+# Nazism in Czech, Slovak, Slovenian, Croatian/Serbian, Lithuanian (nacismus, nacizem,
+# nacizam, nacisti, nacizmas; not Spanish "nacisteis"), Hungarian (náci) and Finnish (natsi)
+re:(?<![\w-])(?:neo-?)?naci(?:zam|zem|zm\w*|smus\w*|st(?!eis)\w*)
+re:(?<![\w-])(?:neo-?)?náci\w*
+re:(?<![\w-])(?:uus)?natsi(?!on)\w*
+# --- Greek / Ukrainian / Russian
+*φασισ*
+*φασιστ*
+*ακροδεξι*
+*ναζι*
+*фашиз*
+*фашист*
+*ультраправ*
+*нацист*
+# German "völkisch" (ethno-nationalist, Nazi ideology)
+völkisch*
+# --- Dutch
+extreemrechts
+extreem-rechts
+extreem rechts
+radicaal-rechts
+radicaal rechts
+uiterst rechts
+
+[global_south]
+#: descriptive
+# The "Global South" is mostly a neutral geographic or development grouping (about
+# two thirds of the passages); it is kept as its own, descriptive theme so that it
+# does not count as colonialism or for the theme filter.
+global south
+sud globale
+sur global
+sud global
+sul global
+globale Süden
+globalen Süden
+mondiale zuiden
+globale zuiden
+globale syd
+det globale syd
+globala syd
+globala södern
+det globale sør
+globalne południe
+globální jih
+globálny juh
+globalni jug
+sudul global
+globaali etelä
+hego globala
+globalusis pietūs
+globális dél
+παγκόσμιος νότος
+
+[authoritarianism]
+#: descriptive
+# Broader than fascism; kept apart, as a descriptive theme, for the same reason.
+authoritarianis*
+autoritarism*
+autoritarismo
+autoritarisme
+Autoritarismus
+auktoritarism
+!anti-autoritar*
+!antiautoritar*
+!anti-authoritar*
+!antiauthoritar*
+
+[extractivism]
+# Split off from [colonialism] (about 80% of its hits have no explicit colonial
+# framing). It stays a focus theme; add a line "#: descriptive" under the header
+# to report it apart without counting it for the theme filter.
+*extractivis*
+*extraktivis*
+*extrativis*
+*estrattivis*
+*extractivisme*

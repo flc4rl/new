@@ -7,6 +7,8 @@ pdfplumber>=0.10
 openpyxl>=3.1
 # analytics.py (network statistics, Gephi files and charts)
 networkx>=3.1
+numpy>=1.24
 matplotlib>=3.7
+scipy  # optional, faster layouts
 # Optional:
 #   playwright>=1.40    --render-js (then: playwright install chromium)

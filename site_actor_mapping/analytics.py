@@ -27,13 +27,25 @@ Nothing in RESULTS_DIR is changed. OUT receives:
 Inclusion criterion (--theme-filter; default: the filter make_master.py
 recorded in the masters' about sheet, or "source" when none is recorded):
 organisations and events count for the network only when they come from a
-source with a theme hit (colonialism, racism, fascism) in its content. A
-source is one web page or one PDF; for the agenda (seed) PDFs each agenda
-entry is its own source. "site" keeps every source of a website with a hit,
-"event" every source of an event with a hit, "none" keeps all sources. The
-sensitivity table always also shows "none", and the number of organisations
-and events left out is reported. Theme prevalence is never filtered (an
-inclusion criterion on the outcome would make every share 100 %).
+source with a hit of a focus theme (colonialism, racism, fascism) in its
+content. A source is one web page or one PDF; for the agenda (seed) PDFs each
+agenda entry is its own source. "direct" also keeps the listing, the event's own
+page and its landing page when any source of their event has a hit; "source"
+asks every source for its own hit; "site" keeps every source of a website with a
+hit, "event" every source of an event with a hit, "none" keeps all sources. The
+sensitivity table always also shows "none", and the number of organisations and
+events left out is reported. Theme prevalence is never filtered (an inclusion
+criterion on the outcome would make every share 100 %). Descriptive themes
+(marked "#: descriptive" in the theme file, or focus_theme=no in the masters:
+global_south, authoritarianism) are reported in descriptive_themes only.
+
+Network scope (--network-scope, default "participation"): the default network
+uses only rows that are evidence of taking part in the event. Linked reports and
+studies (doc_kind report), other pages of a site several events link to, rows
+about another year and copies of a document are context (context_organisations
+sheet of newer masters; derived here for older ones). "all" uses every row. Tie
+levels (--layers, default L1-L3s): L1 the listing, L2 the landing page, L3s
+linked pages and PDFs on the event's own host, L3x those on other hosts.
 
 Both master layouts are read: the older one (events joined with " | ") and the
 long one (one row per event, with event_key, layer and country columns).
@@ -48,6 +60,8 @@ again with --org-codes.
     python analytics.py results/movementhub -o results/movementhub_analytics
     python analytics.py results/master -o results/analytics --run results/pdf_agendas
     python analytics.py results/master -o results/analytics --theme-filter none
+    python analytics.py results/master -o results/analytics --network-scope all --layers L1-L3
+    python analytics.py results/master -o results/analytics --source-codes results/analytics/org_codes_template.xlsx
     python analytics.py --selftest
 """
 
@@ -80,7 +94,14 @@ VERSION = "1.0"
 HERE = Path(__file__).resolve().parent
 DEFAULT_THEMES_FILE = HERE / "themes_colonialism_racism_fascism.txt"
 
-THEME_FILTERS = ["source", "site", "event", "none"]
+THEME_FILTERS = ["direct", "source", "site", "event", "none"]
+# Layers that document the event itself: under the 'direct' theme filter they count when
+# any source of their event has a theme hit (as in make_master.py).
+DIRECT_LAYERS = {"listing_seed", "listing_calendar", "main_event_page", "landing"}
+NETWORK_SCOPES = ["participation", "all"]
+DOC_KINDS = ["listing", "page", "programme", "report"]
+# Bins of words read on the web for an event (exposure), for standardised prevalence.
+WORDS_BINS = [(1000, "<1k"), (5000, "1-5k"), (20000, "5-20k"), (100000, "20-100k"), (None, ">=100k")]
 CONF_RANK = {"low": 0, "medium": 1, "high": 2}
 FURNITURE_REGIONS = {"nav", "header", "footer", "aside"}
 NO_EVENT = "(not tied to an event)"
@@ -97,7 +118,11 @@ RELEVANCE = ["substantive", "name_or_title_only", "list_or_tag", "off_topic_sens
 SCENARIOS = {"A": "all organisations", "B": "without organisations named in the event title",
              "C": "confidence >= --min-confidence (or include=1)", "D": "C without organisations named in the title",
              "C_curated": "C without curated places, site UI, noise and event names"}
-LAYER_SETS = {"L1-L3": {"L1", "L2", "L3"}, "L1+L2": {"L1", "L2"}}
+# L3 is split by host: L3s = linked pages and PDFs on the event's own host (or a
+# subdomain of it, or it of them), L3x = other hosts. L1-L3s is the default.
+LAYER_SETS = {"L1-L3s": {"L1", "L2", "L3s"}, "L1-L3": {"L1", "L2", "L3"}, "L1+L2": {"L1", "L2"}}
+DEFAULT_LAYERS = "L1-L3s"
+SUBLEVELS = ["L1", "L2", "L3s", "L3x"]
 
 # Colour-blind-safe categorical slots (validated reference palette): themes take
 # slots 1-3, the three agenda streams slots 4, 7 and 6, always with a legend.
@@ -176,6 +201,25 @@ def norm_link(u: str) -> str:
     u = s(u)
     u = re.sub(r"^https?://(?:www\.)?", "", u.split("#")[0], flags=re.I)
     return u.rstrip("/").casefold()
+
+
+def norm_doc(u: str) -> str:
+    """Document identity of a link: host lower-cased, no scheme, no www., no fragment,
+    no trailing slash (the path keeps its case). Other values (agenda entries
+    'pdf:...#entry-3') are returned unchanged."""
+    u = s(u)
+    m = re.match(r"(?i)^https?://([^/?#]*)(.*)$", u)
+    if not m:
+        return u
+    host = m.group(1).lower()
+    host = host[4:] if host.startswith("www.") else host
+    rest = m.group(2).split("#")[0].rstrip("/")
+    return host + rest
+
+
+def same_host(a: str, b: str) -> bool:
+    """Same host, or one a subdomain of the other (www. removed)."""
+    return bool(a and b) and (a == b or a.endswith("." + b) or b.endswith("." + a))
 
 
 def host_of(u: str) -> str:
@@ -269,7 +313,9 @@ def short(text: str, n: int = 60) -> str:
 class Project:
     def __init__(self):
         import extract
+        global _NER_LIKE
         self.extract = extract
+        _NER_LIKE = frozenset(getattr(extract, "NER_LIKE_METHODS", None) or _NER_LIKE)
         self.canonical_key = extract.canonical_key
         self.URL_LIKE = getattr(extract, "URL_LIKE", re.compile(r"(?:https?://|www\.)\S+"))
         self.detect_language = getattr(extract, "detect_language", None)
@@ -331,8 +377,17 @@ class Project:
         return {"INT": "International", "ONLINE": "Online"}.get(iso, iso)
 
     def is_platform(self, link: str) -> bool:
+        """Platform, social-media, pad and form hosts: their links do not make a series."""
         h = host_of(link)
-        return bool(h) and self.host_matches(h, self.platform_hosts)
+        if not h:
+            return False
+        if self.host_matches(h, self.platform_hosts):
+            return True
+        skip = getattr(self.extract, "is_skip_host", None)
+        try:
+            return bool(skip(h)) if skip else False
+        except Exception:  # noqa: BLE001
+            return False
 
 
 # ==========================================================================
@@ -568,6 +623,23 @@ class InputError(Exception):
     pass
 
 
+# Words in a source's address or title that make a long list of organisations a
+# programme, partner list or call (the F2 rule for masters without doc_kind).
+_PROGRAMME_HINT = re.compile(r"program|programm|agenda|line-?up|speaker|referent|intervenant|partners?\b|partenaires|"
+                             r"unterst[uü]tzer|signatair|signator|ondertekenaar|aufruf|appel|call-to|b[uü]ndnis|"
+                             r"who-we-are|wer-wir-sind|qui-sommes-nous", re.I)
+CONTEXT_KINDS = OrderedDict([("linked report", "report"), ("about another year", "other_year"),
+                             ("other pages", "site_level"), ("not tied", "not_tied"), ("copy of", "copy"),
+                             ("left out by --source-codes", "source_codes")])
+
+
+def _reason_kind(reason: str) -> str:
+    for prefix, kind in CONTEXT_KINDS.items():
+        if reason.startswith(prefix):
+            return kind
+    return "other"
+
+
 class Analysis:
     """Reads one results folder and builds the analysis-ready tables (events,
     ties, theme units) that every analysis below works on."""
@@ -584,6 +656,9 @@ class Analysis:
         self.diag: List[dict] = []
         self.tables: "OrderedDict[str, Tuple[List[dict], List[str]]]" = OrderedDict()
         self.facts: Dict[str, object] = {}
+        self.common_words: Set[str] = set()
+        self.source_override: Dict[str, bool] = {}
+        self.source_codes: List[dict] = []
 
     # ------------------------------------------------------------ helpers
     def warn(self, msg: str, *args) -> None:
@@ -623,7 +698,8 @@ class Analysis:
     def load(self) -> None:
         a = self.a
         path, net = read_master(self.results, "master_network", ["event_organisations", "menus_and_footers",
-                                                                 "all_events", "sources", "excluded_sources", "about"])
+                                                                 "all_events", "sources", "excluded_sources", "about",
+                                                                 "context_organisations"])
         if path is None:
             raise InputError(f"master_network.xlsx or master_network.csv not found in {self.results}")
         self.inputs["master_network"] = path
@@ -643,6 +719,15 @@ class Analysis:
             raise InputError(f"events.csv not found in {self.results} (and master_network has no all_events sheet)")
         self.net_fields, self.net_rows = net["event_organisations"]
         self.menu_rows = net["menus_and_footers"][1]
+        # Rows that are not evidence of taking part in the event (newer masters): linked
+        # reports, other pages of a site, rows about another year, copies. A CSV master
+        # keeps them in master_network_context.csv.
+        self.ctx_fields, self.ctx_rows = net["context_organisations"]
+        if not self.ctx_rows and path.suffix == ".csv":
+            self.ctx_fields, self.ctx_rows = read_csv(self.results / "master_network_context.csv")
+        if self.ctx_rows:
+            self.inputs["context_organisations"] = path if path.suffix == ".xlsx" else (
+                self.results / "master_network_context.csv")
         self.th_fields, self.th_rows = th["theme_instances"]
         self.th_menu_rows = th["menus_and_sidebars"][1]
         self.sources_sheet = net["sources"][1]
@@ -697,7 +782,26 @@ class Analysis:
         for r in self.th_rows:
             if r.get("theme") and r["theme"] not in names:
                 names.append(r["theme"])
-        self.themes = names or ["colonialism", "racism", "fascism"]
+        # Focus themes drive the theme filter and every prevalence and any-theme measure;
+        # descriptive themes (global_south, authoritarianism) are reported on their own.
+        # The rows say which is which (focus_theme); older masters: the '#: descriptive'
+        # marks of the theme file.
+        if "focus_theme" in self.th_fields:
+            desc = {r.get("theme", "") for r in self.th_rows + self.th_menu_rows
+                    if s(r.get("focus_theme")).casefold() == "no"}
+            focus = {r.get("theme", "") for r in self.th_rows + self.th_menu_rows
+                     if s(r.get("focus_theme")).casefold() != "no"}
+            # themes without rows follow the file's marks
+            desc |= set(getattr(self.ts, "descriptive", ()) or ()) - focus if self.ts else set()
+            how = "focus_theme column of master_themes"
+        else:
+            desc = set(getattr(self.ts, "descriptive", ()) or ()) if self.ts else set()
+            how = "'#: descriptive' marks of the theme file" if desc else "no descriptive themes"
+        desc.discard("")
+        self.descriptive = [x for x in names if x in desc]
+        self.themes = [x for x in names if x not in desc] or ["colonialism", "racism", "fascism"]
+        self.note("focus themes", "; ".join(self.themes))
+        self.note("descriptive themes (reported apart)", "; ".join(self.descriptive) or "none", how)
         for name in ("seed_links.json", "pages.csv", "sites.csv", "sources.csv", "summary.json"):
             self.optional(name)
         self.sources_rows = (self.optional_rows("sources.csv") if "sources.csv" in self.inputs
@@ -705,6 +809,8 @@ class Analysis:
         self._check_master_filter()
         self.org_codes = self._read_codes(a.org_codes, "org_codes") if a.org_codes else []
         self.event_codes = self._read_codes(a.event_codes, "event_codes") if a.event_codes else []
+        self.source_codes = self._read_codes(a.source_codes, "source_codes", "sources_to_code") \
+            if getattr(a, "source_codes", None) else []
         self.curated = bool(self.org_codes)
 
     def _check_master_filter(self) -> None:
@@ -725,13 +831,13 @@ class Analysis:
                 self.note(f"make_master.py theme filter: {what} kept", f"{kept}/{before}",
                           f"{int(before) - int(kept)} left out before analytics")
         if mf and mf != "none" and tf != mf:
-            strength = {"none": 0, "site": 1, "event": 1, "source": 2}
+            strength = {"none": 0, "site": 1, "event": 1, "direct": 1.5, "source": 2}
             if strength.get(tf, 0) <= strength.get(mf, 0):
                 self.warn("master_network was built with --theme-filter %s, so organisations from sources "
                           "without a theme hit are not in it. --theme-filter %s here cannot bring them back; "
                           "rebuild the masters with make_master.py --theme-filter none first", mf, tf)
 
-    def _read_codes(self, path: str, label: str) -> List[dict]:
+    def _read_codes(self, path: str, label: str, sheet: str = "") -> List[dict]:
         p = Path(path)
         if not p.exists():
             raise InputError(f"--{label.replace('_', '-')}: {p} not found")
@@ -740,7 +846,11 @@ class Analysis:
             import openpyxl
             wb = openpyxl.load_workbook(p, read_only=True, data_only=True)
             try:
-                return _sheet_rows(wb.worksheets[0])[1]
+                ws = wb[sheet] if sheet and sheet in wb.sheetnames else wb.worksheets[0]
+                rows = _sheet_rows(ws)[1]
+                if label == "org_codes" and "no_series" in wb.sheetnames and ws.title != "no_series":
+                    rows += _sheet_rows(wb["no_series"])[1]    # the template's second organisation sheet
+                return rows
             finally:
                 wb.close()
         return read_csv(p)[1]
@@ -800,16 +910,32 @@ class Analysis:
         # event_codes: series, duplicates, country overrides
         self.alias: Dict[str, str] = {}
         self.ev_codes = {}
+        # Events merged by the pipeline keep their old keys in merged_from: codes written
+        # for an old key (its event_id) apply to the merged event.
+        old_ids: Dict[str, str] = {}
+        for ev in self.events:
+            for old in (x.strip() for x in s(ev["_row"].get("merged_from")).split(";")):
+                if old:
+                    old_ids.setdefault(sha12(f"k\x1f{old}"), ev["event_id"])
+                    self.by_key.setdefault(old, ev["event_id"])
+        remapped = 0
         for c in self.event_codes:
             eid = c.get("event_id", "")
+            if eid not in self.ev_by_id and eid in old_ids:
+                c = dict(c, event_id=old_ids[eid])
+                eid = c["event_id"]
+                remapped += 1
             if eid not in self.ev_by_id:
                 if eid:
                     self.warn("event_codes: event_id %s is not in events.csv (ignored)", eid)
                 continue
             self.ev_codes[eid] = c
-            dup = c.get("duplicate_of", "")
+            dup = old_ids.get(c.get("duplicate_of", ""), c.get("duplicate_of", ""))
             if dup and dup in self.ev_by_id and dup != eid:
                 self.alias[eid] = dup
+        if remapped:
+            self.note("event_codes rows mapped through merged_from", remapped,
+                      "codes written for an event key that the pipeline has since merged")
         self._seed_entries()
         self._countries()
         for ev in self.events:
@@ -831,6 +957,39 @@ class Analysis:
                 except Exception:  # noqa: BLE001
                     ev["entry_lang"] = ""
         self.series_of = {e["event_id"]: e["series_id"] for e in self.events}
+        # Series whose editions carry different names (a shared link used by several events)
+        by_series = defaultdict(list)
+        for ev in self.events:
+            by_series[ev["series_id"]].append(ev)
+        try:
+            from events import series_tokens
+        except Exception:  # noqa: BLE001 - older or edited module
+            def series_tokens(name: str) -> Set[str]:
+                name = re.sub(r"[(\[][^)\]]*[)\]]", " ", name or "")
+                return set(re.findall(r"[^\W\d_]{3,}", name.casefold()))
+        multi = []
+        for sid, evs in sorted(by_series.items()):
+            names = list(dict.fromkeys(collapse(e["event"]) for e in evs))
+            if len(evs) < 2 or len(names) < 2:
+                continue
+            # names that share too few words (Jaccard below 0.4, as events.same_series) are other events
+            toks = [series_tokens(n) for n in names]
+            group = list(range(len(names)))
+            for i in range(len(names)):
+                for j in range(i + 1, len(names)):
+                    a_, b_ = toks[i], toks[j]
+                    if a_ and b_ and len(a_ & b_) / len(a_ | b_) >= 0.4:
+                        gi, gj = group[i], group[j]
+                        group = [gi if g == gj else g for g in group]
+            # Two name groups are mostly one event listed in two languages; three or more
+            # usually mean that different events share one link.
+            n_groups = len(set(group))
+            if n_groups >= 3:
+                multi.append({"series_id": sid, "n_events": len(evs), "n_names": n_groups,
+                              "names": " | ".join(short(n, 80) for n in names[:6])})
+        self.multi_name_series = multi
+        self.note("series whose editions carry three or more unrelated names", len(multi),
+                  "listed in the multi_name_series table; split them with event_codes.csv series_id")
 
     def _seed_entries(self) -> None:
         """Agenda entries of the seed PDFs (seed_links.json): entry text and the
@@ -1021,6 +1180,131 @@ class Analysis:
             y = self.page_year.get(url)
         return y
 
+    @staticmethod
+    def _doc_ids(row: dict, unit: str, layer: str) -> Tuple[str, str]:
+        """(source unit, document) of a row. Web links are compared without scheme, www.,
+        fragment and trailing slash; a copy (duplicate_document_of) is the same source and
+        document as its original, a translation (translation_of) the same document only."""
+        url = row.get("source_link", "")
+        if layer == "listing_seed":
+            return unit, unit
+        dup = s(row.get("duplicate_document_of"))
+        tr = s(row.get("translation_of"))
+        if layer == "listing_calendar":
+            return unit, norm_doc(url)
+        unit = norm_doc(dup or unit)
+        return unit, norm_doc(tr or dup or url)
+
+    def _sublevel(self, layer: str, url: str, eid: Optional[str]) -> str:
+        """L1, L2, L3s (a linked page or PDF on the event's own host) or L3x."""
+        lvl = TIE_LEVEL.get(layer, "L3")
+        if lvl != "L3":
+            return lvl
+        ev = self.ev_by_id.get(eid) if eid else None
+        return "L3s" if ev and same_host(host_of(url), ev["link_host"]) else "L3x"
+
+    def _doc_kinds(self) -> None:
+        """doc_kind of every tie: from the masters, else make_master.classify_document,
+        else the F2 rule (an L3 source naming more than 100 organisations whose address
+        and title have no programme or partner word is a report). --source-codes include
+        (1/0) overrides it. Then participation and context_reason for older masters."""
+        words: Dict[str, int] = {}
+        for r in self.sources_sheet or self.sources_rows:
+            w = s(r.get("words"))
+            if w.isdigit():
+                for u in (r.get("source_unit", ""), r.get("source_link", "")):
+                    if u:
+                        words.setdefault(u, int(w))
+                        words.setdefault(norm_doc(u), int(w))
+        self._words = words
+        min_rank = CONF_RANK[self.a.min_confidence]
+        orgs = defaultdict(set)
+        for t in self.ties:
+            if not t["in_menus"] and CONF_RANK.get(t["confidence"], 0) >= min_rank:
+                orgs[t["unit"]].add(t["raw_key"])
+        self._unit_orgs = {u: len(v) for u, v in orgs.items()}
+        missing = [t for t in self.ties if not t["doc_kind"]]
+        self.doc_kind_from = "masters (doc_kind column)"
+        self._classify = None
+        if missing:
+            try:
+                from make_master import classify_document
+                self._classify = classify_document
+                self.doc_kind_from = "make_master.classify_document (masters without doc_kind)"
+            except Exception as exc:  # noqa: BLE001 - older or edited module: the F2 rule
+                self.doc_kind_from = f"F2 rule (make_master.classify_document not usable: {type(exc).__name__})"
+        self._unit_kind: Dict[str, Tuple[str, str]] = {}
+        for t in missing:
+            t["doc_kind"], t["doc_kind_reason"] = self.doc_kind_of(t["unit"], t["layer"], t["source_link"],
+                                                                   t["source_title"], t["is_pdf"])
+        # --source-codes: include 1 keeps a source in the network whatever its doc_kind, 0 leaves it out
+        self.source_override: Dict[str, bool] = {}
+        for c in self.source_codes:
+            u = s(c.get("source_unit")) or s(c.get("source_link"))
+            inc = s(c.get("include"))
+            if u and inc in ("0", "1"):
+                self.source_override[u] = inc == "1"
+                self.source_override[norm_doc(u)] = inc == "1"
+        n_over = 0
+        for t in self.ties:
+            over = self.source_override.get(t["unit"])
+            if self.has_participation:
+                part = t["participation_master"]
+                reasons = [x for x in t["context_reason"].split("; ") if x]
+            else:
+                reasons = []
+                if t["doc_kind"] == "report":
+                    reasons.append("linked report or study")
+                if t["attribution"] == "other_year":
+                    reasons.append(f"about another year ({t['source_year'] or '?'})")
+                if t["attribution"] == "site_level":
+                    reasons.append("other pages of a site several events link to")
+                if t["attribution"] == "not_tied":
+                    reasons.append("not tied to an event")
+                part = not reasons
+            if over is not None:
+                n_over += 1
+                reasons = [x for x in reasons if not x.startswith("linked report")]
+                if over:
+                    part = part or not reasons
+                else:
+                    part = False
+                    reasons.append("left out by --source-codes")
+            t["participation"] = part
+            t["context_reason"] = "; ".join(reasons)
+            t["ctx_kinds"] = {_reason_kind(x) for x in reasons}
+            t["reference"] = (t["doc_kind"] == "report" and over is not True) or over is False
+        refs = {x["unit"]: x for x in self.ties if x["reference"]}
+        n_ev = len({x["unit"] for x in self.ties if x["reference"] and x["event_id"]})
+        self.note("doc_kind from", self.doc_kind_from, f"{len(missing)} rows classified here" if missing else "")
+        self.note("reference documents (doc_kind report) tied to an event", n_ev,
+                  f"{len(refs)} sources in all; " + "; ".join(f"{k} {v}" for k, v in sorted(Counter(
+                      ("pdf" if x["is_pdf"] else "page") for x in refs.values()).items())))
+        if self.source_codes:
+            self.note("--source-codes rows applied", n_over, f"{len(self.source_override) // 2 or 0} sources coded")
+        self.note("participation from", "masters (participation column)" if self.has_participation else
+                  "derived here: doc_kind report and placeholder events are context")
+
+    def doc_kind_of(self, unit: str, layer: str, url: str, title: str, is_pdf: bool) -> Tuple[str, str]:
+        if unit in self._unit_kind:
+            return self._unit_kind[unit]
+        n_orgs = self._unit_orgs.get(unit, 0)
+        w = self._words.get(unit) or self._words.get(url) or self._words.get(norm_doc(url)) or 0
+        if self._classify is not None:
+            try:
+                res = tuple(self._classify(url, title, w, n_orgs, is_pdf, layer))
+            except Exception as exc:  # noqa: BLE001
+                res = ("page", f"classify_document failed ({type(exc).__name__})")
+        elif layer in ("listing_seed", "listing_calendar"):
+            res = ("listing", "agenda entry or calendar cell")
+        elif TIE_LEVEL.get(layer, "L3") == "L3" and n_orgs > 100 and not _PROGRAMME_HINT.search(
+                f"{unquote(url)} {title}"):
+            res = ("report", f"F2 rule: L3 source naming {n_orgs} organisations, no programme or partner word")
+        else:
+            res = ("programme" if is_pdf and _PROGRAMME_HINT.search(f"{unquote(url)} {title}") else "page", "F2 rule")
+        self._unit_kind[unit] = res
+        return res
+
     def build_refs(self) -> None:
         self.page_year: Dict[str, int] = {}
         self.pages = self.optional_rows("pages.csv")
@@ -1030,9 +1314,11 @@ class Analysis:
                 self.page_year[pg.get("url", "")] = y
         # ---- network ties
         self.ties: List[dict] = []
-        counts = {"event_organisations": Counter(), "menus_and_footers": Counter()}
+        counts = {"event_organisations": Counter(), "context_organisations": Counter(), "menus_and_footers": Counter()}
         self.unmatched_names: Counter = Counter()
-        for sheet, rows in (("event_organisations", self.net_rows), ("menus_and_footers", self.menu_rows)):
+        has_part = "participation" in self.net_fields or bool(self.ctx_rows)
+        for sheet, rows in (("event_organisations", self.net_rows), ("context_organisations", self.ctx_rows),
+                            ("menus_and_footers", self.menu_rows)):
             for r in rows:
                 refs = self._explode(r, self.long_net)
                 for name, date, link, key in refs:
@@ -1044,16 +1330,29 @@ class Analysis:
                     pseudo = eid is None
                     layer = self._layer(r, link, pseudo)
                     url = r.get("source_link", "")
-                    unit = self._unit(r, layer, eid, name)
+                    unit, document = self._doc_ids(r, self._unit(r, layer, eid, name), layer)
                     sht = r.get("source_has_theme", "")
+                    att = s(r.get("attribution"))
+                    if not att:      # older masters: derived from the placeholder names
+                        att = ("not_tied" if name == NO_EVENT or not name else "site_level") if pseudo else "event"
+                    part = s(r.get("participation")).casefold()
+                    if not part:
+                        part = "no" if sheet == "context_organisations" else "yes"
                     self.ties.append({
                         "event_id": eid or "", "match": how, "pseudo_label": name if pseudo else "",
                         "organisation": collapse(r.get("organisation", "")),
                         "raw_key": r.get("org_key") or self.p.key(r.get("organisation", "")),
                         "confidence": r.get("confidence", "") or "low", "source_link": url, "unit": unit,
-                        "document": unit if layer == "listing_seed" else url,
+                        "document": document, "source_title": r.get("source_title") or r.get("page_title", ""),
+                        "is_pdf": truthy(r.get("is_pdf")) or layer == "linked_pdf",
                         "site": r.get("site", ""), "site_role": r.get("site_role", ""), "layer": layer,
                         "tie_level": TIE_LEVEL.get(layer, "L3"),
+                        "tie_sublevel": self._sublevel(layer, url, eid),
+                        "doc_kind": s(r.get("doc_kind")), "doc_kind_reason": s(r.get("doc_kind_reason")),
+                        "attribution": att, "source_year": s(r.get("source_year")),
+                        "duplicate_document_of": s(r.get("duplicate_document_of")),
+                        "translation_of": s(r.get("translation_of")),
+                        "participation_master": part == "yes", "context_reason": s(r.get("context_reason")),
                         "named_in_event_title": truthy(r.get("named_in_event_title")),
                         "in_menus": sheet == "menus_and_footers" or truthy(r.get("only_in_menus_or_footers")),
                         "found_by": r.get("found_by", ""), "mentions": int(r.get("mentions_on_source") or 1)
@@ -1062,7 +1361,10 @@ class Analysis:
                         "example": r.get("example_context", ""),
                         "doc_year": self._doc_year(url, r.get("page_date", "")), "sheet": sheet})
         for sheet, c in counts.items():
-            self.note(f"event refs, {sheet}", "; ".join(f"{k} {v}" for k, v in sorted(c.items())) or "0")
+            if sheet != "context_organisations" or self.ctx_rows:
+                self.note(f"event refs, {sheet}", "; ".join(f"{k} {v}" for k, v in sorted(c.items())) or "0")
+        self.has_participation = has_part
+        self._doc_kinds()
         self.ref_counts = counts
         if self.unmatched_names:
             self.note("unmatched event refs (dropped)", sum(self.unmatched_names.values()),
@@ -1092,6 +1394,14 @@ class Analysis:
             for cands in groups.values():
                 for g in cands:
                     self.instances.append(self._instance(g))
+        # Descriptive themes (global_south, authoritarianism) are kept apart: they do not
+        # drive the theme filter or any prevalence measure (table descriptive_themes).
+        desc = set(self.descriptive)
+        self.desc_instances = [i for i in self.instances if i["theme"] in desc]
+        self.instances = [i for i in self.instances if i["theme"] not in desc]
+        if self.desc_instances:
+            self.note("descriptive theme rows (kept apart)", len(self.desc_instances),
+                      "; ".join(f"{k} {v}" for k, v in sorted(Counter(i["theme"] for i in self.desc_instances).items())))
         self.theme_refs = [rf for inst in self.instances for rf in inst["refs"]]
         tc = Counter(rf["match"] for rf in self.theme_refs)
         self.note("event refs, theme rows", "; ".join(f"{k} {v}" for k, v in sorted(tc.items())))
@@ -1116,7 +1426,9 @@ class Analysis:
                 "context_after": r.get("context_after", ""), "source_link": r.get("source_link", ""),
                 "site": r.get("site", ""), "site_role": r.get("site_role", ""), "is_pdf": truthy(r.get("is_pdf")),
                 "region": r.get("region", ""), "furniture": furniture, "repeated": repeated, "dup": dup, "clean": not furniture and not dup,
-                "passage_id": sha12(r.get("source_link", "") + "\n" + collapse(sent).casefold()),
+                # the same sentence is the same passage (make_master.passage_id), wherever it is
+                "passage_id": s(r.get("passage_id")) or sha12(" ".join(sent.casefold().split())),
+                "page_title": r.get("page_title", ""), "doc_kind": s(r.get("doc_kind")),
                 "term_family": family, "language_section": section,
                 "subtheme": subtheme(theme, term), "stance": stance(term, sent[:max(0, low.find(tl))] if tl in low else ""),
                 "in_handle": bool(tl and re.search(r"[@#][\w.-]*" + re.escape(tl), low)),
@@ -1132,13 +1444,18 @@ class Analysis:
             eid, how = self._match(name, date, link, key)
             pseudo = eid is None
             lay = self._layer({**r, "layer": layer}, link, pseudo)
-            unit = self._unit(r, lay, eid, name)
+            unit, document = self._doc_ids(r, self._unit(r, lay, eid, name), lay)
             ev = self.ev_by_id.get(eid) if eid else None
             names.append(ev["event"] if ev else name)
+            kind = inst["doc_kind"] or self.doc_kind_of(unit, lay, inst["source_link"], inst["page_title"],
+                                                        inst["is_pdf"] or lay == "linked_pdf")[0]
+            over = self.source_override.get(unit)
             inst["refs"].append({"inst": inst, "event_id": eid or "", "match": how,
                                  "pseudo_label": name if pseudo else "", "layer": lay,
-                                 "tie_level": TIE_LEVEL.get(lay, "L3"), "unit": unit,
-                                 "document": unit if lay == "listing_seed" else inst["source_link"], "w": w})
+                                 "tie_level": TIE_LEVEL.get(lay, "L3"),
+                                 "tie_sublevel": self._sublevel(lay, inst["source_link"], eid), "unit": unit,
+                                 "document": document, "w": w, "doc_kind": kind,
+                                 "reference": (kind == "report" and over is not True) or over is False})
         inst["in_event_title"] = bool(tl) and any(tl in n.casefold() for n in names)
         inst["event_names"] = names
         return inst
@@ -1218,10 +1535,12 @@ def _derive(an: Analysis) -> None:
         src = t["source_has_theme"] if t["source_has_theme"] is not None else t["unit"] in units
         # Agenda entries of a seed PDF are judged one by one under 'site' too (as in make_master.py).
         seed = t["site_role"] == "seed" or "#entry-" in t["unit"]
+        ev_hit = bool(t["event_id"]) and t["event_id"] in evs
         t["pass"] = {"none": True, "source": src, "site": src if seed else t["site"] in sites,
-                     "event": (t["event_id"] in evs) if t["event_id"] else src}
+                     "event": ev_hit if t["event_id"] else src,
+                     "direct": src or (ev_hit and t["layer"] in DIRECT_LAYERS)}
         if (t["source_has_theme"] is None and tf != "none" and an.master_filter == tf
-                and t["sheet"] == "event_organisations" and not t["pass"][tf]):
+                and t["sheet"] != "menus_and_footers" and not t["pass"][tf]):
             # The masters were already filtered with this filter but do not say per row how
             # each source was judged (e.g. rebuilt from an old folder): trust that selection.
             t["pass"][tf] = True
@@ -1231,7 +1550,7 @@ def _derive(an: Analysis) -> None:
                  "already applied the theme filter '%s' to these masters", trusted, tf)
         an.note("rows kept on make_master.py's theme filter", trusted,
                 "source_has_theme blank; masters already filtered with the same filter")
-    real = [t for t in an.ties if t["sheet"] == "event_organisations"]
+    real = [t for t in an.ties if t["sheet"] != "menus_and_footers"]
     kept = [t for t in real if t["pass"][tf]]
     an.filter_counts = {
         "rows": (len(kept), len(real)),
@@ -1307,6 +1626,9 @@ def _derive(an: Analysis) -> None:
                 if rf["layer"] == "main_page":
                     lvl = "linked"
                 flags[rf["event_id"]][inst["theme"]].add(lvl)
+                # core: the listing, the landing page and the event's own host, without reports
+                if rf["tie_sublevel"] in ("L1", "L2", "L3s") and not rf["reference"]:
+                    flags[rf["event_id"]][inst["theme"]].add("core")
     for ev in an.events:
         f = flags.get(ev["event_id"], {})
         title_hits = an.ts.find(ev["event"]) if an.ts else {}
@@ -1316,9 +1638,18 @@ def _derive(an: Analysis) -> None:
             ev[f"{th}_landing"] = "landing" in lv
             ev[f"{th}_linked"] = "linked" in lv
             ev[f"{th}_any"] = bool(lv)
+            ev[f"{th}_core"] = "core" in lv
             ev[f"{th}_in_title"] = th in title_hits
-        for m in ("own", "landing", "linked", "any", "in_title"):
+        for m in ("own", "landing", "linked", "any", "core", "in_title"):
             ev[f"any_{m}"] = any(ev[f"{th}_{m}"] for th in an.themes)
+        ev["words_read_bin"] = words_bin(ev["n_words_web"])
+
+
+def words_bin(words: int) -> str:
+    for hi, lab in WORDS_BINS:
+        if hi is None or (words or 0) < hi:
+            return lab
+    return WORDS_BINS[-1][1]
 
 
 def _fold_umlaut(k: str) -> str:
@@ -1435,8 +1766,10 @@ def core_tables(an: Analysis) -> None:
     th = an.themes
     n_by_level = defaultdict(lambda: defaultdict(set))
     for t in an.ties:
-        if t["event_id"] and not t["in_menus"] and t["pass"][an.a.theme_filter]:
+        if t["event_id"] and not t["in_menus"] and t["pass"][an.a.theme_filter] and in_scope(t, an.a.network_scope):
             n_by_level[t["event_id"]][t["tie_level"]].add(t["org_key"])
+            if t["tie_level"] == "L3":
+                n_by_level[t["event_id"]][t["tie_sublevel"]].add(t["org_key"])
     rows = []
     for ev in an.events:
         r = {k: ev[k] for k in ("event_id", "event", "date", "start", "end", "year", "period", "event_link",
@@ -1446,18 +1779,20 @@ def core_tables(an: Analysis) -> None:
                   "country_method": ev["country_method"], "location_text": ev["location_text"],
                   "entry_words": ev["entry_words"], "entry_lang": ev["entry_lang"],
                   "has_link": ev["has_link"], "link_followed": ev["link_followed"],
-                  "has_web_text": ev["has_web_text"], "n_pages": ev["n_pages"], "n_words_web": ev["n_words_web"]})
-        for lv in ("L1", "L2", "L3"):
+                  "has_web_text": ev["has_web_text"], "n_pages": ev["n_pages"], "n_words_web": ev["n_words_web"],
+                  "words_read_bin": ev["words_read_bin"]})
+        for lv in ("L1", "L2", "L3", "L3s", "L3x"):
             r[f"n_orgs_{lv}"] = len(n_by_level[ev["event_id"]][lv])
         for t in th:
-            for m in ("own", "landing", "linked", "any", "in_title"):
+            for m in ("own", "landing", "linked", "any", "in_title", "core"):
                 r[f"{t}_{m}"] = ev[f"{t}_{m}"]
         rows.append(r)
     fields = ["event_id", "event", "date", "start", "end", "year", "period", "event_link", "event_key", "link_host",
               "series_id", "stream_primary", "streams", "n_streams", "countries", "country_names", "country_method",
               "location_text", "entry_words", "entry_lang", "has_link", "link_followed", "has_web_text", "n_pages",
               "n_words_web", "n_orgs_L1", "n_orgs_L2", "n_orgs_L3"] + [
-        f"{t}_{m}" for t in th for m in ("own", "landing", "linked", "any", "in_title")]
+        f"{t}_{m}" for t in th for m in ("own", "landing", "linked", "any", "in_title")] + [
+        "words_read_bin", "n_orgs_L3s", "n_orgs_L3x"] + [f"{t}_core" for t in th]
     an.table("events_enriched", rows, fields)
     # ---- ties
     rows = []
@@ -1471,11 +1806,16 @@ def core_tables(an: Analysis) -> None:
                      "year": t["year"], "countries": "; ".join(t["countries"]),
                      "doc_year": t["doc_year"] if t["doc_year"] else "undated",
                      "source_has_theme": t["pass"]["source"], "passes_theme_filter": t["pass"][an.a.theme_filter],
-                     "found_by": t["found_by"], "match": t["match"]})
+                     "found_by": t["found_by"], "match": t["match"], "tie_sublevel": t["tie_sublevel"],
+                     "doc_kind": t["doc_kind"], "attribution": t["attribution"],
+                     "participation": t["participation"], "context_reason": t["context_reason"],
+                     "duplicate_document_of": t["duplicate_document_of"], "translation_of": t["translation_of"],
+                     "sheet": t["sheet"]})
     an.table("ties", rows, ["event_id", "pseudo_label", "series_id", "org_key", "organisation", "canonical_org",
                             "actor_class", "confidence", "tie_level", "layer", "source_link", "document", "site",
                             "named_in_event_title", "in_menus", "year", "countries", "doc_year", "source_has_theme",
-                            "passes_theme_filter", "found_by", "match"])
+                            "passes_theme_filter", "found_by", "match", "tie_sublevel", "doc_kind", "attribution",
+                            "participation", "context_reason", "duplicate_document_of", "translation_of", "sheet"])
     # ---- theme units: (passage_id, theme, event)
     units: "OrderedDict[tuple, dict]" = OrderedDict()
     for inst in an.instances:
@@ -1496,7 +1836,8 @@ def core_tables(an: Analysis) -> None:
                     "in_event_title": inst["in_event_title"], "in_handle": inst["in_handle"],
                     "orgs_in_paragraph_keys": "; ".join(inst["org_keys"]),
                     "context_before": inst["context_before"], "sentence": inst["sentence"],
-                    "context_after": inst["context_after"], "source_link": inst["source_link"]}
+                    "context_after": inst["context_after"], "source_link": inst["source_link"],
+                    "tie_sublevel": rf["tie_sublevel"], "doc_kind": rf["doc_kind"]}
             u["_terms"].append(inst["term"])
             u["_fam"].append(inst["term_family"])
             u["w"] += rf["w"]
@@ -1515,7 +1856,7 @@ def core_tables(an: Analysis) -> None:
                                    "stance", "event_id", "pseudo_label", "w", "layer", "tie_level", "document", "site",
                                    "is_pdf", "doc_year", "event_year", "furniture", "repeated", "duplicate", "clean", "n_rows",
                                    "in_event_title", "in_handle", "orgs_in_paragraph_keys", "context_before",
-                                   "sentence", "context_after", "source_link"])
+                                   "sentence", "context_after", "source_link", "tie_sublevel", "doc_kind"])
 
 
 # ==========================================================================
@@ -1684,14 +2025,128 @@ def a3_ladder(an: Analysis) -> None:
     an.facts["unmapped_terms"] = sum(1 for i in an.instances if i["term_family"] == "(unmapped)")
 
 
+def doc_hygiene(an: Analysis) -> None:
+    """Sources that name nearly the same organisations (Jaccard >= 0.9, at least 15 each)
+    but are tied to different series: copies or near copies the pipeline did not mark
+    (duplicate_document_of), which would tie the same names to two series. Plus the
+    series whose editions carry different names (multi_name_series)."""
+    org_sets: Dict[str, Set[str]] = defaultdict(set)
+    ser: Dict[str, Set[str]] = defaultdict(set)
+    for t in an.ties:
+        if t["event_id"] and not t["in_menus"] and t["layer"] not in ("listing_seed", "listing_calendar"):
+            org_sets[t["unit"]].add(t["org_key"])
+            ser[t["unit"]].add(t["series_id"])
+    big = sorted(u for u, v in org_sets.items() if len(v) >= 15)
+    inv: Dict[str, List[str]] = defaultdict(list)
+    for u in big:
+        for k in org_sets[u]:
+            inv[k].append(u)
+    rows = []
+    for i, u in enumerate(big):
+        cand = Counter(v for k in org_sets[u] for v in inv[k] if v > u)
+        for v, inter in cand.items():
+            a, b = org_sets[u], org_sets[v]
+            if inter / (len(a) + len(b) - inter) >= 0.9 and ser[u] != ser[v]:
+                rows.append({"source_a": u, "source_b": v, "n_a": len(a), "n_b": len(b),
+                             "jaccard": round(inter / (len(a) + len(b) - inter), 3),
+                             "series_a": "; ".join(sorted(ser[u]))[:300], "series_b": "; ".join(sorted(ser[v]))[:300]})
+    rows.sort(key=lambda r: (-r["jaccard"], -r["n_a"], r["source_a"], r["source_b"]))
+    an.table("similar_sources", rows, ["source_a", "source_b", "n_a", "n_b", "jaccard", "series_a", "series_b"])
+    an.note("source pairs with nearly the same organisations, tied to different series", len(rows),
+            "Jaccard >= 0.9, at least 15 organisations each; see similar_sources")
+    an.table("multi_name_series", an.multi_name_series, ["series_id", "n_events", "n_names", "names"])
+
+
+def a3b_documents(an: Analysis) -> None:
+    """Per event: distinct documents and passages with a (focus) theme hit, by tie level,
+    and whether one document gives more than half of the event's theme rows (a long
+    report can carry hundreds of rows). Plus the descriptive themes, reported apart."""
+    per: Dict[str, dict] = {}
+    for inst in an.instances:
+        if inst["furniture"]:      # as the event theme flags: repeated passages count, furniture does not
+            continue
+        for rf in inst["refs"]:
+            if not rf["event_id"]:
+                continue
+            p = per.setdefault(rf["event_id"], {"rows": 0, "docs": Counter(), "pass": set(),
+                                                "sd": defaultdict(set), "sp": defaultdict(set)})
+            p["rows"] += 1
+            p["docs"][rf["document"]] += 1
+            p["pass"].add(inst["passage_id"])
+            p["sd"][rf["tie_sublevel"]].add(rf["document"])
+            p["sp"][rf["tie_sublevel"]].add(inst["passage_id"])
+    rows = []
+    for eid, p in per.items():
+        ev = an.ev_by_id[eid]
+        top, k = sorted(p["docs"].items(), key=lambda x: (-x[1], x[0]))[0]
+        r = {"event_id": eid, "event": ev["event"], "year": ev["year"], "theme_rows": p["rows"],
+             "documents": len(p["docs"]), "passages": len(p["pass"])}
+        for lv in SUBLEVELS:
+            r[f"documents_{lv}"] = len(p["sd"].get(lv, ()))
+            r[f"passages_{lv}"] = len(p["sp"].get(lv, ()))
+        r.update({"top_document": pdf_display(top), "top_document_rows": k, "top_document_share": share(k, p["rows"]),
+                  "one_document_dominates": k / p["rows"] > 0.5 and len(p["docs"]) >= 2})
+        rows.append(r)
+    rows.sort(key=lambda r: (not r["one_document_dominates"], -r["theme_rows"], r["event_id"]))
+    an.table("event_theme_documents", rows, ["event_id", "event", "year", "theme_rows", "documents", "passages"]
+             + [f"{x}_{lv}" for lv in SUBLEVELS for x in ("documents", "passages")]
+             + ["top_document", "top_document_rows", "top_document_share", "one_document_dominates"])
+    flagged = [r for r in rows if r["one_document_dominates"]]
+    an.facts["events_one_document_dominates"] = len(flagged)
+    an.note("events where one document gives more than half of the theme rows", len(flagged),
+            "; ".join(f"{short(r['event'], 40)} ({r['top_document_rows']}/{r['theme_rows']})" for r in flagged[:5]))
+    # ---- descriptive themes (global_south, authoritarianism): counted, never filtering
+    focus_ev = {rf["event_id"] for i in an.instances if not i["furniture"] for rf in i["refs"] if rf["event_id"]}
+    drows = []
+    for th in an.descriptive:
+        insts = [i for i in an.desc_instances if i["theme"] == th]
+        cl = [i for i in insts if i["clean"]]
+        evs = {rf["event_id"] for i in insts if not i["furniture"] for rf in i["refs"] if rf["event_id"]}
+        forms = Counter(i["term"].casefold() for i in cl)
+        drows.append({"theme": th, "raw_rows": len(insts), "clean_rows": len(cl),
+                      "passages": len({i["passage_id"] for i in cl}),
+                      "documents": len({i["refs"][0]["document"] if i["refs"] else i["source_link"] for i in cl}),
+                      "sites": len({i["site"] for i in cl}), "events_any": len(evs),
+                      "events_with_a_focus_theme": len(evs & focus_ev), "events_without_a_focus_theme": len(evs - focus_ev),
+                      "surface_forms": "; ".join(f"{k} ({v})" for k, v in forms.most_common(8))})
+    if not an.descriptive:
+        an.skipped["descriptive_themes"] = "no descriptive theme in the masters or the theme file"
+    an.table("descriptive_themes", drows, ["theme", "raw_rows", "clean_rows", "passages", "documents", "sites",
+                                           "events_any", "events_with_a_focus_theme", "events_without_a_focus_theme",
+                                           "surface_forms"])
+
+
 # ==========================================================================
 # A4 theme prevalence (event as unit)
 # ==========================================================================
 # Event-level measures. own, any_all and in_title are counted over all events of the group;
 # landing, linked and any_web only over the events whose link was read (has_web_text).
-MEASURES = ["own", "landing", "linked", "any_web", "any_all", "in_title"]
-WEB_MEASURES = {"landing", "linked", "any_web"}
+# core: the listing (L1), the landing page (L2) and pages and PDFs on the event's own host
+# (L3s), without linked reports; less dependent on how much linked text was read.
+MEASURES = ["own", "landing", "linked", "any_web", "any_all", "in_title", "core"]
+WEB_MEASURES = {"landing", "linked", "any_web", "core"}
 MEASURE_FLAG = {"any_web": "any", "any_all": "any"}
+
+
+def _std_share(an: Analysis, base: List[dict], t: str, flag: str) -> Optional[float]:
+    """Direct standardisation over the words-read bins: the group's share in each bin,
+    weighted by the bin distribution of all events with web text (a bin the group has
+    no event in takes the pooled share of that bin)."""
+    std, pooled = an.std_bins
+    if not base or not std:
+        return None
+    by = defaultdict(lambda: [0, 0])
+    for e in base:
+        b = by[e["words_read_bin"]]
+        b[0] += 1
+        b[1] += bool(e[f"{t}_{flag}"])
+    tot = sum(std.values())
+    val = 0.0
+    for b, nb in std.items():
+        n, k = by[b] if b in by else (0, 0)
+        rate = k / n if n else pooled.get((t, flag, b), 0.0)
+        val += nb / tot * rate
+    return round(val, 4)
 
 
 def _prev_rows(an: Analysis, dimension: str, groups: Dict[tuple, List[dict]], measures=MEASURES) -> List[dict]:
@@ -1708,15 +2163,37 @@ def _prev_rows(an: Analysis, dimension: str, groups: Dict[tuple, List[dict]], me
                 rows.append({"dimension": dimension, "group": grp, "stream": st, "theme": t, "measure": m,
                              "denominator": "events with web text" if m in WEB_MEASURES else "all events",
                              "n_events": len(base), "k_events": k, "share": share(k, len(base)),
-                             "wilson_lo": lo, "wilson_hi": hi})
+                             "wilson_lo": lo, "wilson_hi": hi,
+                             "share_std": _std_share(an, base, t, flag) if m in WEB_MEASURES and
+                             dimension != "words_read_bin" else None})
     return rows
 
 
 PREV_FIELDS = ["dimension", "group", "stream", "theme", "measure", "denominator", "n_events", "k_events", "share", "wilson_lo",
-               "wilson_hi"]
+               "wilson_hi", "share_std"]
 
 
 def a4_prevalence(an: Analysis) -> None:
+    # Exposure: events with web text by words read (the standard for share_std)
+    web_all = [e for e in an.events if e["has_web_text"]]
+    std = Counter(e["words_read_bin"] for e in web_all)
+    pooled = {}
+    for t in an.themes + ["any"]:
+        for flag in {MEASURE_FLAG.get(m, m) for m in WEB_MEASURES}:
+            for b, nb in std.items():
+                k = sum(1 for e in web_all if e["words_read_bin"] == b and e[f"{t}_{flag}"])
+                pooled[(t, flag, b)] = k / nb
+    an.std_bins = (dict(std), pooled)
+    order = [lab for _, lab in WORDS_BINS]
+    gb = defaultdict(list)
+    for e in an.events:
+        gb[(e["words_read_bin"], "all")].append(e)
+    rows = _prev_rows(an, "words_read_bin", gb, sorted(WEB_MEASURES))
+    rows.sort(key=lambda r: (order.index(r["group"]), r["theme"], r["measure"]))
+    an.table("prev_words_read", rows, PREV_FIELDS)
+    grad = {r["group"]: r for r in rows if r["theme"] == "any" and r["measure"] == "any_web" and r["n_events"]}
+    an.facts["words_read_gradient"] = {b: (grad[b]["k_events"], grad[b]["n_events"], grad[b]["share"])
+                                       for b in order if b in grad}
     g = defaultdict(list)
     gy = defaultdict(list)
     for ev in an.events:
@@ -1849,14 +2326,28 @@ def _org_conf(an: Analysis) -> Dict[str, int]:
     return an._conf
 
 
-def scenario_ties(an: Analysis, sc: str, layers: str = "L1-L3", tf: Optional[str] = None) -> List[dict]:
+def in_scope(t: dict, scope: str) -> bool:
+    """participation: evidence of taking part (default); reports: also rows whose only
+    context reason is a linked report; all: every row (context rows too)."""
+    if scope == "all" or t["participation"]:
+        return True
+    return scope == "reports" and bool(t["ctx_kinds"]) and t["ctx_kinds"] <= {"report"}
+
+
+def scenario_ties(an: Analysis, sc: str, layers: Optional[str] = None, tf: Optional[str] = None,
+                  scope: Optional[str] = None) -> List[dict]:
     tf = tf or an.a.theme_filter
+    scope = scope or an.a.network_scope
     min_rank = CONF_RANK[an.a.min_confidence]
     conf = _org_conf(an)
-    keep_levels = LAYER_SETS[layers]
+    keep_levels = LAYER_SETS[layers or an.a.layers]
     out = []
     for t in an.ties:
-        if not t["event_id"] or t["in_menus"] or not t["pass"][tf] or t["tie_level"] not in keep_levels:
+        if not t["event_id"] or t["in_menus"] or not t["pass"][tf]:
+            continue
+        if t["tie_level"] not in keep_levels and t["tie_sublevel"] not in keep_levels:
+            continue
+        if not in_scope(t, scope):
             continue
         k = t["org_key"]
         if org_dropped(an, k):
@@ -1890,11 +2381,12 @@ def bipartite(an: Analysis, ties: List[dict], level: str = "series"):
         ei["countries"].update(ev["countries"])
         ei["streams"].update(ev["streams"])
         a = agg.setdefault((e, o), {"editions": set(), "sources": set(), "docs": set(), "levels": set(),
-                                    "title": False, "conf": 0, "years": set()})
+                                    "sub": set(), "title": False, "conf": 0, "years": set()})
         a["editions"].add(t["event_id"])
         a["sources"].add(t["unit"])
         a["docs"].add(t["document"])
         a["levels"].add(t["tie_level"])
+        a["sub"].add(t["tie_sublevel"])
         a["title"] = a["title"] or t["named_in_event_title"]
         a["conf"] = max(a["conf"], CONF_RANK.get(t["confidence"], 0))
         if ev["year"]:
@@ -1911,135 +2403,326 @@ def bipartite(an: Analysis, ties: List[dict], level: str = "series"):
                        actor_class=org_class(an, k))
         G.add_edge(e, o, n_editions=len(a["editions"]), n_sources=len(a["sources"]), n_docs=len(a["docs"]),
                    tie_levels="; ".join(sorted(a["levels"])), min_tie_level=min(a["levels"]),
+                   tie_sublevel="; ".join(x for x in SUBLEVELS if x in a["sub"]),
                    title_named=a["title"], confidence=inv[a["conf"]],
                    first_year=min(a["years"]) if a["years"] else "", last_year=max(a["years"]) if a["years"] else "")
     return G
 
 
-def project(G):
-    """Newman-weighted organisation projection: an event with k >= 2 organisations
-    adds 1/(k-1) to every pair of them ("shared" counts the events)."""
-    import networkx as nx
-    acc: Dict[tuple, list] = {}
-    for e in sorted(n for n in G if n.startswith("E:")):
-        nb = sorted(G[e])
-        k = len(nb)
-        if k < 2:
-            continue
-        w = 1 / (k - 1)
-        for i in range(k):
-            a = nb[i]
-            for j in range(i + 1, k):
-                x = acc.get((a, nb[j]))
-                if x is None:
-                    acc[(a, nb[j])] = [w, 1]
-                else:
-                    x[0] += w
-                    x[1] += 1
-    P = nx.Graph()
-    P.add_nodes_from((n, G.nodes[n]) for n in sorted(n for n in G if n.startswith("O:")))
-    P.add_edges_from((a, b, {"weight": round(w, 6), "shared": c}) for (a, b), (w, c) in acc.items())
-    return P
+class Projection:
+    """Newman-weighted organisation projection held as arrays (numpy): an event with
+    k >= 2 organisations adds 1/(k-1) to every pair of them; `shared` counts the
+    events. Pair i < j of the sorted organisation list is edge (a[x], b[x]) with
+    weight W[x] (rounded to 6 places) and C[x] shared events. Only what the analysis
+    needs is offered (degree, membership, edge count, one edge's weights); networkx
+    graphs are built for the backbone only, a full projection graph of millions of
+    pairs would not fit in memory."""
+
+    def __init__(self, G):
+        import numpy as np
+        self.G = G
+        self.orgs = sorted(n for n in G if n.startswith("O:"))
+        idx = {o: i for i, o in enumerate(self.orgs)}
+        n = len(self.orgs)
+        codes, ws = [], []
+        for e in sorted(x for x in G if x.startswith("E:")):
+            nb = np.array(sorted(idx[m] for m in G[e]), dtype=np.int64)
+            k = len(nb)
+            if k < 2:
+                continue
+            i, j = np.triu_indices(k, 1)
+            codes.append(nb[i] * n + nb[j])
+            ws.append(np.full(len(i), 1.0 / (k - 1)))
+        if codes:
+            # bincount adds the weights in event order, as the pair-by-pair loop did
+            u, inv = np.unique(np.concatenate(codes), return_inverse=True)
+            self.W = np.round(np.bincount(inv, weights=np.concatenate(ws)), 6)
+            self.C = np.bincount(inv)
+            self.a, self.b = u // n, u % n
+        else:
+            self.a = self.b = self.C = np.zeros(0, dtype=np.int64)
+            self.W = np.zeros(0)
+        deg = np.bincount(self.a, minlength=n) + np.bincount(self.b, minlength=n)
+        self._deg = {o: int(deg[i]) for i, o in enumerate(self.orgs)}
+        self._idx = idx
+
+    def __contains__(self, node) -> bool:
+        return node in self._deg
+
+    def __len__(self) -> int:
+        return len(self.orgs)
+
+    def degree(self, node) -> int:
+        return self._deg[node]
+
+    def number_of_edges(self) -> int:
+        return int(len(self.a))
+
+    def edge(self, u: str, v: str) -> Optional[dict]:
+        """{'weight', 'shared'} of the pair u-v, or None."""
+        import numpy as np
+        i, j = sorted((self._idx[u], self._idx[v]))
+        x = np.flatnonzero((self.a == i) & (self.b == j))
+        return {"weight": float(self.W[x[0]]), "shared": int(self.C[x[0]])} if len(x) else None
+
+
+def project(G) -> Projection:
+    """Newman-weighted organisation projection of a bipartite event x organisation graph."""
+    return Projection(G)
+
+
+def _disparity_mask(n: int, a, b, W, alpha: float):
+    """Disparity filter (Serrano et al. 2009) on edge arrays: keep edge ij if
+    (1 - w_ij/s_i)^(k_i - 1) < alpha from either endpoint with degree >= 2."""
+    import numpy as np
+    deg = np.bincount(a, minlength=n) + np.bincount(b, minlength=n)
+    st = np.bincount(a, weights=W, minlength=n) + np.bincount(b, weights=W, minlength=n)
+    keep = np.zeros(len(a), bool)
+    for x in (a, b):
+        k = deg[x]
+        ok = k >= 2
+        p = np.ones(len(a))
+        p[ok] = (1 - W[ok] / st[x[ok]]) ** (k[ok] - 1)
+        keep |= ok & (p < alpha)
+    return keep
 
 
 def disparity(P, alpha: float):
-    """Disparity filter (Serrano et al. 2009): keep edge ij if (1 - w_ij/s_i)^(k_i - 1) < alpha
-    from either endpoint with degree >= 2."""
+    """Disparity backbone as a networkx graph (nodes keep the attributes of the
+    bipartite graph; edges keep weight and shared). P is a Projection, or a weighted
+    networkx graph."""
     import networkx as nx
-    keep = set()
-    for n in P:
-        k = P.degree(n)
-        if k < 2:
-            continue
-        st = P.degree(n, weight="weight")
-        for m, d in P[n].items():
-            if (1 - d["weight"] / st) ** (k - 1) < alpha:
-                keep.add((n, m) if n < m else (m, n))
+    import numpy as np
+    if not isinstance(P, Projection):
+        nodes = sorted(P)
+        idx = {o: i for i, o in enumerate(nodes)}
+        rows = sorted((min(idx[u], idx[v]), max(idx[u], idx[v]), float(d.get("weight", 1.0)), int(d.get("shared", 1)))
+                      for u, v, d in P.edges(data=True))
+        a = np.array([r[0] for r in rows], dtype=np.int64)
+        b = np.array([r[1] for r in rows], dtype=np.int64)
+        W = np.array([r[2] for r in rows], dtype=float)
+        C = np.array([r[3] for r in rows], dtype=np.int64)
+        attrs = P.nodes
+    else:
+        nodes, a, b, W, C, attrs = P.orgs, P.a, P.b, P.W, P.C, P.G.nodes
+    k = _disparity_mask(len(nodes), a, b, W, alpha)
     B = nx.Graph()
-    for a, b in sorted(keep):
-        B.add_node(a, **P.nodes[a])
-        B.add_node(b, **P.nodes[b])
-        B.add_edge(a, b, **P[a][b])
+    for i, j, w, c in sorted((nodes[x], nodes[y], float(w), int(c)) for x, y, w, c in zip(a[k], b[k], W[k], C[k])):
+        B.add_node(i, **attrs[i])
+        B.add_node(j, **attrs[j])
+        B.add_edge(i, j, weight=round(w, 6), shared=c)
     return B
 
 
+_STATS_CACHE: Dict[tuple, dict] = {}
+
+
 def graph_stats(G, alpha: float) -> dict:
+    """Size, components, projection and backbone figures of a bipartite graph. Cached
+    by its tie set: identical selections (e.g. the 'none' rows of filtered masters)
+    are computed once."""
     import networkx as nx
+    import numpy as np
+    key = (alpha, frozenset((u, v) if u < v else (v, u) for u, v in G.edges()), frozenset(G.nodes()))
+    hit = _STATS_CACHE.get(key)
+    if hit is not None:
+        return dict(hit)
     orgs = [n for n in G if n.startswith("O:")]
     evs = [n for n in G if n.startswith("E:")]
     comps = sorted((len(c) for c in nx.connected_components(G)), reverse=True) if len(G) else []
     P = project(G)
+    n = len(P.orgs)
     top_share = None
     if evs and P.number_of_edges():
         big = max(sorted(evs), key=G.degree)
-        S = set(G[big])
-        inside = sum(1 for a, b in P.edges if a in S and b in S)
-        top_share = round(inside / P.number_of_edges(), 4)
-    B = disparity(P, alpha)
-    B2 = disparity(P, 0.2)
-    return {"orgs": len(orgs), "nodes_events": len(evs), "orgs_in_2plus": sum(1 for o in orgs if G.degree(o) >= 2),
-            "edges": G.number_of_edges(), "components": len(comps), "giant_nodes": comps[0] if comps else 0,
-            "proj_edges": P.number_of_edges(), "top_event_share_of_proj_edges": top_share,
-            "backbone_nodes": B.number_of_nodes(), "backbone_edges": B.number_of_edges(),
-            "backbone02_nodes": B2.number_of_nodes(), "backbone02_edges": B2.number_of_edges(), "_P": P, "_B": B}
+        S = np.zeros(n, bool)
+        for m in G[big]:
+            S[P._idx[m]] = True
+        top_share = round(float((S[P.a] & S[P.b]).sum()) / P.number_of_edges(), 4)
+    out = {"orgs": len(orgs), "nodes_events": len(evs), "orgs_in_2plus": sum(1 for o in orgs if G.degree(o) >= 2),
+           "edges": G.number_of_edges(), "components": len(comps), "giant_nodes": comps[0] if comps else 0,
+           "proj_edges": P.number_of_edges(), "top_event_share_of_proj_edges": top_share}
+    for al, tag in ((alpha, "backbone"), (0.2, "backbone02")):
+        k = _disparity_mask(n, P.a, P.b, P.W, al)
+        out[tag + "_nodes"] = int(len(np.union1d(P.a[k], P.b[k])))
+        out[tag + "_edges"] = int(k.sum())
+    _STATS_CACHE[key] = out
+    return dict(out)
+
+
+SENS_FIELDS = ["theme_filter", "master_theme_filter", "scenario", "description", "variant", "layers", "node_level",
+               "rows", "events", "series", "orgs", "orgs_in_2plus", "edges", "components", "giant_nodes",
+               "proj_edges", "top_event_share_of_proj_edges", "backbone_nodes", "backbone_edges",
+               "backbone_a02_nodes", "backbone_a02_edges"]
+SCOPE_LABEL = {"participation": "participation (default)", "all": "all rows (--network-scope all)"}
+
+
+def cap_ties(ties: List[dict], n: int) -> List[dict]:
+    """At most n organisations per source: most mentions first, then confidence, then key."""
+    best: Dict[str, Dict[str, tuple]] = defaultdict(dict)
+    for t in ties:
+        sc = (t["mentions"], CONF_RANK.get(t["confidence"], 0))
+        if sc > best[t["unit"]].get(t["org_key"], (-1, -1)):
+            best[t["unit"]][t["org_key"]] = sc
+    keep = {u: {k for k, _ in sorted(d.items(), key=lambda x: (-x[1][0], -x[1][1], x[0]))[:n]}
+            for u, d in best.items()}
+    return [t for t in ties if t["org_key"] in keep[t["unit"]]]
+
+
+def l4_ties(an: Analysis, sc: str) -> List[dict]:
+    """Context rows with attribution site_level ('(other pages of SITE)') attributed to the
+    site's series when the site's event-tied rows all belong to one series (tie level L4)."""
+    site_series: Dict[str, Set[str]] = defaultdict(set)
+    site_event: Dict[str, str] = {}
+    for t in an.ties:
+        if t["event_id"] and not t["in_menus"]:
+            site_series[t["site"]].add(t["series_id"])
+            site_event[t["site"]] = min(site_event.get(t["site"], t["event_id"]), t["event_id"])
+    min_rank = CONF_RANK[an.a.min_confidence]
+    conf = _org_conf(an)
+    out = []
+    for t in an.ties:
+        if (t["event_id"] or t["in_menus"] or t["attribution"] != "site_level" or not t["pass"][an.a.theme_filter]
+                or len(site_series.get(t["site"], ())) != 1 or org_dropped(an, t["org_key"])):
+            continue
+        k = t["org_key"]
+        if sc in ("C", "D", "C_curated") and not (conf.get(k, 0) >= min_rank
+                                                  or s(an.codes.get(k, {}).get("include")) in ("1", "yes")):
+            continue
+        if sc == "C_curated" and org_class(an, k) in DROP_CLASSES:
+            continue
+        eid = site_event[t["site"]]
+        out.append(dict(t, event_id=eid, series_id=an.series_of[eid], tie_level="L4", tie_sublevel="L4"))
+    return out
+
+
+def _sens_row(an: Analysis, ties: List[dict], f: str, sc: str, variant: str, layers: str, level: str) -> dict:
+    G = bipartite(an, ties, level)
+    st = graph_stats(G, an.a.backbone_alpha)
+    return {"theme_filter": f, "master_theme_filter": an.master_filter or "unknown", "scenario": sc,
+            "description": SCENARIOS[sc], "variant": variant, "layers": layers, "node_level": level,
+            "rows": len(ties), "events": len({t["event_id"] for t in ties}),
+            "series": len({t["series_id"] for t in ties}), "orgs": st["orgs"], "orgs_in_2plus": st["orgs_in_2plus"],
+            "edges": st["edges"], "components": st["components"], "giant_nodes": st["giant_nodes"],
+            "proj_edges": st["proj_edges"], "top_event_share_of_proj_edges": st["top_event_share_of_proj_edges"],
+            "backbone_nodes": st["backbone_nodes"], "backbone_edges": st["backbone_edges"],
+            "backbone_a02_nodes": st["backbone02_nodes"], "backbone_a02_edges": st["backbone02_edges"]}
 
 
 def a5_network(an: Analysis) -> None:
     tf = an.a.theme_filter
     scs = ["A", "B", "C", "D"] + (["C_curated"] if an.curated else [])
     an.default_sc = "C_curated" if an.curated else "C"
+    scope = an.a.network_scope
     rows = []
     for f in dict.fromkeys([tf, "none"]):
         for sc in scs:
             for layers in LAYER_SETS:
                 ties = scenario_ties(an, sc, layers, f)
                 for level in ("edition", "series"):
-                    G = bipartite(an, ties, level)
-                    st = graph_stats(G, an.a.backbone_alpha)
-                    rows.append({"theme_filter": f, "master_theme_filter": an.master_filter or "unknown",
-                                 "scenario": sc, "description": SCENARIOS[sc], "layers": layers,
-                                 "node_level": level, "rows": len(ties),
-                                 "events": len({t["event_id"] for t in ties}),
-                                 "series": len({t["series_id"] for t in ties}), "orgs": st["orgs"],
-                                 "orgs_in_2plus_" + ("events" if level == "edition" else "series"): st["orgs_in_2plus"],
-                                 "edges": st["edges"], "components": st["components"], "giant_nodes": st["giant_nodes"],
-                                 "proj_edges": st["proj_edges"],
-                                 "top_event_share_of_proj_edges": st["top_event_share_of_proj_edges"],
-                                 "backbone_nodes": st["backbone_nodes"], "backbone_edges": st["backbone_edges"],
-                                 "backbone_a02_nodes": st["backbone02_nodes"], "backbone_a02_edges": st["backbone02_edges"]})
-    for r in rows:
-        r["orgs_in_2plus"] = r.pop("orgs_in_2plus_events", None) if r["node_level"] == "edition" else r.pop(
-            "orgs_in_2plus_series", None)
-    an.table("sensitivity", rows, ["theme_filter", "master_theme_filter", "scenario", "description", "layers", "node_level", "rows", "events",
-                                   "series", "orgs", "orgs_in_2plus", "edges", "components", "giant_nodes",
-                                   "proj_edges", "top_event_share_of_proj_edges", "backbone_nodes", "backbone_edges",
-                                   "backbone_a02_nodes", "backbone_a02_edges"])
+                    rows.append(_sens_row(an, ties, f, sc, SCOPE_LABEL[scope], layers, level))
+    # Variants of the default network (series level, default layers): what the defaults leave out
+    dsc, lay = an.default_sc, an.a.layers
+    # Rows per tie level and kind of source in the default scenario (all layers), every row and
+    # the participation rows: L1 is structurally small (agenda entries name few organisations).
+    tl = []
+    for sc_scope in ("all", "participation"):
+        agg = defaultdict(lambda: [0, set(), set()])
+        for x in scenario_ties(an, dsc, "L1-L3", scope=sc_scope):
+            a_ = agg[(x["tie_sublevel"], "pdf" if x["layer"] == "linked_pdf" else
+                      "listing" if x["tie_level"] == "L1" else "page")]
+            a_[0] += 1
+            a_[1].add(x["org_key"])
+            a_[2].add(x["unit"])
+        for (lv, kind), (n, o, u) in sorted(agg.items()):
+            tl.append({"scenario": dsc, "rows_in": "every row" if sc_scope == "all" else "participation rows",
+                       "tie_sublevel": lv, "kind": kind, "rows": n, "orgs": len(o), "sources": len(u)})
+    an.table("tie_levels", tl, ["scenario", "rows_in", "tie_sublevel", "kind", "rows", "orgs", "sources"])
+    base = scenario_ties(an, dsc)
+    variants = [("+context rows (every row, --network-scope all)", scenario_ties(an, dsc, scope="all")),
+                ("reports included", scenario_ties(an, dsc, scope="reports" if scope != "all" else "all")),
+                ("cap 50 organisations per source", cap_ties(base, 50)),
+                (f"{dsc} without common_word? suggestions", [t for t in base if t["org_key"] not in an.common_words]),
+                ("+L4: site-level rows to the site's only series", base + l4_ties(an, dsc))]
+    for label, ties in variants:
+        rows.append(_sens_row(an, ties, tf, dsc, label, lay, "series"))
+    an.l4_added = len(variants[-1][1]) - len(base)
+    an.note("L4 sensitivity: site-level rows attributed to the site's only series", an.l4_added,
+            "rows added to the default network in the '+L4' sensitivity row (never in the default)")
+    an.table("sensitivity", rows, SENS_FIELDS)
     an.sensitivity = rows
-    # ---- default scenario: series level, all layers
-    ties = scenario_ties(an, an.default_sc)
+    # ---- default scenario: series level, default layers and scope
+    ties = base
     an.default_ties = ties
     G = bipartite(an, ties, "series")
     an.G = G
     P = project(G)
     B = disparity(P, an.a.backbone_alpha)
     an.P, an.B = P, B
-    an.facts["default_graph"] = {"scenario": an.default_sc, "theme_filter": tf, "series": sum(
-        1 for n in G if n.startswith("E:")), "orgs": sum(1 for n in G if n.startswith("O:")),
-        "edges": G.number_of_edges(), "proj_edges": P.number_of_edges(), "backbone_nodes": B.number_of_nodes(),
-        "backbone_edges": B.number_of_edges()}
+    top = next((r["top_event_share_of_proj_edges"] for r in rows if r["scenario"] == dsc and r["layers"] == lay
+                and r["node_level"] == "series" and r["theme_filter"] == tf
+                and r["variant"] == SCOPE_LABEL[scope]), None)
+    an.facts["default_graph"] = {"scenario": an.default_sc, "theme_filter": tf, "network_scope": scope, "layers": lay,
+                                 "series": sum(1 for n in G if n.startswith("E:")),
+                                 "orgs": sum(1 for n in G if n.startswith("O:")),
+                                 "orgs_in_2plus": sum(1 for n in G if n.startswith("O:") and G.degree(n) >= 2),
+                                 "edges": G.number_of_edges(), "proj_edges": P.number_of_edges(),
+                                 "top_event_share_of_proj_edges": top, "backbone_nodes": B.number_of_nodes(),
+                                 "backbone_edges": B.number_of_edges()}
     n_orgs = an.facts["default_graph"]["orgs"]
     if n_orgs < 5:
         # e.g. a run of the seed agendas only: most entry names are low-confidence NER finds
         n_a = next((r["orgs"] for r in rows if r["theme_filter"] == tf and r["scenario"] == "A"
-                    and r["layers"] == "L1-L3" and r["node_level"] == "series"), 0)
+                    and r["layers"] == lay and r["node_level"] == "series"), 0)
         an.warn("The default network (scenario %s) has only %s (scenario A: %s). Centrality and "
                 "backbone figures are not meaningful; see the sensitivity table or try --min-confidence low",
                 an.default_sc, count_of(n_orgs, "organisation"), n_a)
     a6_centrality(an, ties, G, P, B)
+    a6b_communities(an, ties, G, B)
     an.exports = {an.default_sc: (G, B)}
     if an.default_sc != "A":
         GA = bipartite(an, scenario_ties(an, "A"), "series")
         an.exports["A"] = (GA, disparity(project(GA), an.a.backbone_alpha))
+
+
+def a6b_communities(an: Analysis, ties: List[dict], G, B) -> None:
+    """Louvain communities of the default backbone (weight, --seed), with their largest
+    members, countries and how many members rest on one source only."""
+    import networkx as nx
+    if not B.number_of_edges():
+        an.skipped["communities"] = "the default backbone has no ties"
+        an.table("communities", [], ["community", "size"])
+        return
+    comms = nx.community.louvain_communities(B, weight="weight", seed=an.a.seed)
+    comms = sorted((sorted(c) for c in comms), key=lambda c: (-len(c), c[0]))
+    mod = round(nx.community.modularity(B, comms, weight="weight"), 4)
+    an.facts["communities"] = {"n": len(comms), "n_10plus": sum(1 for c in comms if len(c) >= 10),
+                               "modularity": mod, "largest": len(comms[0])}
+    an.note("backbone communities (Louvain)", len(comms), f"modularity {mod}, seed {an.a.seed}")
+    srcs: Dict[str, Set[str]] = defaultdict(set)
+    ev_of: Dict[str, Set[str]] = defaultdict(set)
+    for t in ties:
+        srcs["O:" + t["org_key"]].add(t["unit"])
+        ev_of["O:" + t["org_key"]].add(t["event_id"])
+    rows = []
+    for i, c in enumerate(comms, 1):
+        for n in c:
+            B.nodes[n]["community"] = i
+            if n in G:
+                G.nodes[n]["community"] = i
+        top = sorted(c, key=lambda n: (-B.degree(n, weight="weight"), n))[:8]
+        cc = Counter(x for n in c for e in sorted(ev_of.get(n, ())) for x in an.ev_by_id[e]["countries"])
+        tot = sum(cc.values())
+        series = {m for n in c if n in G for m in G[n]}
+        names = Counter(G.nodes[m].get("label", m[2:]) for n in c if n in G for m in G[n])
+        rows.append({"community": i, "size": len(c),
+                     "top_members": "; ".join(B.nodes[n].get("label", n[2:]) for n in top),
+                     "dominant_countries": "; ".join(f"{k} {100 * v / tot:.0f} %" for k, v in cc.most_common(3)) if tot
+                     else "", "share_one_source": share(sum(1 for n in c if len(srcs.get(n, ())) <= 1), len(c)),
+                     "series_covered": len(series),
+                     "top_series": "; ".join(short(k, 50) for k, _ in names.most_common(3))})
+    an.table("communities", rows, ["community", "size", "top_members", "dominant_countries", "share_one_source",
+                                   "series_covered", "top_series"])
 
 
 def _betweenness(an: Analysis, G) -> Tuple[Dict[str, float], str]:
@@ -2100,10 +2783,13 @@ def a6_centrality(an: Analysis, ties: List[dict], G, P, B) -> None:
         tot = sum(cc.values())
         years = {an.ev_by_id[e]["year"] for e in evs if an.ev_by_id[e]["year"]}
         lv = {lev: len({t["series_id"] for t in ts if t["tie_level"] == lev}) for lev in ("L1", "L2", "L3")}
+        lv.update({lev: len({t["series_id"] for t in ts if t["tie_sublevel"] == lev}) for lev in ("L3s", "L3x")})
         rows.append({"org_key": k, "organisation": an.org_name.get(k, k), "actor_class": org_class(an, k),
                      "curated": yn(an.curated), "n_events": len(evs), "n_series": G.degree(o), "n_years": len(years),
                      "n_countries": len(cc), "countries": "; ".join(c for c, _ in cc.most_common()),
-                     "n_sites": len({t["site"] for t in ts}), "n_L1": lv["L1"], "n_L2": lv["L2"], "n_L3": lv["L3"],
+                     "n_sites": len({t["site"] for t in ts}), "n_sources": len({t["unit"] for t in ts}),
+                     "n_documents": len({t["document"] for t in ts}),
+                     "n_L1": lv["L1"], "n_L2": lv["L2"], "n_L3": lv["L3"], "n_L3s": lv["L3s"], "n_L3x": lv["L3x"],
                      "bip_degree": G.degree(o), "bip_betweenness": round(bc.get(o, 0.0), 6),
                      "backbone_degree": B.degree(o) if o in B else 0,
                      "backbone_strength": round(B.degree(o, weight="weight"), 4) if o in B else 0.0,
@@ -2114,7 +2800,8 @@ def a6_centrality(an: Analysis, ties: List[dict], G, P, B) -> None:
     rows.sort(key=lambda r: (-r["n_series"], -r["bip_betweenness"], r["org_key"]))
     an.org_centrality = rows
     an.table("org_centrality", rows, ["org_key", "organisation", "actor_class", "curated", "n_events", "n_series",
-                                      "n_years", "n_countries", "countries", "n_sites", "n_L1", "n_L2", "n_L3",
+                                      "n_years", "n_countries", "countries", "n_sites", "n_sources", "n_documents",
+                                      "n_L1", "n_L2", "n_L3", "n_L3s", "n_L3x",
                                       "bip_degree", "bip_betweenness", "backbone_degree", "backbone_strength",
                                       "in_backbone", "projection_degree", "hub_dependence", "hub_dependent",
                                       "core_2_2", "participation_coef_country"])
@@ -2123,10 +2810,36 @@ def a6_centrality(an: Analysis, ties: List[dict], G, P, B) -> None:
 # ==========================================================================
 # A7 theme x organisation association and bridging
 # ==========================================================================
+_LINKERS = re.compile(r"(?i)\b(?:gegen|against|contre|contro|contra|tegen|auf|on|sur|for|für|pour|per|para|"
+                      r"voor|without|ohne|sans|sin|senza|zonder|of|von|de|des|du|del|della|van|kein|keine|no|"
+                      r"stop|stopp)\b")
+
+
+def theme_named(an: Analysis, name: str) -> bool:
+    """Is the name a focus theme term ("Rassismus", "Nazis", "Le racisme") or headed by
+    one ("Struktureller Rassismus")? Such names co-occur with their theme by
+    construction, so they are left out of org_theme ("Bündnis gegen Rassismus" and
+    "Antifa Ost" are kept)."""
+    if not an.ts or not name:
+        return False
+    text = collapse(name)
+    hits = [h for th, hs in an.ts.find(text).items() if th in an.themes for h in hs]
+    if not hits:
+        return False
+    body = _ART.sub("", text.casefold())
+    if len(body.split()) == 1:
+        return True
+    for a, b, _ in hits:
+        if b >= len(text.rstrip(" .")) - 1 and not _LINKERS.search(text[:a]):
+            return True
+    return False
+
+
 def a7_org_theme(an: Analysis) -> None:
     th = an.themes
     # passage level (primary): organisations named in the paragraph of a clean theme passage
-    pas = defaultdict(lambda: {"passages": set(), "docs": set(), "series": set(), "example": ""})
+    pas = defaultdict(lambda: {"passages": set(), "docs": set(), "sites": set(), "series": set(), "example": ""})
+    named = {}
     for inst in an.instances:
         if not inst["clean"]:
             continue
@@ -2135,8 +2848,13 @@ def a7_org_theme(an: Analysis) -> None:
         for k in inst["org_keys"]:
             if org_dropped(an, k):
                 continue
+            if k not in named:
+                named[k] = theme_named(an, an.org_name.get(k, k))
+            if named[k]:
+                continue
             a = pas[(k, inst["theme"])]
             a["passages"].add(inst["passage_id"])
+            a["sites"].add(inst["site"])
             a["docs"].add(doc)
             a["series"].update(series)
             a["example"] = a["example"] or inst["passage_id"]
@@ -2144,7 +2862,7 @@ def a7_org_theme(an: Analysis) -> None:
     # Measured on all sources (theme filter "none") for the organisations the filter keeps,
     # so the inclusion criterion does not inflate the shares it is compared with.
     included = {t["org_key"] for t in an.default_ties}
-    base = [t for t in scenario_ties(an, an.default_sc, "L1-L3", "none") if t["org_key"] in included]
+    base = [t for t in scenario_ties(an, an.default_sc, None, "none") if t["org_key"] in included]
     # When make_master.py already applied a theme filter, the 'none' ties above are the
     # filtered ones: every series then has a theme hit by construction, which inflates
     # share, lift and shrunk. Those three are left blank in that case.
@@ -2169,6 +2887,11 @@ def a7_org_theme(an: Analysis) -> None:
     p0 = {t: share(sum(1 for x in all_series if t in series_theme.get(x, ())), len(all_series)) or 0.0 for t in th}
     rows = []
     keys = sorted(set(k for k, _ in pas) | set(org_series))
+    excluded = sorted(k for k in keys if named.setdefault(k, theme_named(an, an.org_name.get(k, k))))
+    if excluded:
+        an.note("organisations named after a theme (left out of org_theme)", len(excluded),
+                "; ".join(an.org_name.get(k, k) for k in excluded[:12]))
+    keys = [k for k in keys if not named[k]]
     for k in keys:
         for t in th:
             a = pas.get((k, t))
@@ -2188,29 +2911,41 @@ def a7_org_theme(an: Analysis) -> None:
                 r.update({"share": share(kk, n), "wilson_lo": lo,
                           "lift": round((kk / n) / p0[t], 3) if p0[t] else None,
                           "shrunk": round((kk + 5 * p0[t]) / (n + 5), 4)})
-            r["robust"] = (r["documents"] >= 2) or (ev_ok and kk >= 2)
+            # robust: two documents from two websites, or the event-level rule (only when the
+            # masters were not theme-filtered: otherwise every series has a hit by construction)
+            r["sites"] = len(a["sites"]) if a else 0
+            r["robust"] = (r["documents"] >= 2 and r["sites"] >= 2) or (ev_ok and kk >= 2 and not prefiltered)
             rows.append(r)
     an.table("org_theme", rows, ["org_key", "organisation", "actor_class", "theme", "passages", "documents",
                                  "series_passage", "n_series", "k_series", "k_title", "share", "wilson_lo", "lift",
-                                 "shrunk", "robust", "example_passage_id"])
+                                 "shrunk", "robust", "example_passage_id", "sites"])
     an.org_theme = rows
     an.facts["org_theme"] = {"orgs_in_passages": len({k for k, _ in pas}),
-                             "robust_pairs_passage": sum(1 for (k, t), a in pas.items() if len(a["docs"]) >= 2),
+                             "robust_pairs_passage": sum(1 for (k, t), a in pas.items()
+                                                         if len(a["docs"]) >= 2 and len(a["sites"]) >= 2),
                              "p0": None if prefiltered else p0}
     cen = {r["org_key"]: r for r in getattr(an, "org_centrality", [])}
     robust = defaultdict(list)
+    docs_of = defaultdict(set)
     for r in rows:
         if r["robust"]:
             robust[r["org_key"]].append(r["theme"])
+    for (k, _), a in pas.items():
+        docs_of[k] |= a["docs"]
+    nser = {k: len(v) for k, v in org_series.items()}
     br = []
-    for k, ts_ in sorted(robust.items(), key=lambda x: (-len(x[1]), x[0])):
+    for k, ts_ in robust.items():
+        if len(ts_) < 2:
+            continue        # bridging: robustly tied to two or more themes
         c = cen.get(k, {})
         br.append({"org_key": k, "organisation": an.org_name.get(k, k), "actor_class": org_class(an, k),
                    "n_themes_robust": len(ts_), "themes": "; ".join(ts_), "bridging": len(ts_) >= 2,
+                   "n_series": nser.get(k, 0), "documents": len(docs_of.get(k, ())),
                    "bip_betweenness": c.get("bip_betweenness"),
                    "participation_coef_country": c.get("participation_coef_country")})
+    br.sort(key=lambda r: (-r["n_series"], -r["documents"], -r["n_themes_robust"], r["org_key"]))
     an.table("org_bridging", br, ["org_key", "organisation", "actor_class", "n_themes_robust", "themes", "bridging",
-                                  "bip_betweenness", "participation_coef_country"])
+                                  "n_series", "documents", "bip_betweenness", "participation_coef_country"])
     an.facts["bridging_orgs"] = [r["organisation"] for r in br if r["bridging"]]
     # ---- theme co-occurrence at three levels
     sets = {"passage": defaultdict(set), "document": defaultdict(set), "series": defaultdict(set)}
@@ -2275,11 +3010,79 @@ SITE_UI_ANY = re.compile(r"\b(?:calendar|kalender|calendrier|outlook|ical|icalen
 
 
 # Methods that are as weak as NER on their own (extract.NER_LIKE_METHODS).
-_NER_LIKE = frozenset({"ner", "pattern_after"})
+# Project() replaces it with extract.NER_LIKE_METHODS when that exists.
+_NER_LIKE = frozenset({"ner", "pattern_after", "link_text", "website_elsewhere"})
 
 
 def _route(found_by: Set[str]) -> str:
     return "ner_only" if found_by and found_by <= _NER_LIKE else ("rule" if found_by else "unknown")
+
+
+_WEEKDAYS_FALLBACK = frozenset("""monday tuesday wednesday thursday friday saturday sunday montag dienstag mittwoch
+donnerstag freitag samstag sonnabend sonntag lundi mardi mercredi jeudi vendredi samedi dimanche lunes martes
+miércoles jueves viernes sábado domingo lunedì martedì mercoledì giovedì venerdì sabato domenica maandag dinsdag
+woensdag donderdag vrijdag zaterdag zondag segunda terça quarta quinta sexta mandag tirsdag onsdag torsdag fredag
+lørdag søndag""".split())
+
+
+def common_word_suggestions(an: Analysis, max_contexts: int = 6) -> Set[str]:
+    """Organisation keys to pre-fill as 'common_word?' in the curation template: weekdays
+    (8 languages), and one-word title-case names that are not acronyms when the
+    language's part-of-speech tagger reads them as an ordinary word (noun, adjective,
+    verb ...) in at least half of up to six of their example contexts
+    (extract.common_word_votes). Institutional compounds ("Bundesregierung"),
+    hyphenated organisation compounds ("Rosa-Luxemburg-Stiftung") and organisational
+    head nouns are exempt. Only suggestions: the default network keeps these names."""
+    t0 = time.time()
+    ex = an.p.extract
+    weekdays = frozenset(getattr(ex, "WEEKDAYS", None) or _WEEKDAYS_FALLBACK)
+    single = getattr(ex, "single_word_name", None)
+    exempt = getattr(ex, "_pos_exempt", None)
+    heads = set(getattr(ex, "HEAD_TO_TYPE", {}) or {})
+    votes_fn = getattr(ex, "common_word_votes", None)
+    tf = an.a.theme_filter
+    found: Set[str] = set()
+    ctx: Dict[str, List[Tuple[str, str]]] = defaultdict(list)
+    for t in an.ties:
+        if not t["pass"][tf]:
+            continue
+        k, name = t["org_key"], an.org_name.get(t["org_key"], t["organisation"])
+        if k in weekdays or name.casefold() in weekdays:
+            found.add(k)
+            continue
+        if " " in k.strip() or k in heads:
+            continue
+        ok = single(name) if single else bool(re.fullmatch(r"[A-ZÄÖÜÉ][a-zäöüßéèàç\-]+", name))
+        if not ok or (exempt and (exempt(name) or exempt(k))):
+            continue
+        ex_ = collapse(t["example"])
+        lst = ctx[k]
+        if ex_ and len(lst) < max_contexts and t["organisation"] in ex_ and all(c != ex_ for _, c in lst):
+            lst.append((t["organisation"], ex_))
+    an.facts["common_word_candidates"] = len(ctx)
+    if votes_fn is None:
+        an.skipped["common_word? POS votes"] = "extract.common_word_votes not available (weekdays only)"
+        return found
+    detect = an.p.detect_language or (lambda x: "")
+    items = []
+    for k, lst in sorted(ctx.items()):
+        for surface, c in lst:
+            try:
+                lang = detect(c)
+            except Exception:  # noqa: BLE001
+                lang = ""
+            if lang:
+                items.append((k, surface, c, lang))
+    try:
+        votes = votes_fn(items, max_per_key=max_contexts)
+    except Exception as exc:  # noqa: BLE001 - no tagger: weekdays only
+        an.warn("common_word? suggestions: POS votes failed (%s: %s); weekdays only", type(exc).__name__, exc)
+        return found
+    found |= {k for k, (n, c) in votes.items() if n >= 1 and c >= 0.5 * n}
+    log.info("common_word? suggestions: %d names (%d candidates tagged) in %.1f s", len(found), len(ctx),
+             time.time() - t0)
+    an.note("common_word? suggestions", len(found), f"{len(ctx)} one-word names tagged; weekdays always")
+    return found
 
 
 def a1_authority(an: Analysis, cap_rows: Optional[int] = None) -> None:
@@ -2316,9 +3119,13 @@ def a1_authority(an: Analysis, cap_rows: Optional[int] = None) -> None:
             flags.append("single_word_ner_only")
         if re.fullmatch(r"[A-Z0-9&.-]{2,6}", name):
             flags.append("unexpanded_acronym")
+        if real and all(t["reference"] for t in real):
+            flags.append("only_in_reference_docs")
         sug = ""
         if SITE_UI.match(k) or SITE_UI_ANY.search(k) or SITE_UI_ANY.search(name):
             sug = "site_ui?"
+        elif k in an.common_words:
+            sug = "common_word?"
         elif k in p.places or _is_place_name(p, name):
             sug = "place?"
         elif _COMPANY.search(name) or k in FOSSIL_ARMS:
@@ -2360,11 +3167,58 @@ def a1_authority(an: Analysis, cap_rows: Optional[int] = None) -> None:
             # suggest merging the less frequent key into the more frequent one
             if (n_of.get(other, 0), other) > (r["n_events"], r["org_key"]):
                 r["merge_into_suggested"] = other
-    rows.sort(key=lambda r: (-r["n_series"], -r["n_events"], r["org_key"]))
+    # Curation priority: 1 in two or more series of the default network, 2 in one series
+    # there through the listing or the landing page, 3 the rest, 4 no series at all.
+    G = getattr(an, "G", None)
+    l12 = {t["org_key"] for t in getattr(an, "default_ties", []) if t["tie_level"] in ("L1", "L2")}
+    for r in rows:
+        node = "O:" + r["org_key"]
+        deg = G.degree(node) if G is not None and node in G else 0
+        r["priority"] = 1 if deg >= 2 else 2 if deg == 1 and r["org_key"] in l12 else 3 if r["n_series"] else 4
+        r["in_default_network"] = deg > 0
+    rows.sort(key=lambda r: (r["priority"], -r["n_series"], -r["n_events"], r["org_key"]))
     an.authority = rows
+    an.facts["curation_priority"] = dict(sorted(Counter(r["priority"] for r in rows).items()))
+    an.sources_to_code = sources_to_code(an)
     an.merge_cands = cands
     an.precision_sample = precision_sample(an, rows)
     an.precision_rows = precision_readback(an, rows)
+
+
+SOURCE_FIELDS = ["source_unit", "title", "layer", "host_relation", "n_events", "n_orgs", "doc_kind",
+                 "doc_kind_reason", "suggested_class", "include", "notes"]
+HOST_RELATION = {"L1": "listing", "L2": "landing page", "L3s": "event's own host", "L3x": "other host"}
+
+
+def sources_to_code(an: Analysis) -> List[dict]:
+    """One row per source (page, PDF; not agenda entries or calendar cells) with its
+    organisations: what the analysis took it for (doc_kind) and an include column to
+    override that (1 = evidence of participation, 0 = leave out; --source-codes)."""
+    tf = an.a.theme_filter
+    agg: "OrderedDict[str, dict]" = OrderedDict()
+    for t in an.ties:
+        if not t["pass"][tf] or t["in_menus"] or t["layer"] in ("listing_seed", "listing_calendar"):
+            continue
+        a = agg.setdefault(t["unit"], {"t": t, "orgs": set(), "events": set(), "sub": Counter()})
+        a["orgs"].add(t["org_key"])
+        if t["event_id"]:
+            a["events"].add(t["event_id"])
+        a["sub"][t["tie_sublevel"]] += 1
+    rows = []
+    for u, a in agg.items():
+        t = a["t"]
+        sub = a["sub"].most_common(1)[0][0]
+        over = an.source_override.get(u)
+        kind = t["doc_kind"]
+        sug = ("reference?" if kind == "report" else "programme?" if kind == "programme" else
+               "list?" if len(a["orgs"]) > 100 else "")
+        rows.append({"source_unit": u, "title": short(t["source_title"], 120), "layer": t["layer"],
+                     "host_relation": HOST_RELATION.get(sub, sub) if a["events"] else "no event",
+                     "n_events": len(a["events"]), "n_orgs": len(a["orgs"]), "doc_kind": kind,
+                     "doc_kind_reason": t["doc_kind_reason"], "suggested_class": sug,
+                     "include": "" if over is None else ("1" if over else "0"), "notes": ""})
+    rows.sort(key=lambda r: (-r["n_orgs"], r["source_unit"]))
+    return rows
 
 
 def _is_place_name(p: Project, name: str) -> bool:
@@ -2563,6 +3417,7 @@ def a8_kwic(an: Analysis) -> dict:
                       "right_ctx": rw, "context_before": inst["context_before"], "sentence": inst["sentence"],
                       "context_after": inst["context_after"],
                       "event": "; ".join(dict.fromkeys(inst["event_names"]))[:1000],
+                      "event_level": any(rf["event_id"] for rf in refs),
                       "event_year": ev["year"] if ev else "", "doc_year": inst["doc_year"] or "undated",
                       "countries": "; ".join(ev["countries"]) if ev else "",
                       "stream": ev["stream_primary"] if ev else "", "layer": refs[0]["layer"] if refs else "",
@@ -2616,12 +3471,14 @@ def a8_kwic(an: Analysis) -> dict:
         u.setdefault("in_sample", False)
         u.setdefault("double_coded", False)
     an.facts["kwic"] = {"units": len(allu), "capped": len(capped), "sampled": len(sampled), "strata": len(frame),
-                        "double_coded": len(dbl)}
-    return {"all": allu, "capped": capped, "frame": frame}
+                        "double_coded": len(dbl), "sampled_not_event_level": sum(1 for u in sampled if not u["event_level"])}
+    return {"all": allu, "capped": capped, "frame": frame,
+            "sample": sorted(sampled, key=lambda u: (u["stratum"], u["passage_id"]))}
 
 
 KWIC_FIELDS = ["passage_id", "theme", "subtheme", "stance", "term_family", "left_ctx", "term", "right_ctx",
-               "sentence", "context_before", "context_after", "event", "event_year", "doc_year", "countries", "stream", "layer",
+               "sentence", "context_before", "context_after", "event", "event_level", "event_year", "doc_year", "countries",
+               "stream", "layer",
                "site", "source_link", "orgs", "in_event_title", "in_handle", "in_sample", "sample_weight",
                "double_coded", "relevance", "frame_function", "code_1", "code_2", "code_3", "climate_linkage", "memo",
                "coder"]
@@ -2788,7 +3645,7 @@ def chart_concentration(an: Analysis, plt, path: Path) -> None:
     _save(plt, fig, path)
 
 
-def _component_layout(G, seed: int) -> Dict[str, Tuple[float, float]]:
+def _component_layout(G, seed: int, weight: Optional[str] = "weight", spread: float = 1.6) -> Dict[str, Tuple[float, float]]:
     """Spring layout per connected component, the components packed in rows.
     One spring layout of a disconnected graph pushes the components far apart and
     squeezes each one, so labels in a dense component overlap."""
@@ -2808,8 +3665,14 @@ def _component_layout(G, seed: int) -> Dict[str, Tuple[float, float]]:
             p = {c[0]: (0.0, 0.0)}
         elif len(c) > 3 and nx.density(sub) >= 0.5:
             p = nx.circular_layout(sub, scale=r)     # near-cliques: a spring layout piles the labels up
+        elif len(c) > 30 and hasattr(nx, "forceatlas2_layout"):
+            # ForceAtlas2 (numpy only) with strong gravity keeps dense groups and their bridges
+            # readable where a spring layout throws a near-clique far out
+            p = nx.forceatlas2_layout(sub, max_iter=400, seed=seed, strong_gravity=True, gravity=0.5,
+                                      scaling_ratio=4.0, weight=weight)
+            p = nx.rescale_layout_dict(p, scale=r)
         else:
-            p = nx.spring_layout(sub, seed=seed, weight="weight", k=1.6 / len(c) ** 0.5, iterations=200, scale=r)
+            p = nx.spring_layout(sub, seed=seed, weight=weight, k=spread / len(c) ** 0.5, iterations=200, scale=r)
         for n, (px, py) in p.items():
             pos[n] = (x + r + float(px), y - r + float(py))
         x += 2 * r + 0.8
@@ -2818,25 +3681,34 @@ def _component_layout(G, seed: int) -> Dict[str, Tuple[float, float]]:
 
 
 def chart_backbone(an: Analysis, plt, path: Path) -> None:
-    """05: disparity backbone of the organisation projection (spring layout, fixed seed)."""
+    """05: the strongest organisations of the disparity backbone: the top --chart-nodes by
+    strength among those in two or more series (spring layout per component, fixed
+    seed; under 500 nodes networkx lays out with numpy alone, no scipy needed)."""
     import networkx as nx
-    B = an.B
+    B, G = an.B, an.G
+    n_top = max(1, int(getattr(an.a, "chart_nodes", 150) or 150))
+    multi = [n for n in B if n in G and G.degree(n) >= 2]
+    keep = sorted(multi, key=lambda n: (-B.degree(n, weight="weight"), n))[:n_top]
+    S = B.subgraph(keep).copy()
+    S.remove_nodes_from([n for n in list(S) if S.degree(n) == 0])
     fig, ax = plt.subplots(figsize=(10, 8))
     ax.set_axis_off()
-    title = (f"Organisation backbone, scenario {an.default_sc}, alpha {an.a.backbone_alpha} "
-             f"({count_of(B.number_of_nodes(), 'organisation')}, {count_of(B.number_of_edges(), 'tie')})"
+    title = (f"Organisation backbone, scenario {an.default_sc}, alpha {an.a.backbone_alpha}: the "
+             f"{count_of(S.number_of_nodes(), 'organisation')} with the highest strength among the "
+             f"{len(multi)} in two or more series (top {n_top}; {count_of(S.number_of_edges(), 'tie')} shown; "
+             f"whole backbone {B.number_of_nodes()} organisations, {B.number_of_edges()} ties)"
              + ("" if an.curated else "\n(uncurated: colours are the suggested_class guesses of "
                 "org_codes_template.xlsx, not codes)"))
-    ax.set_title(title, loc="left")
-    if not B.number_of_edges():
+    ax.set_title(title, loc="left", fontsize=8, wrap=True)
+    if not S.number_of_edges():
         # an empty projection (no two organisations share an event) is not the same as a strict alpha
-        msg = ("No backbone ties at this alpha" if an.P.number_of_edges() else
+        msg = ("No backbone ties among organisations in two or more series" if an.P.number_of_edges() else
                "No two organisations share an event series, so there is nothing to project")
-        ax.text(0.5, 0.5, msg, ha="center", va="center", transform=ax.transAxes,
-                color=INK2)
+        ax.text(0.5, 0.5, msg, ha="center", va="center", transform=ax.transAxes, color=INK2)
         _save(plt, fig, path)
         return
-    pos = _component_layout(B, an.a.seed)
+    # unweighted layout: the heaviest ties would otherwise pull whole clusters onto one point
+    pos = _component_layout(S, an.a.seed, weight=None, spread=2.4)
     ax.set_aspect("equal", adjustable="datalim")
     ax.margins(0.08)
     cen = {"O:" + r["org_key"]: r for r in an.org_centrality}
@@ -2846,24 +3718,27 @@ def chart_backbone(an: Analysis, plt, path: Path) -> None:
         if an.curated:
             return cen.get(n, {}).get("actor_class") or "not coded"
         return sug.get(n) or "no suggestion"
-    classes = sorted({cls(n) for n in B})
+    classes = sorted({cls(n) for n in S})
     col = {c: (INK2 if c in ("not coded", "no suggestion") else EXTRA_COLOURS[i % len(EXTRA_COLOURS)])
            for i, c in enumerate(classes)}
-    widths = [0.5 + 2 * d["weight"] for _, _, d in B.edges(data=True)]
-    nx.draw_networkx_edges(B, pos, ax=ax, width=widths, edge_color=GRID, alpha=0.9)
+    wmax = max(d["weight"] for _, _, d in S.edges(data=True)) or 1.0
+    widths = [0.4 + 2.6 * d["weight"] / wmax for _, _, d in S.edges(data=True)]
+    nx.draw_networkx_edges(S, pos, ax=ax, width=widths, edge_color=GRID, alpha=0.9)
     for c in classes:
-        nodes = sorted(n for n in B if cls(n) == c)
-        nx.draw_networkx_nodes(B, pos, nodelist=nodes, ax=ax, node_color=col[c],
-                               node_size=[40 + 40 * cen.get(n, {}).get("n_series", 1) for n in nodes],
-                               edgecolors=SURFACE, linewidths=1.5, label=c)
-    strength = sorted(B, key=lambda n: (-B.degree(n, weight="weight"), n))[:25]
+        nodes = sorted(n for n in S if cls(n) == c)
+        nx.draw_networkx_nodes(S, pos, nodelist=nodes, ax=ax, node_color=col[c],
+                               node_size=[20 + 12 * math.sqrt(G.degree(n)) for n in nodes],
+                               edgecolors=SURFACE, linewidths=1.0)
+        ax.scatter([], [], s=60, color=col[c], label=c)     # fixed legend marker, whatever the node sizes
+    strength = sorted(S, key=lambda n: (-B.degree(n, weight="weight"), n))[:30]
     ys = [y for _, y in pos.values()]
-    dy = 0.03 * ((max(ys) - min(ys)) or 1)
+    dy = 0.02 * ((max(ys) - min(ys)) or 1)
     lpos = {n: (x, y + dy) for n, (x, y) in pos.items()}     # labels just above their node
-    nx.draw_networkx_labels(B, lpos, labels={n: short(B.nodes[n].get("label", n[2:]), 28) for n in strength},
-                            ax=ax, font_size=7, font_color=INK)
-    ax.legend(title=("actor_class" if an.curated else "suggested_class") + " (size = series)", loc="lower left",
-              fontsize=7)
+    nx.draw_networkx_labels(S, lpos, labels={n: short(S.nodes[n].get("label", n[2:]), 28) for n in strength},
+                            ax=ax, font_size=6.5, font_color=INK)
+    ax.legend(title=("actor_class" if an.curated else "suggested_class")
+              + "\n(node size = 20 + 12 x sqrt(series);\nlabels: the 30 strongest)", loc="upper left",
+              bbox_to_anchor=(1.0, 1.0), fontsize=7, title_fontsize=7)
     _save(plt, fig, path)
 
 
@@ -2961,6 +3836,17 @@ def write_networks(an: Analysis, out: Path) -> List[str]:
         base = out / "network"
         for g, stem in ((G, f"bipartite_{sc}"), (B, f"org_backbone_{sc}")):
             made += [p.name for p in write_graph(g, base / stem)]
+        if sc == an.default_sc:
+            # the backbone's core: organisations in two or more series (small enough for Gephi at once)
+            import networkx as nx
+            core = B.subgraph([n for n in B if B.nodes[n]["n_series"] >= 2]).copy()
+            core.remove_nodes_from([n for n in list(core) if core.degree(n) == 0])
+            p = base / f"org_backbone_core_{sc}.gexf"
+            tmp = _atomic(p)
+            nx.write_gexf(clean_graph(core), str(tmp))
+            os.replace(tmp, p)
+            made.append(p.name)
+            an.facts["backbone_core"] = {"nodes": core.number_of_nodes(), "edges": core.number_of_edges()}
         suffix = "" if sc == an.default_sc else f"_{sc}"
         for g, stem in ((G, "bipartite"), (B, "backbone")):
             rows, fields = _node_rows(clean_graph(g))
@@ -2985,27 +3871,44 @@ SHEET_DOCS = OrderedDict([
                         "and theme flags per layer: own (listing text), landing (event link), linked (other pages "
                         "and PDFs), any, in_title."),
     ("ties", "One row per event x organisation x source, with tie level (L1 listing, L2 landing page, L3 other "
-             "linked pages and PDFs) and whether the source passes the theme filter."),
+             "linked pages and PDFs), tie_sublevel (L3s on the event's own host, L3x other hosts), doc_kind, "
+             "attribution, participation and context_reason, and whether the source passes the theme filter."),
     ("theme_units", "One row per passage x theme x event; passage_id is the stable key for coded workbooks."),
     ("measurement_ladder", "Each theme counted at seven levels, from raw rows to events."),
     ("concentration", "How much of the theme material comes from a few documents (eff_docs = 1 / sum of squared "
                       "shares)."),
     ("attribution", "Clean theme references and documents per layer and theme."),
+    ("event_theme_documents", "Per event: theme rows (outside menus and footers), distinct documents and passages, "
+                              "by tie sublevel; one_document_dominates when one document gives more than half "
+                              "of the rows (and the event has two or more documents)."),
+    ("descriptive_themes", "Descriptive themes (global_south, authoritarianism): counted, never used for the "
+                           "theme filter or the any-theme measures."),
+    ("similar_sources", "Source pairs naming nearly the same organisations (Jaccard >= 0.9, at least 15 each) "
+                        "but tied to different series: unmarked copies."),
+    ("multi_name_series", "Series (shared event link) whose editions carry three or more unrelated names: "
+                          "probably different events; split them with event_codes.csv series_id."),
     ("term_families", "Theme-file lines (term families) with their rows, passages, documents, events and surface "
                       "forms."),
-    ("prev_stream_period", "Theme prevalence with the event as unit, per period and stream. own, any_all and "
-                           "in_title use all events; landing, linked and any_web only the events whose link was "
-                           "read (column denominator). any_all is never lower than own; any_web counts fewer "
-                           "events because its denominator is smaller."),
+    ("prev_stream_period", "Theme prevalence (focus themes) with the event as unit, per period and stream. own, "
+                           "any_all and in_title use all events; landing, linked, any_web and core (listing, "
+                           "landing page and the event's own host, no reports) only the events whose link was "
+                           "read (column denominator), with share_std standardised over words read. any_all is "
+                           "never lower than own; any_web counts fewer events because its denominator is smaller."),
     ("prev_stream_year", "As prev_stream_period, per year."),
+    ("prev_words_read", "Web-layer prevalence by words read on the web for the event (exposure bins <1k ... "
+                        ">=100k). share_std in the other prev_* tables standardises over these bins."),
     ("prev_country", "As prev_stream_period, per event country (an event in two countries counts in both; "
                      "countries with fewer than 15 events pooled; headline_ok means at least 30 events)."),
     ("prev_lang", "Own-text prevalence per language of the agenda entry."),
     ("entry_rates", "Theme hits per 10,000 words of agenda entry text (Byar 95 % intervals) and the share of "
                     "entries with a hit."),
     ("page_rates", "Theme hits per 10,000 words of the sources that were read, per site role and kind."),
-    ("sensitivity", "The event x organisation network under scenarios A-D (and C_curated), for all layers and for "
-                    "L1+L2, at edition and series level, with and without the theme filter."),
+    ("sensitivity", "The event x organisation network under scenarios A-D (and C_curated), for the layer sets "
+                    "L1-L3s, L1-L3 and L1+L2, at edition and series level, with and without the theme filter; "
+                    "then variants of the default network (column variant): +context rows, reports included, "
+                    "cap 50 organisations per source, without common_word? suggestions, +L4 site-level rows."),
+    ("tie_levels", "Rows, organisations and sources per tie sublevel and kind of source in the default scenario, "
+                   "for every row and for the participation rows."),
     ("org_centrality", "Organisations of the default network: series, years, countries, bip_betweenness "
                        "(shortest-path betweenness on the event-organisation graph, normalised over all its "
                        "nodes by (n-1)(n-2)/2 as for a one-mode graph, not by the bipartite maximum), backbone "
@@ -3013,7 +3916,10 @@ SHEET_DOCS = OrderedDict([
     ("org_theme", "Organisation x theme: passage level (organisation named in the theme paragraph, counted in "
                   "documents) and event level (series whose own or landing text carries the theme). share, "
                   "lift and shrunk are blank when the masters were already theme-filtered (see summary.md, C11)."),
-    ("org_bridging", "Organisations robustly tied to two or more themes."),
+    ("communities", "Louvain communities of the default backbone (weight, --seed): size, strongest members, "
+                    "dominant countries, share of members seen in one source only, series covered."),
+    ("org_bridging", "Organisations robustly tied to two or more themes (robust: two documents from two "
+                     "websites, or the event-level rule on unfiltered masters), by series, then documents."),
     ("theme_cooccurrence", "Themes together in the same passage, document or series, with a leave-one-site-out "
                            "range."),
 ])
@@ -3044,7 +3950,8 @@ def write_analytics_workbook(an: Analysis, out: Path) -> None:
 
 XLSX_MAX_ROWS = 100_000
 
-AUTH_FIELDS = ["org_key", "organisation", "variants", "max_confidence", "found_by", "route", "n_events", "n_series",
+AUTH_FIELDS = ["org_key", "organisation", "priority", "variants", "max_confidence", "found_by", "route", "n_events",
+               "n_series", "in_default_network",
                "n_years", "years", "countries", "n_sources", "n_sites", "sites", "tie_levels", "only_in_event_title",
                "only_menus_footers", "theme_passages", "themes_in_paragraph", "example_context_1",
                "example_context_2", "suggested_class", "flags", "variant_group", "merge_into_suggested",
@@ -3065,10 +3972,25 @@ def write_org_template(an: Analysis, out: Path) -> None:
         "lists a stratified random sample to code first; once coded, analytics writes precision_by_stratum.",
         "suggested_class and flags are guesses from simple rules, not codes. merge_candidates lists pairs that "
         "may be the same organisation (umlaut variants are merged automatically).",
-        f"The list covers organisations from sources that pass the theme filter '{an.a.theme_filter}'.",
+        f"The list covers organisations from sources that pass the theme filter '{an.a.theme_filter}', context "
+        "rows included (flag only_in_reference_docs: named only in linked reports and studies).",
+        "priority: 1 = in two or more event series of the default network, 2 = in one series there through the "
+        "listing or the landing page, 3 = the rest; code in this order. Organisations in no series at all "
+        "(priority 4) are in the no_series sheet.",
+        "suggested_class 'common_word?' marks one-word names that read as ordinary words (weekdays, or a noun, "
+        "adjective or verb in their own contexts by the language's part-of-speech tagger). It is a suggestion: "
+        "set include 0 to drop such a name.",
+        "sources_to_code: every page and PDF with its organisations and what the analysis took it for "
+        "(doc_kind; 'report' sources are left out of the default network). Fill in include (1 = evidence of "
+        "participation, 0 = leave out), save the workbook and run analytics.py with --source-codes "
+        "org_codes_template.xlsx (or the sheet saved as CSV).",
         "Keys are re-derived from the organisation name when org_codes.csv is read, so a stale org_key only "
         "produces a warning."]]
-    sheets = [("organisations", an.authority, AUTH_FIELDS),
+    main = [r for r in an.authority if r["priority"] != 4]
+    no_series = [r for r in an.authority if r["priority"] == 4]
+    sheets = [("organisations", main, AUTH_FIELDS),
+              ("no_series", no_series, AUTH_FIELDS),
+              ("sources_to_code", an.sources_to_code, SOURCE_FIELDS),
               ("merge_candidates", an.merge_cands, ["key_a", "name_a", "key_b", "name_b", "reason", "score", "accept"]),
               ("precision_sample", an.precision_sample,
                ["stratum", "stratum_N", "n", "weight", "org_key", "organisation", "found_by", "n_events",
@@ -3082,6 +4004,8 @@ def write_org_template(an: Analysis, out: Path) -> None:
     write_xlsx(out / "org_codes_template.xlsx", sheets, validations={
         "organisations": {"include": ["1", "0"], "actor_class": ACTOR_CLASSES, "is_organisation": yn_,
                           "is_partial_name": ["yes", "no"]},
+        "no_series": {"include": ["1", "0"], "actor_class": ACTOR_CLASSES, "is_organisation": yn_},
+        "sources_to_code": {"include": ["1", "0"]},
         "merge_candidates": {"accept": ["yes", "no"]},
         "precision_sample": {"is_organisation": yn_, "is_partial_name": ["yes", "no"]}})
     if an.precision_rows:
@@ -3118,7 +4042,10 @@ def write_kwic(an: Analysis, out: Path, kw: dict) -> None:
         "brochure cannot dominate; all_units has every passage.",
         f"in_sample marks a stratified random sample (theme x layer group x period, proportional with at least 2 "
         f"per stratum, {an.a.sample_size} rows at most, seed {an.a.seed}); double_coded marks 25 % of it for a "
-        "second coder. sampling_frame lists the strata with their weights.",
+        "second coder. sampling_frame lists the strata with their weights; coding_sample holds the sampled "
+        "passages only, sorted by stratum, with sample_weight and double_coded.",
+        "event_level: 'no' when the passage is tied to no event (other pages of a website, or not tied); such "
+        "passages count for the theme ladder but not for event prevalence.",
         "passage_id is stable across runs: keep it when copying rows, it is the key for merging coded sheets back.",
         "Code relevance first (dropdown); the codebook sheet explains every column.",
         "Caveat C6: in agenda PDFs the context columns can include text of the neighbouring entry; attribute "
@@ -3128,6 +4055,7 @@ def write_kwic(an: Analysis, out: Path, kw: dict) -> None:
         rows = sorted([u for u in kw["capped"] if u["theme"] == t], key=lambda u: (not u["in_sample"],
                                                                                    u["stratum"], u["passage_id"]))
         sheets.append((t, rows, KWIC_FIELDS))
+    sheets.append(("coding_sample", kw["sample"], ["stratum"] + KWIC_FIELDS + ["document"]))
     sheets.append(("all_units", sorted(kw["all"], key=lambda u: (u["theme"], u["passage_id"])),
                    KWIC_FIELDS + ["document", "stratum"]))
     sheets.append(("sampling_frame", kw["frame"], ["stratum", "theme", "layer_group", "period", "N_h", "n_h",
@@ -3140,6 +4068,7 @@ def write_kwic(an: Analysis, out: Path, kw: dict) -> None:
     sheets.append(("lists", lists, ["relevance", "actor_class"]))
     val = {t: {"relevance": RELEVANCE} for t in an.themes}
     val["all_units"] = {"relevance": RELEVANCE}
+    val["coding_sample"] = {"relevance": RELEVANCE}
     write_xlsx(out / "kwic_for_coding.xlsx", sheets, validations=val)
 
 
@@ -3248,12 +4177,19 @@ def summary_md(an: Analysis, sm: dict) -> str:
                    if an.excluded_sources else "") + ".")
     # Kept rows that cannot enter the event network: no event (pseudo rows such as
     # "(not tied to an event)") or the organisation was seen only in menus and footers.
-    kept = [t for t in an.ties if t["sheet"] == "event_organisations" and t["pass"][a.theme_filter]]
+    kept = [t for t in an.ties if t["sheet"] != "menus_and_footers" and t["pass"][a.theme_filter]]
     no_ev = sum(1 for t in kept if not t["event_id"])
     menus = sum(1 for t in kept if t["event_id"] and t["in_menus"])
     if no_ev or menus:
         para.append(f"Of the kept rows, {no_ev} are not tied to an event and {menus} name an organisation "
                     "found only in menus or footers; neither enters the event network.")
+    ctx = Counter(k for t in kept if t["event_id"] and not t["in_menus"] and not t["participation"]
+                  for k in t["ctx_kinds"])
+    n_ctx = sum(1 for t in kept if t["event_id"] and not t["in_menus"] and not t["participation"])
+    para.append(f"Network scope '{a.network_scope}': {n_ctx} event-tied rows are context, not evidence of taking "
+                "part (" + (", ".join(f"{k} {v}" for k, v in sorted(ctx.items())) or "none") + "; doc_kind from "
+                f"{an.doc_kind_from})" + (", and the default network leaves them out" if a.network_scope ==
+                                          "participation" else ", but --network-scope all keeps them") + ".")
     mc = an.master_counts
     if mc:
         para.append("make_master.py's filter had already kept " + ", ".join(
@@ -3266,12 +4202,20 @@ def summary_md(an: Analysis, sm: dict) -> str:
     para.append("Organisations in the authority list (org_codes_template.xlsx, after the theme filter, "
                 "including those without an event or only in menus) by highest confidence: " + ", ".join(f"{k} {v}" for k, v in conf.items()) + ".")
     if dg:
-        para.append(f"The default network (scenario {dg['scenario']}, series level, all layers) has "
-                    f"{dg['series']} event series, {count_of(dg['orgs'], 'organisation')} and "
+        top = dg.get("top_event_share_of_proj_edges")
+        cm = an.facts.get("communities") or {}
+        para.append(f"The default network (scenario {dg['scenario']}, series level, layers {dg.get('layers', '')}, "
+                    f"scope {dg.get('network_scope', '')}) has "
+                    f"{dg['series']} event series, {count_of(dg['orgs'], 'organisation')} "
+                    f"({dg.get('orgs_in_2plus', 0)} in two or more series) and "
                     f"{count_of(dg['edges'], 'tie')}; its projection has "
-                    f"{count_of(dg['proj_edges'], 'organisation pair')}, of which the disparity backbone "
-                    f"(alpha {a.backbone_alpha}) keeps {dg['backbone_edges']} between "
-                    f"{count_of(dg['backbone_nodes'], 'organisation')}. Betweenness: {sm['betweenness']}.")
+                    f"{count_of(dg['proj_edges'], 'organisation pair')}"
+                    + (f" ({100 * top:.0f} % of them inside the largest event)" if top is not None else "")
+                    + f", of which the disparity backbone (alpha {a.backbone_alpha}) keeps {dg['backbone_edges']} "
+                    f"between {count_of(dg['backbone_nodes'], 'organisation')}"
+                    + (f"; Louvain finds {cm['n']} communities in it (modularity {cm['modularity']}, "
+                       f"{cm['n_10plus']} with 10 or more members)" if cm else "")
+                    + f". Betweenness: {sm['betweenness']}.")
     prec = an.facts.get("precision")
     if prec:
         para.append(f"Coded organisation precision (stratified estimate): strict {prec['precision']} "
@@ -3327,6 +4271,36 @@ def summary_md(an: Analysis, sm: dict) -> str:
         ("C10 Term list", "False matches exist (handles, place names, words from other languages). in_handle and "
          "in_event_title are flagged; per-family precision follows from coding."),
     ]
+    tl = {(r["rows_in"], r["tie_sublevel"]): 0 for r in an.tables.get("tie_levels", ([], []))[0]}
+    for r in an.tables.get("tie_levels", ([], []))[0]:
+        tl[(r["rows_in"], r["tie_sublevel"])] += r["rows"]
+    lv = {x: tl.get(("every row", x), 0) for x in SUBLEVELS}
+    caveats.append(("C12 Tie levels", f"L1 (the listing itself) is structurally small: agenda entries and "
+                    f"calendar cells name few organisations ({lv['L1']} rows in scenario {an.default_sc}, against "
+                    f"{lv['L2']} on landing pages, {lv['L3s']} on the event's own host (L3s) and {lv['L3x']} on "
+                    f"other hosts (L3x)). The default layer set is {a.layers}; the sensitivity table also gives "
+                    "L1-L3 and L1+L2."))
+    grad = an.facts.get("words_read_gradient") or {}
+    if grad:
+        lo_b, hi_b = next(iter(grad.items())), list(grad.items())[-1]
+        std = [r for r in an.prev_sp if r["stream"] == "all" and r["theme"] == "any" and r["measure"] == "any_web"
+               and r["group"] in [p_[2] for p_ in PERIODS]]
+        caveats.append(("C13 Prevalence depends on how much was read", f"The share of events with a theme on any "
+                        f"layer rises from {100 * (lo_b[1][2] or 0):.0f} % for events with {lo_b[0]} words read to "
+                        f"{100 * (hi_b[1][2] or 0):.0f} % for {hi_b[0]} (prev_words_read). share_std standardises "
+                        "the web-layer shares over these bins (the bin mix of all events with web text); by period, "
+                        "any_web is " + ", ".join(f"{r['group']} {100 * (r['share'] or 0):.0f} % crude, "
+                                                   f"{100 * (r['share_std'] or 0):.0f} % standardised" for r in std)
+                        + ". The core measure (listing, landing page and the event's own host, no reports) "
+                        "depends less on long linked documents."))
+    dom = an.facts.get("events_one_document_dominates")
+    if dom:
+        caveats.append(("C14 One document per event", f"For {dom} events one document gives more than half of "
+                        "the event's theme rows (event_theme_documents): raw theme rows are dominated by long "
+                        "PDFs. Count documents and passages, not rows."))
+    if an.descriptive:
+        caveats.append(("C15 Descriptive themes", f"{', '.join(an.descriptive)} are reported in descriptive_themes "
+                        "and never drive the theme filter or the any-theme measures."))
     if an.master_filter != "none":
         caveats.append(("C11 Inclusion criterion", "The masters were built with a theme filter, so the 'none' "
                         "rows of the sensitivity table equal the filtered ones, and the event-level share, lift "
@@ -3358,10 +4332,24 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--org-codes", help="curated org_codes.csv or .xlsx (read only)")
     ap.add_argument("--event-codes", help="curated event_codes.csv (read only)")
     ap.add_argument("--theme-filter", choices=THEME_FILTERS, default=None,
-                    help="inclusion criterion for the network: only sources with a theme hit (source), "
-                         "every source of a site (agenda entries still judged one by one) / event with a hit, or "
-                         "none (all sources). Default: the "
-                         "filter make_master.py recorded in the masters' about sheet, else source")
+                    help="inclusion criterion for the network: direct (as source, but the listing, the event's own "
+                         "page and its landing page count when any source of their event has a hit), source "
+                         "(only sources with a theme hit), site / event (every source of a site or event with a "
+                         "hit; agenda entries still judged one by one), or none (all sources). Default: the filter "
+                         "make_master.py recorded in the masters' about sheet, else direct")
+    ap.add_argument("--network-scope", choices=NETWORK_SCOPES, default="participation",
+                    help="participation (default): the network uses only rows that are evidence of taking part "
+                         "(no linked reports, other pages of a site, rows about another year or copies); all: "
+                         "every row, context_organisations included")
+    ap.add_argument("--layers", choices=list(LAYER_SETS), default=DEFAULT_LAYERS,
+                    help="tie levels of the default network: L1-L3s (default: listing, landing page and pages "
+                         "and PDFs on the event's own host), L1-L3 (all linked pages and PDFs too) or L1+L2")
+    ap.add_argument("--source-codes", metavar="FILE",
+                    help="sources_to_code sheet of org_codes_template.xlsx (or that sheet as CSV): include 1 keeps "
+                         "a source in the network whatever its doc_kind, 0 leaves it out (read only)")
+    ap.add_argument("--chart-nodes", type=int, default=150,
+                    help="organisations drawn in the backbone chart: the strongest of those in two or more "
+                         "series (default 150)")
     ap.add_argument("--min-confidence", choices=list(CONF_RANK), default="medium",
                     help="confidence for the default network scenario C (default medium)")
     ap.add_argument("--backbone-alpha", type=float, default=0.05, help="disparity filter alpha (default 0.05)")
@@ -3399,8 +4387,11 @@ def run(args) -> Analysis:
         core_tables(an)
         a2_coverage(an)
         a3_ladder(an)
+        a3b_documents(an)
+        doc_hygiene(an)
         a4_prevalence(an)
-        log.info("Networks (%s)", "betweenness, projections, backbones")
+        an.common_words = common_word_suggestions(an)
+        log.info("Networks (%s)", "betweenness, projections, backbones, communities")
         a5_network(an)
         a7_org_theme(an)
         log.info("Organisation authority list and coding workbook")
@@ -3573,9 +4564,11 @@ def selftest() -> int:
     G = nx.Graph()
     G.add_edges_from([("E:1", "O:a"), ("E:1", "O:b"), ("E:1", "O:c"), ("E:2", "O:a"), ("E:2", "O:b")])
     P = project(G)
-    check("projection: Newman weight a-b (1/2 + 1)", P["O:a"]["O:b"]["weight"], 1.5)
-    check("projection: shared events a-b", P["O:a"]["O:b"]["shared"], 2)
-    check("projection: Newman weight a-c", P["O:a"]["O:c"]["weight"], 0.5)
+    check("projection: Newman weight a-b (1/2 + 1)", P.edge("O:a", "O:b")["weight"], 1.5)
+    check("projection: shared events a-b", P.edge("O:a", "O:b")["shared"], 2)
+    check("projection: Newman weight a-c", P.edge("O:a", "O:c")["weight"], 0.5)
+    check("projection: degree and edge count", (P.degree("O:a"), P.number_of_edges()), (2, 3))
+    check("backbone of a projection is a graph", disparity(P, 0.99).number_of_nodes(), 3)
     S = nx.Graph()
     S.add_edge("O:h", "O:x", weight=10.0)
     for i in range(6):
@@ -3606,6 +4599,8 @@ def selftest() -> int:
                 an = run(build_parser().parse_args(argv))
                 outs.append((o, an))
             o, an = outs[0]
+            tf_ = an.a.theme_filter
+            check(f"[{lab}] default theme filter without a record in the masters", tf_, "source")
             check(f"[{lab}] events", len(an.events), 5)
             check(f"[{lab}] unique event ids", len({e['event_id'] for e in an.events}), 5)
             check(f"[{lab}] streams", dict(Counter(e["stream_primary"] for e in an.events)),
@@ -3622,13 +4617,14 @@ def selftest() -> int:
             check(f"[{lab}] R1: rows kept / total", an.filter_counts["rows"], (10, 12))
             check(f"[{lab}] R1: Bakery Ltd left out", any(t["organisation"] == "Bakery Ltd" and t["pass"]["source"]
                                                           for t in an.ties), False)
-            sens = {(r["theme_filter"], r["scenario"], r["layers"], r["node_level"]): r for r in an.sensitivity}
-            check(f"[{lab}] scenario A orgs (filter source)", sens[("source", "A", "L1-L3", "edition")]["orgs"], 6)
+            sens = {(r["theme_filter"], r["scenario"], r["layers"], r["node_level"]): r for r in an.sensitivity
+                    if r["variant"] in SCOPE_LABEL.values()}
+            check(f"[{lab}] scenario A orgs (filter source)", sens[(tf_, "A", "L1-L3", "edition")]["orgs"], 6)
             check(f"[{lab}] scenario A orgs (filter none)", sens[("none", "A", "L1-L3", "edition")]["orgs"], 7)
-            check(f"[{lab}] scenario C orgs (medium+)", sens[("source", "C", "L1-L3", "edition")]["orgs"], 5)
-            check(f"[{lab}] scenario B drops title-named Shell", sens[("source", "B", "L1-L3", "edition")]["orgs"], 5)
+            check(f"[{lab}] scenario C orgs (medium+)", sens[(tf_, "C", "L1-L3", "edition")]["orgs"], 5)
+            check(f"[{lab}] scenario B drops title-named Shell", sens[(tf_, "B", "L1-L3", "edition")]["orgs"], 5)
             check(f"[{lab}] Ende Gelande in 2+ series (C, series)",
-                  sens[("source", "C", "L1-L3", "series")]["orgs_in_2plus"], 2)
+                  sens[(tf_, "C", "L1-L3", "series")]["orgs_in_2plus"], 2)
             cen = {r["org_key"]: r for r in an.org_centrality}
             check(f"[{lab}] FAQ (low) not in default network", "faq" in cen, False)
             check(f"[{lab}] Attac n_series in C", cen.get("attac", {}).get("n_series"), 2)
@@ -3684,6 +4680,64 @@ def selftest() -> int:
         an = run(build_parser().parse_args([str(res4), "-o", str(tmp / "out_bp"), "--no-charts", "--no-graphs"]))
         check("[older] boilerplate without menu_or_sidebar is still furniture",
               [i["furniture"] for i in an.instances if i["sentence"].startswith("Old layout")], [True])
+        # ---- newer masters: context_organisations, doc_kind/participation and focus_theme columns
+        res5 = tmp / "res_new_cols"
+        shutil.copytree(tmp / "res_long", res5)
+        nfields, n_rows = read_csv(res5 / "master_network.csv")
+        extra = ["doc_kind", "doc_kind_reason", "attribution", "source_year", "duplicate_document_of",
+                 "translation_of", "participation", "context_reason"]
+        for r in n_rows:
+            r.update(doc_kind="listing" if r["layer"] == "listing_seed" else "page", attribution="event",
+                     participation="yes")
+        e3 = _ST_EVENTS[3]
+        ctx = [dict(n_rows[6], organisation=f"Report Org {i}", org_key=f"report org {i}", confidence="high",
+                    source_link="https://shellmustfall.example.org/report.pdf", is_pdf="yes", layer="linked_pdf",
+                    source_unit="https://shellmustfall.example.org/report.pdf", named_in_event_title="no",
+                    doc_kind="report", doc_kind_reason="report word", participation="no",
+                    context_reason="linked report or study", event=e3[0], event_date=e3[1], event_link=e3[2])
+               for i in (1, 2)]
+        write_csv(res5 / "master_network.csv", n_rows, nfields + extra)
+        write_csv(res5 / "master_network_context.csv", ctx, nfields + extra)
+        fields, th_rows = read_csv(res5 / "master_themes.csv")
+        for r in th_rows:
+            r["focus_theme"] = "yes"
+        e4 = _ST_EVENTS[4]
+        th_rows.append(dict(th_rows[3], theme="global_south", term="Global South", focus_theme="no",
+                            sentence="Solidarity with the Global South.", event=e4[0], event_date=e4[1],
+                            event_link=e4[2], event_key=f"pdf:x#{e4[1]}", source_unit=f"{_ST_ECHOS}#entry-5"))
+        write_csv(res5 / "master_themes.csv", th_rows, fields + ["focus_theme", "passage_id"])
+        an_old = run(build_parser().parse_args([str(tmp / "res_long"), "-o", str(tmp / "out_cols0"), "--no-charts",
+                                                "--no-graphs"]))
+        an = run(build_parser().parse_args([str(res5), "-o", str(tmp / "out_cols"), "--no-charts", "--no-graphs",
+                                            "--theme-filter", "direct"]))
+        check("[new columns] --theme-filter direct accepted and recorded", an.a.theme_filter, "direct")
+        cen = {r["org_key"]: r for r in an.org_centrality}
+        check("[new columns] context rows stay out of the default network", "report org 1" in cen, False)
+        sens = {r["variant"]: r for r in an.sensitivity if r["node_level"] == "series" and r["scenario"] == "C"
+                and r["layers"] == an.a.layers and r["theme_filter"] == "direct"}
+        dflt = sens[SCOPE_LABEL["participation"]]["orgs"]
+        plus = next(v["orgs"] for k, v in sens.items() if k.startswith("+context"))
+        check("[new columns] '+context rows' counts the two report organisations", plus - dflt, 2)
+        check("[new columns] global_south rows leave the any-theme events unchanged",
+              sum(e["any_any"] for e in an.events), sum(e["any_any"] for e in an_old.events))
+        check("[new columns] focus themes", an.themes, ["colonialism", "racism", "fascism"])
+        dt = {r["theme"]: r for r in an.tables["descriptive_themes"][0]}
+        check("[new columns] global_south listed in descriptive_themes", dt.get("global_south", {}).get("events_any"), 1)
+        an = run(build_parser().parse_args([str(res5), "-o", str(tmp / "out_cols_all"), "--no-charts", "--no-graphs",
+                                            "--theme-filter", "direct", "--network-scope", "all"]))
+        cen = {r["org_key"]: r for r in an.org_centrality}
+        check("[new columns] --network-scope all keeps the context rows", "report org 1" in cen, True)
+        # ---- --source-codes: include 1 brings a report back into the default network
+        sc_path = tmp / "source_codes.csv"
+        write_csv(sc_path, [{"source_unit": "https://shellmustfall.example.org/report.pdf", "include": "1"}],
+                  ["source_unit", "include"])
+        an = run(build_parser().parse_args([str(res5), "-o", str(tmp / "out_cols_sc"), "--no-charts", "--no-graphs",
+                                            "--theme-filter", "direct", "--source-codes", str(sc_path)]))
+        cen = {r["org_key"]: r for r in an.org_centrality}
+        check("[new columns] --source-codes include 1 keeps a report", "report org 1" in cen, True)
+        # ---- tie sublevels and document identity
+        check("same_host: subdomain", same_host("events.camp.org", "camp.org"), True)
+        check("norm_doc keeps the path's case", norm_doc("HTTPS://WWW.Uemss.org/img/A.pdf#p=2"), "uemss.org/img/A.pdf")
         # ---- curation loop
         res = tmp / "res_older"
         codes = tmp / "org_codes.csv"

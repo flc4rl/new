@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import dataclasses
 import datetime as dt
 import gc
 import hashlib
@@ -46,13 +47,13 @@ from urllib.parse import urlparse
 from crawler import CachedPage, CrawlConfig, Crawler, PageCache, normalise_url, registered_host
 from extract import (
     NER_LIKE_METHODS, Block, OrgExtractor, ParsedPage, ThemeSet, Watchlist, acronym_pairs, block_hash,
-    canonical_key, clean_ws, load_stoplist, page_language, parse_html, parse_pdf_text, split_sentences,
-    squash_runs,
+    canonical_key, clean_ws, is_skip_host, load_stoplist, page_language, parse_html, parse_pdf_text,
+    split_sentences, squash_runs,
 )
-from events import EventIndex, EventRef
+from events import EventIndex, EventRef, event_years, same_series, series_components, source_year
 from linked_sites import (PLATFORM_HOSTS, Site, SiteRegistry, Via, collect_targets, crawl_linked,
                           filter_targets, host_matches, platform_site_key)
-from make_master import THEME_FILTERS, build_masters
+from make_master import NETWORK_SCOPES, THEME_FILTERS, build_masters
 from seed_pdfs import PdfLink, entries_to_json, extract_entries, pdf_display, pdf_name
 from report import write_report
 
@@ -188,7 +189,11 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
                    help="Keep only mentions whose page / paragraph / context window hits a theme")
     g.add_argument("--focus-themes", default="",
                    help="Comma-separated theme names that count for --theme-scope and --theme-filter "
-                        "(default: all)")
+                        "(default: every theme not marked '#: descriptive' in the --themes file; "
+                        "descriptive themes are still recorded, with focus_theme=no)")
+    g.add_argument("--ner-workers", type=int, default=max(1, min(4, (os.cpu_count() or 2) - 1)),
+                   help="Processes that run spaCy over the pages before the analysis (a pre-pass "
+                        "that fills the NER cache; 1 = no pre-pass in parallel)")
     g.add_argument("--boilerplate-share", type=float, default=0.2,
                    help="Paragraphs repeated on more than this share of pages are flagged boilerplate")
     g.add_argument("--min-mentions", type=int, default=1,
@@ -198,9 +203,17 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     g.add_argument("--theme-filter", choices=THEME_FILTERS, default="source",
                    help="Inclusion criterion for master_network: keep organisations and events only "
                         "from sources with a theme hit ('source': the web page, PDF or agenda entry "
-                        "itself; 'site': any page of the same website; 'event': any source tied to "
-                        "the same event; 'none': keep everything). Sources left out are listed in "
-                        "the excluded_sources sheet")
+                        "itself; 'direct': as 'source', but agenda entries, calendar cells, the "
+                        "event's own page and its landing page also count when any source of their "
+                        "event has a hit; 'site': any page of the same website; 'event': any source "
+                        "tied to the same event; 'none': keep everything). Sources left out are "
+                        "listed in the excluded_sources sheet")
+    g.add_argument("--network-scope", choices=NETWORK_SCOPES, default="participation",
+                   help="Rows of master_network: only those that are evidence of taking part in the "
+                        "event ('participation': not from linked reports or studies, other pages of "
+                        "a site several events link to, sources about another year or copies of a "
+                        "document; those go to the context_organisations sheet), or every row "
+                        "('all', the behaviour of earlier versions, with the flag columns)")
     g.add_argument("--keep-ner-only", action="store_true",
                    help="Keep organisations found only by NER (spaCy) with no other evidence in the "
                         "master network; by default they are listed in the ner_only_candidates sheet")
@@ -401,6 +414,12 @@ def seed_blocks(body: str, line_entry: Dict[str, List[int]]) -> Optional[List[Bl
     return blocks
 
 
+try:   # parse_pdf_text(..., reflow=) of newer extract.py versions
+    _PDF_REFLOW = "reflow" in inspect.signature(parse_pdf_text).parameters
+except (TypeError, ValueError):
+    _PDF_REFLOW = False
+
+
 def load_pages(cache_pages: Iterable[CachedPage], registry: SiteRegistry, strip_regions: bool,
                seed_pdfs: Dict[str, dict], in_window=None, total: int = 0,
                pages: Optional[Dict[str, ParsedPage]] = None,
@@ -474,7 +493,12 @@ def load_pages(cache_pages: Iterable[CachedPage], registry: SiteRegistry, strip_
                     body = cp.body
                     if cp.kind == "seed":   # a link list: every line is its own paragraph
                         body = re.sub(r"\n+", "\n\n", body)
-                    page = parse_pdf_text(body, cp.url, cp.depth, cp.title, cp.date, cp.referrer)
+                    if cp.kind == "seed" and _PDF_REFLOW:
+                        # an agenda's lines are its entries: they are not joined into paragraphs
+                        page = parse_pdf_text(body, cp.url, cp.depth, cp.title, cp.date, cp.referrer,
+                                              reflow=False)
+                    else:
+                        page = parse_pdf_text(body, cp.url, cp.depth, cp.title, cp.date, cp.referrer)
                 if cp.kind == "seed":
                     page.title = pdf_name(cp.url)
                 pages[cp.url] = tag(page, site, cp)
@@ -511,6 +535,92 @@ def load_pages(cache_pages: Iterable[CachedPage], registry: SiteRegistry, strip_
         except Exception as exc:  # noqa: BLE001 - one bad page should not stop the run
             log.warning("Could not parse %s: %s", cp.final_url, exc)
     return {"pages": pages, "pdf_rows": pdf_rows, "meta": meta, "orphans": orphans, "moved": moved}
+
+
+_CLOSED = (".", "!", "?", ":")
+
+
+def _pdf_line_part(blocks, bi: int) -> bool:
+    """A short block of a PDF page that is part of a sentence broken across lines, not a
+    label: the block before it does not end a sentence and it starts in lower case, or
+    it does not end a sentence and the next block starts in lower case."""
+    b = blocks[bi]
+    if not (b.region or "").startswith("pdf p."):
+        return False
+    text = b.text.strip()
+    prev = blocks[bi - 1].text.strip() if bi > 0 and blocks[bi - 1].text else ""
+    nxt = blocks[bi + 1].text.strip() if bi + 1 < len(blocks) and blocks[bi + 1].text else ""
+    if prev and not prev.endswith(_CLOSED) and text[:1].islower():
+        return True
+    return bool(nxt) and not text.endswith(_CLOSED) and nxt[:1].islower()
+
+
+def url_identity(url: str) -> str:
+    """A page's address without scheme, www, fragment and trailing slash (host lower-cased):
+    http://www.x.org/a/ and https://x.org/a are one document."""
+    u = (url or "").split("#", 1)[0].strip()
+    m = re.match(r"^(?:[a-z][a-z0-9+.-]*:)?//([^/?]*)(.*)$", u, re.I)
+    if not m:
+        return u.rstrip("/")
+    host = m.group(1).lower()
+    host = host[4:] if host.startswith("www.") else host
+    return (host + m.group(2)).rstrip("/")
+
+
+def doc_digest(texts: Iterable[str]) -> str:
+    """sha1 of a document's text, casefolded and with whitespace normalised."""
+    return hashlib.sha1(" ".join(" ".join(texts).casefold().split()).encode("utf-8")).hexdigest()
+
+
+_LANG_MARK_END = re.compile(r"(?i)[_\-. ](?:en|es|fr|de|it|pt|nl|eng|engl|english|deutsch|espanol|francais)$")
+_LANG_MARK_START = re.compile(r"(?i)^(?:en|es)-")
+MIN_DIGEST_WORDS = 20     # shorter texts ("Page not found") are not compared by their text
+
+
+def _file_stem(url: str) -> str:
+    last = urlparse(url).path.rstrip("/").rsplit("/", 1)[-1]
+    return re.sub(r"\.[A-Za-z0-9]{1,5}$", "", last)
+
+
+def document_copies(pages) -> Dict[str, Dict[str, str]]:
+    """Copies of one document among the pages read: {"duplicate_document_of": {url:
+    original url}, "translation_candidates": {url: original url}}.
+
+    A copy has the same address once scheme, www, fragment and trailing slash are
+    ignored, or the same text (casefolded, whitespace normalised; at least
+    MIN_DIGEST_WORDS words). The first page in URL order is the original. Translation
+    candidates are files of the same site whose names are equal once a language marker
+    is removed ("Report_ES.pdf" and "Report.pdf", "EN-Kit" and "ES-Kit"); they count as
+    translations only when they are tied to the same events (checked by the caller).
+    Agenda PDFs and calendar months are not compared."""
+    first_id: Dict[str, str] = {}
+    first_digest: Dict[str, str] = {}
+    dup: Dict[str, str] = {}
+    stems: Dict[tuple, Tuple[str, bool]] = {}
+    trans: Dict[str, str] = {}
+    for p in sorted(pages, key=lambda p: p.url):
+        if p.kind in ("seed", "calendar") or p.site_role == "seed":
+            continue
+        ident = url_identity(p.url)
+        orig = first_id.setdefault(ident, p.url)
+        if orig == p.url:
+            texts = [b.text for b in p.blocks if b.text]
+            if sum(len(t.split()) for t in texts) >= MIN_DIGEST_WORDS:
+                orig = first_digest.setdefault(doc_digest(texts), p.url)
+        if orig != p.url:
+            dup[p.url] = orig
+            continue
+        stem = _file_stem(p.url)
+        bare = _LANG_MARK_START.sub("", _LANG_MARK_END.sub("", stem))
+        marked = bare != stem
+        bare = re.sub(r"-\d$", "", bare)     # "Report-1.pdf": a second upload of "Report.pdf"
+        if len(bare) >= 4:
+            key = (p.site, bare.casefold())
+            other, other_marked = stems.setdefault(key, (p.url, marked))
+            if other != p.url and (marked or other_marked) \
+                    and _file_stem(other).casefold() != stem.casefold():
+                trans[p.url] = other
+    return {"duplicate_document_of": dup, "translation_candidates": trans}
 
 
 def window(sents, idx: int, n: int, text: str) -> str:
@@ -557,6 +667,36 @@ def _date_span(text: str) -> Tuple[Optional[dt.date], Optional[dt.date]]:
 
 
 _URL_YM = re.compile(r"/((?:19|20)\d{2})/(0[1-9]|1[0-2])/")
+
+
+def choose_edition(refs: List[EventRef], when: Optional[dt.date]
+                   ) -> Tuple[List[EventRef], List[EventRef], List[EventRef]]:
+    """Several dated events reach one page. Returns (kept, editions, unrelated):
+    when the event nearest `when` (the page's date; else the latest event) is one of
+    several editions of one recurring event (events.same_series: the same link, or
+    names sharing most words), `kept` holds it (and events on the same day, which are
+    not editions of each other) plus the undated refs, `editions` the other editions
+    of its series, and `unrelated` the dated events of other series. When the nearest
+    event is no edition of another, every ref is kept and the other lists are empty."""
+    dated = [(r, _date_span(r.date)[0]) for r in refs]
+    dated = [(r, d) for r, d in dated if d is not None]
+    if len(dated) < 2:
+        return refs, [], []
+    if when is not None:
+        best_day = min(dated, key=lambda x: (abs((x[1] - when).days), -x[1].toordinal()))[1]
+    else:
+        best_day = max(d for _, d in dated)
+    best = [r for r, d in dated if d == best_day]    # events on the same day are not editions
+    series: List[EventRef] = []
+    for comp in series_components([r for r, _ in dated]):
+        if any(r in best for r in comp):
+            series += comp
+    editions = [r for r in series if r not in best]
+    if not editions:
+        return refs, [], []
+    undated = [r for r in refs if _date_span(r.date)[0] is None]
+    unrelated = [r for r, _ in dated if r not in series]
+    return best + undated, editions, unrelated
 
 
 def page_date_of(page) -> Tuple[str, str]:
@@ -1100,6 +1240,15 @@ def run(args: argparse.Namespace, out: Path, info: dict) -> int:
         return 1
     log.info("Analysing %d pages, including %d PDFs (%d PDFs found in total)",
              len(pages), sum(p.is_pdf for p in pages), len(pdf_rows))
+    rep_pages = [getattr(p, "repeated_pages_skipped", 0) or 0 for p in pages if p.is_pdf]
+    if any(rep_pages):
+        log.info("%d repeated PDF pages skipped in %d PDFs (a page that repeats an earlier page "
+                 "of the same PDF is read once)", sum(rep_pages), sum(1 for n in rep_pages if n))
+    doc_copies = document_copies(pages)
+    if doc_copies["duplicate_document_of"]:
+        log.info("%d pages or PDFs are copies of another one (same address without www, scheme or "
+                 "trailing slash, or the same text): duplicate_document_of names the original",
+                 len(doc_copies["duplicate_document_of"]))
 
     # --------------------------------------------------------------- events
     # Calendar cells, event pages, seed-PDF entries. Only the few pages that need
@@ -1123,7 +1272,7 @@ def run(args: argparse.Namespace, out: Path, info: dict) -> int:
         # With --calendar-from/--calendar-to, the paragraphs of the calendar page that
         # name only events outside the window are not analysed (they would otherwise
         # give organisations tied to no event).
-        for k in [k for k in outside.events if k in index.events]:
+        for k in [k for k in outside.events if index.known(k)]:
             del outside.events[k]
         n_out = 0
         for p in pages:
@@ -1138,8 +1287,13 @@ def run(args: argparse.Namespace, out: Path, info: dict) -> int:
         if n_out:
             log.info("%d paragraphs of the calendar page name only events outside "
                      "--calendar-from/--calendar-to and are not analysed", n_out)
+    if hasattr(index, "split_calendar_editions"):
+        n_split = index.split_calendar_editions()
+        if n_split:
+            log.info("%d calendar links carry several editions of an event (different calendar "
+                     "event ids, or dates months apart): each edition is its own event", n_split)
     for url, (final_url, is_pdf, kind, referrer) in meta.items():
-        if not is_pdf and (final_url in index.events or url in index.events):
+        if not is_pdf and (index.known(final_url) or index.known(url)):
             cp = cache.get(url)
             if cp is not None and cp.body:
                 index.add_event_page(cp)
@@ -1159,6 +1313,12 @@ def run(args: argparse.Namespace, out: Path, info: dict) -> int:
     for ln in seed_links:   # older runs without entries
         if ln.url in real_seed and not seed_pdfs.get(ln.pdf):
             index.add_pdf_link(ln.url, ln.event, ln.date_raw, ln.date_iso, ln.pdf)
+    n_merged = index.merge_duplicates(
+        {urlparse(u).hostname or "" for s in registry.sites if s.role == "main" for u in s.start_urls},
+        lambda h: host_matches(h, platform_hosts) or is_skip_host(h))
+    if n_merged:
+        log.info("%d events are listed twice (same start date, same website): merged into one "
+                 "(merged_from in events.csv lists the other keys)", n_merged)
     why = index.locate()
     if why:
         log.warning("Event countries not set: %s", why)
@@ -1167,7 +1327,7 @@ def run(args: argparse.Namespace, out: Path, info: dict) -> int:
         log.info("Event countries found for %d of %d events", located, len(index.events))
     event_fields = ["event", "date", "event_link", "event_key", "listed_on", "calendar_months",
                     "event_country", "country_iso", "country_source", "location_text",
-                    "location_structured", "entry_words"]
+                    "location_structured", "entry_words", "merged_from"]
     if not (out / "events.csv").exists():
         # A first run writes the event list now; a later run replaces events.csv only with
         # its final version, so a Ctrl+C during the analysis does not leave this run's
@@ -1193,25 +1353,64 @@ def run(args: argparse.Namespace, out: Path, info: dict) -> int:
     landing_of: Dict[str, Set[tuple]] = {}
     nearest = args.edition_policy == "nearest"
 
-    def pick_edition(refs: List[EventRef], page) -> Tuple[List[EventRef], List[EventRef]]:
-        """Several dated events reach one page (editions of a recurring event linking
-        the same site): keep the one nearest the page's date, else the latest."""
-        dated = [(r, _date_span(r.date)[0]) for r in refs]
-        dated = [(r, d) for r, d in dated if d is not None]
-        if not nearest or len(dated) < 2:
-            return refs, []
+    def pick_edition(refs: List[EventRef], page) -> Tuple[List[EventRef], List[EventRef], List[EventRef]]:
+        """Several dated events reach one page: see choose_edition."""
+        if not nearest:
+            return refs, [], []
         pdate, _ = page_date_of(page)
-        when = _date_span(pdate)[0] if pdate else None
-        if when is not None:
-            best_day = min(dated, key=lambda x: (abs((x[1] - when).days), -x[1].toordinal()))[1]
-        else:
-            best_day = max(d for _, d in dated)
-        best = [r for r, d in dated if d == best_day]    # events on the same day are not editions
-        undated = [r for r in refs if _date_span(r.date)[0] is None]
-        return best + undated, [r for r, d in dated if d != best_day]
+        return choose_edition(refs, _date_span(pdate)[0] if pdate else None)
+
+    def other_year(page, refs: List[EventRef]) -> List[EventRef]:
+        """Linked pages and PDFs whose address or title names a year that is not their
+        event's (a report on the 2017 camp reached from the 2019 camp's site): tied to the
+        edition of that year when one is known, else flagged attribution 'other_year'."""
+        out = []
+        for r in refs:
+            years = event_years(r.date)
+            layer = layer_of(page, r)
+            if not years or layer not in ("linked_page", "linked_pdf") or r.name.startswith("("):
+                out.append(r)
+                continue
+            sy = source_year(page.url, page.title, years)
+            if sy is not None and sy in years and r.attribution == "other_year":
+                # a PDF found on a page about another year, that names its event's year
+                out.append(dataclasses.replace(r, attribution="", source_year=""))
+                continue
+            if sy is None or sy in years:
+                out.append(r)
+                continue
+            ed = edition_in_year(r, sy)
+            if ed is not None:
+                out.append(dataclasses.replace(ed, attribution="edition", source_year=str(sy)))
+            else:
+                out.append(dataclasses.replace(r, attribution="other_year", source_year=str(sy)))
+        return list({(r.key or r.link, r.name, r.date): r for r in out}.values())
+
+    year_events: Dict[int, List[str]] = defaultdict(list)
+    for k, ev in index.events.items():
+        for y in event_years(ev.date):
+            year_events[y].append(k)
+    edition_memo: Dict[tuple, Optional[EventRef]] = {}
+
+    def edition_in_year(r: EventRef, year: int) -> Optional[EventRef]:
+        """The event of `r`'s series (same link, or similar name) held in `year`."""
+        mk = (r.key or r.link, r.name, year)
+        if mk not in edition_memo:
+            found = None
+            for k in year_events.get(year, ()):
+                ev = index.events.get(k)
+                if ev is not None and k != r.key and same_series(r.name, r.link or r.key, ev.name, ev.link or k):
+                    found = index.ref(k)
+                    break
+            edition_memo[mk] = found
+        return edition_memo[mk]
 
     def page_events(page) -> List[EventRef]:
-        """Events a whole page belongs to ([] for listings, handled per paragraph)."""
+        """Events a whole page belongs to ([] for listings, handled per paragraph).
+        Each ref says how it was tied (attribution): 'event' (the event's own page, the
+        page its link leads to, or a site only one event links to), 'edition' (chosen
+        among editions of one recurring event), 'site_level' (other pages of a site
+        several unrelated events link to) or 'other_year'."""
         if page.url in page_event_cache:
             return page_event_cache[page.url]
         page_event_cache[page.url] = []     # guards against referrer loops
@@ -1221,12 +1420,13 @@ def run(args: argparse.Namespace, out: Path, info: dict) -> int:
             urls = {page.url} | set(getattr(page, "requested_urls", ()) or ())
             nurls = urls | {normalise_url(u) for u in urls if normalise_url(u)}
             # The page is an event page itself (also when reached through a redirect).
-            refs = [index.ref(k) for k in sorted(u for u in nurls if u in index.events)]
+            refs = [r for k in sorted(u for u in nurls if index.known(u)) for r in index.refs(k)]
             site = site_of_page(page)
             linked = site is not None and site.role == "linked"
             if linked:
                 exact = [v for v in site.via if v.target in nurls or normalise_url(v.target) in nurls]
-                via_refs = [index.ref(v.event_url or v.target, v.event, v.date or v.month) for v in exact]
+                via_refs = [r for v in exact
+                            for r in index.refs(v.event_url or v.target, v.event, v.date or v.month)]
                 if via_refs:     # the page the event links to: its landing page
                     landing_of[page.url] = {(r.key or r.link, r.name) for r in via_refs}
                 refs += via_refs
@@ -1238,37 +1438,47 @@ def run(args: argparse.Namespace, out: Path, info: dict) -> int:
                         other_pages_of[page.url] = other_pages_of[ref_page.url]
                     if ref_page.url in editions_of:
                         editions_of[page.url] = editions_of[ref_page.url]
-                elif page.referrer in index.events:
-                    refs = [index.ref(page.referrer)]
+                elif index.known(page.referrer):
+                    refs = index.refs(page.referrer)
             if not refs and linked:
                 vias = site.via
-                all_refs = list({(r.key or r.link, r.name): r for r in
-                                 (index.ref(v.event_url or v.target, v.event, v.date or v.month)
-                                  for v in vias)}.values())
-                if len({v.event_url or v.target for v in vias}) == 1:
+                all_refs = list({(r.key or r.link, r.name): r for v in vias
+                                 for r in index.refs(v.event_url or v.target, v.event,
+                                                     v.date or v.month)}.values())
+                if len({(r.key or r.link) for r in all_refs}) <= 1:
                     refs = all_refs
                 else:
-                    kept, others = pick_edition(all_refs, page) if all_refs else ([], [])
-                    if others:   # editions of one recurring event: the nearest one(s)
-                        refs = [r for r in kept if _date_span(r.date)[0] is not None]
-                        others = [r for r in all_refs if r not in refs]
+                    kept, eds, _unrelated = pick_edition(all_refs, page) if all_refs else ([], [], [])
+                    if eds:   # editions of one recurring event: the nearest one(s)
+                        refs = [dataclasses.replace(r, attribution="edition")
+                                for r in kept if _date_span(r.date)[0] is not None]
+                        others = eds
                     else:
                         # Other pages of a site several events link to belong to none of
                         # them in particular; the linking events are listed separately.
-                        refs = [EventRef(f"(other pages of {site.key})", "", "")]
+                        refs = [EventRef(f"(other pages of {site.key})", "", "", attribution="site_level")]
                         others = []
                     other_pages_of[page.url] = site.via_events(30)
+            elif not refs and site is not None and site.role == "main" and page.title:
+                # A story on the main site whose title names one event (EV-13).
+                named = [r for r in index.named_in_title(page.title) if r.key]
+                if len({r.key for r in named}) == 1:
+                    refs = named[:1]
             uniq = list({(r.key or r.link, r.name, r.date): r for r in refs}.values())
             if len(uniq) > 1 and not others:
-                uniq, others = pick_edition(uniq, page)
-            refs = uniq
+                kept, eds, unrelated = pick_edition(uniq, page)
+                if eds:
+                    uniq = [dataclasses.replace(r, attribution=r.attribution or "edition")
+                            if _date_span(r.date)[0] is not None else r for r in kept] + unrelated
+                    others = eds
+            refs = other_year(page, uniq)
             if others:
                 editions_of[page.url] = "; ".join(f"{r.name} ({r.date})" if r.date else r.name
                                                   for r in others[:30])
         page_event_cache[page.url] = refs
         return refs
 
-    seed_event_keys = {k for k, ev in index.events.items() if any(ln.url == k for ln in seed_links)}
+    seed_event_keys = {index.ref(ln.url).key for ln in seed_links if index.known(ln.url)} - {""}
     block_event_cache: Dict[str, List[List[EventRef]]] = {}
 
     def block_events_for(page) -> List[List[EventRef]]:
@@ -1285,11 +1495,12 @@ def run(args: argparse.Namespace, out: Path, info: dict) -> int:
                 refs = whole
                 entry = getattr(b, "entry", None)
                 if not refs and on_cal:
+                    month = page.label if page.kind == "calendar" else ""
                     if b.text:
-                        refs = index.named_in(b.text)
+                        refs = index.named_in(b.text, month=month)
                     else:
-                        refs = [index.ref(normalise_url(lk.href) or lk.href) for lk in b.links
-                                if (normalise_url(lk.href) or lk.href) in index.events]
+                        refs = [r for lk in b.links if index.known(normalise_url(lk.href) or lk.href)
+                                for r in index.refs(normalise_url(lk.href) or lk.href, month=month)]
                 elif not refs and page.kind == "seed" and entry is not None:
                     key = entry_keys.get((page.url, entry)) if entry >= 0 else None
                     refs = [index.ref(key)] if key else []
@@ -1369,7 +1580,15 @@ def run(args: argparse.Namespace, out: Path, info: dict) -> int:
         return False
 
     themes = ThemeSet.load(args.themes if args.themes and args.themes.exists() else None)
-    focus = {t.strip() for t in args.focus_themes.split(",") if t.strip()} or set(themes.names)
+    focus_default = getattr(themes, "focus_names", None)
+    if callable(focus_default):
+        focus_default = focus_default()
+    focus = {t.strip() for t in args.focus_themes.split(",") if t.strip()} or set(
+        themes.names if focus_default is None else focus_default)
+    descriptive = set(themes.names) - focus
+    if descriptive and not args.focus_themes.strip():
+        log.info("Descriptive themes (recorded in theme_hits.csv with focus_theme=no, not used for "
+                 "the theme filter): %s", ", ".join(sorted(descriptive)))
     unknown = focus - set(themes.names)
     if unknown:
         log.warning("Unknown --focus-themes ignored: %s", ", ".join(sorted(unknown)))
@@ -1425,12 +1644,39 @@ def run(args: argparse.Namespace, out: Path, info: dict) -> int:
     ev_theme_units: Dict[str, Set[str]] = defaultdict(set)
     ev_mentions: Counter = Counter()
 
+    def copy_columns(page) -> Tuple[str, str]:
+        """duplicate_document_of and translation_of of a page (a translation only when
+        both files are tied to the same events)."""
+        dup = doc_copies["duplicate_document_of"].get(page.url, "")
+        tr = doc_copies["translation_candidates"].get(page.url, "")
+        if tr:
+            other = by_url.get(tr)
+            keys = lambda refs: {r.key or r.link or r.name for r in refs}  # noqa: E731
+            if other is None or keys(page_events(other)) != keys(page_events(page)):
+                tr = ""
+        return pdf_display(dup) if dup else "", pdf_display(tr) if tr else ""
+
     def ref_dict(page, r: EventRef) -> dict:
         layer = layer_of(page, r)
         cve, years = timing(page, r, layer)
         return {"key": pdf_display(r.key), "name": r.name, "date": r.date, "link": pdf_display(r.link),
-                "layer": layer, "content_vs_event": cve, "years_after_event": years}
+                "layer": layer, "content_vs_event": cve, "years_after_event": years,
+                "attribution": r.attribution or ("site_level" if r.name.startswith("(") else "event"),
+                "source_year": r.source_year}
 
+    if hasattr(extractor, "prefetch"):
+        t0 = time.monotonic()
+        try:
+            n_pre = extractor.prefetch(
+                (([b.text for b in p.blocks], page_language([b.text for b in p.blocks], p.lang))
+                 for p in pages), workers=args.ner_workers)
+            if n_pre:
+                log.info("NER pre-pass: %d paragraphs analysed by spaCy (%d %s) in %s", n_pre,
+                         args.ner_workers, "process" if args.ner_workers == 1 else "processes",
+                         fmt_duration(time.monotonic() - t0))
+        except Exception as exc:  # noqa: BLE001 - the page loop runs NER itself
+            log.warning("NER pre-pass failed (%s: %s); the pages are analysed one by one",
+                        type(exc).__name__, exc)
     primed = not hasattr(extractor, "prime_agenda")
     repeated_theme_hits = 0     # theme hits in main-content passages repeated across a site
     log.info("Analysing %d pages ...", len(pages))
@@ -1451,6 +1697,7 @@ def run(args: argparse.Namespace, out: Path, info: dict) -> int:
                 log.info("%d group names accepted in agenda titles before the agendas were analysed", n_titles)
         texts = [b.text for b in page.blocks]
         lang = page_language(texts, page.lang)   # declared, else most paragraphs' language
+        copy_of, translation_of = copy_columns(page)
         langs[lang] += 1
         docs = extractor.pipe(texts, lang)
         block_hits = [themes.find(t) for t in texts]
@@ -1485,8 +1732,9 @@ def run(args: argparse.Namespace, out: Path, info: dict) -> int:
         # passage repeated in the main content of many pages of a site stays a theme hit
         # of every page carrying it (flagged boilerplate, later copies duplicate_of).
         block_menu = [b.region in FURNITURE_REGIONS
-                      or (not on_listing and 0 < len(b.text.split()) <= 4)   # a label or heading
-                      for b in page.blocks]
+                      or (not on_listing and 0 < len(b.text.split()) <= 4   # a label or heading
+                          and not _pdf_line_part(page.blocks, bi))
+                      for bi, b in enumerate(page.blocks)]
         words_of = [len(b.text.split()) for b in page.blocks]
         for bi, u in enumerate(block_unit):
             row = units.get(u)
@@ -1496,6 +1744,7 @@ def run(args: argparse.Namespace, out: Path, info: dict) -> int:
                     "site": page.site, "site_role": page.site_role,
                     "kind": page.kind or ("pdf" if page.is_pdf else "page"), "is_pdf": page.is_pdf,
                     "page_date": pdate, "fetched_at": fetched_iso, "words": 0,
+                    "duplicate_document_of": copy_of, "translation_of": translation_of,
                     "_events": {}, "theme_hits": 0, "menu_theme_hits": 0, "org_mentions": 0,
                     **{f"theme:{t}": 0 for t in themes.names}}
             row["words"] += words_of[bi]
@@ -1584,6 +1833,8 @@ def run(args: argparse.Namespace, out: Path, info: dict) -> int:
                         "menu_or_sidebar": block_menu[bi],
                         "duplicate_of": duplicate,
                         "context_before": before, "sentence": sentence, "context_after": after,
+                        "focus_theme": "yes" if theme in focus else "no",
+                        "duplicate_document_of": copy_of, "translation_of": translation_of,
                         "events_json": json.dumps(evj, ensure_ascii=False),
                         "_block": (page.url, bi),
                     })
@@ -1601,7 +1852,8 @@ def run(args: argparse.Namespace, out: Path, info: dict) -> int:
             if on_listing and evs:
                 # A calendar cell's title (and the link around it) names the event, not
                 # an organisation that takes part in it.
-                ev_hrefs = {normalise_url(lk.href) or lk.href for lk in block.links} & index.events.keys()
+                ev_hrefs = {h for h in (normalise_url(lk.href) or lk.href for lk in block.links)
+                            if index.known(h)}
                 titles = {canonical_key(re.sub(r"\s*[\[(][^\])]*[\])]\s*$", "", e.name)) for e in evs
                           if page.kind != "seed"}
                 mentions = [m for m in mentions
@@ -1682,6 +1934,7 @@ def run(args: argparse.Namespace, out: Path, info: dict) -> int:
                     "paragraph_themes": bthemes,
                     "page_themes": pthemes,
                     "co_mentioned_keys": [k for k in keys_here if k != m.key],
+                    "duplicate_document_of": copy_of, "translation_of": translation_of,
                     "_unit": unit,
                 }
                 mention_spill.add(row)
@@ -1714,6 +1967,8 @@ def run(args: argparse.Namespace, out: Path, info: dict) -> int:
     extractor.log_model_summary(log)    # missing, broken (spacy validate) and smaller models
     log.info("Merging organisation names ...")
     # Site-wide vetting of names found only by NER / links / appositives.
+    if hasattr(extractor, "finish_corpus_votes"):
+        extractor.finish_corpus_votes()     # part-of-speech votes of one-word names (logged there)
     methods_by_key: Dict[str, Set[str]] = defaultdict(set)
     for r in mention_rows:
         methods_by_key[r["org_key"]].update(r["methods"].split("+"))
@@ -1761,7 +2016,8 @@ def run(args: argparse.Namespace, out: Path, info: dict) -> int:
                     "page_title", "page_date", "page_date_from", "fetched_at", "site", "site_role",
                     "is_pdf", "pdf_found_on", "region", "boilerplate", "menu_or_sidebar", "duplicate_of",
                     "context_before", "sentence", "context_after", "organisations_in_paragraph",
-                    "organisations_in_paragraph_keys", "events_json"]
+                    "organisations_in_paragraph_keys", "focus_theme", "duplicate_document_of",
+                    "translation_of", "events_json"]
     log.info("Writing CSV outputs ...")
 
     def final_theme_rows():
@@ -1829,7 +2085,8 @@ def run(args: argparse.Namespace, out: Path, info: dict) -> int:
     write_csv(out / "sources.csv", source_rows,
               ["source_unit", "source_link", "page_title", "site", "site_role", "kind", "is_pdf",
                "page_date", "fetched_at", "words", "event_keys", "events", "org_mentions",
-               "has_theme_hit", "theme_hits", "menu_theme_hits"] + [f"theme:{t}" for t in themes.names])
+               "has_theme_hit", "theme_hits", "menu_theme_hits", "duplicate_document_of",
+               "translation_of"] + [f"theme:{t}" for t in themes.names])
     n_units, n_units_theme = len(source_rows), sum(1 for r in source_rows if r["has_theme_hit"])
     del source_rows, units
 
@@ -1837,7 +2094,8 @@ def run(args: argparse.Namespace, out: Path, info: dict) -> int:
     site_status = {s.key: s for s in registry.sites}
     rows = index.rows(pdf_display)
     for ev, row in zip(sorted(index.events.values(), key=lambda e: (e.date, e.name, e.key)), rows):
-        row.update(event_coverage(ev, registry, site_status, analysed, skip_hosts, platform_hosts))
+        row.update(event_coverage(ev, registry, site_status, analysed, skip_hosts, platform_hosts,
+                                  event_pages=len(ev_pages.get(ev.key, ()))))
         row["pages_analysed"] = len(ev_pages.get(ev.key, ()))
         row["words_analysed"] = ev_words.get(ev.key, 0)
         row["org_mentions"] = ev_mentions.get(ev.key, 0)
@@ -1899,7 +2157,8 @@ def run(args: argparse.Namespace, out: Path, info: dict) -> int:
     try:
         for path in build_masters([out], out, theme_filter=args.theme_filter,
                                   keep_menu_themes=args.keep_menu_themes, stats=stats,
-                                  keep_ner_only=args.keep_ner_only):
+                                  keep_ner_only=args.keep_ner_only,
+                                  network_scope=args.network_scope):
             log.info("Master file: %s", path)
     except Exception as exc:  # noqa: BLE001 - the CSV results above are complete
         log.error("Master files could not be written (%s: %s); the CSV results in %s are complete. "
@@ -1921,8 +2180,11 @@ def run(args: argparse.Namespace, out: Path, info: dict) -> int:
 
 
 def event_coverage(ev, registry: SiteRegistry, sites: Dict[str, Site], analysed: Counter,
-                   skip_hosts: Set[str], platform_hosts: Optional[Set[str]] = None) -> Dict[str, str]:
-    """Was the event's own link read? link_followed yes/no, and why not."""
+                   skip_hosts: Set[str], platform_hosts: Optional[Set[str]] = None,
+                   event_pages: Optional[int] = None) -> Dict[str, str]:
+    """Was the event's own link read? link_followed yes/no, and why not. With
+    `event_pages`, link_status gives the pages tied to this event (as pages_analysed)
+    and the pages read on its website."""
     link = ev.link or ev.key
     if not re.match(r"https?://", link or ""):
         return {"link_followed": "no", "link_status": "no link"}
@@ -1935,8 +2197,13 @@ def event_coverage(ev, registry: SiteRegistry, sites: Dict[str, Site], analysed:
     status = site.status or ("crawled" if site.role == "main" else "")
     if site.role == "main":
         status = "main site"
+    if event_pages is None:
+        pages = f"{n} pages analysed"
+    else:
+        pages = (f"{event_pages} {'page' if event_pages == 1 else 'pages'} tied to this event analysed "
+                 f"(listing included; {n} {'page' if n == 1 else 'pages'} read on its website)")
     return {"link_followed": "yes" if n else "no",
-            "link_status": f"{status}; {n} pages analysed" if status else f"{n} pages analysed"}
+            "link_status": f"{status}; {pages}" if status else pages}
 
 
 
@@ -1977,6 +2244,7 @@ def aggregate(rows: List[dict], extractor: OrgExtractor, acr_display: Dict[str, 
             "site_list": "; ".join(f"{k} ({n})" for k, n in sites.most_common(10)),
             "boilerplate_only": not substantive,
             "methods": "; ".join(f"{m} ({n})" for m, n in methods.most_common()),
+            **_pos_columns(extractor, key),
             "variants": "; ".join(f"{f} ({n})" for f, n in forms.most_common(8)),
             "acronyms": "; ".join(a for a, _ in acr_display.get(key, Counter()).most_common(3)),
             "themes": "; ".join(f"{t} ({n})" for t, n in theme_counts.most_common()),
@@ -1987,6 +2255,25 @@ def aggregate(rows: List[dict], extractor: OrgExtractor, acr_display: Dict[str, 
         })
     orgs.sort(key=lambda o: (-o["substantive_mentions"], -o["distinct_mentions"], o["organisation"].lower()))
     return orgs
+
+
+def _pos_columns(extractor, key: str) -> Dict[str, object]:
+    """pos_votes and pos_common of organisations.csv: how often the part-of-speech tagger
+    read a one-word name in context, and how often as an ordinary word (noun, verb ...).
+    "" for names of several words, or with an extract.py without the tagger votes."""
+    fn = getattr(extractor, "pos_summary", None)
+    if fn is None or not key or " " in key:
+        return {"pos_votes": "", "pos_common": ""}
+    try:
+        votes, common = fn(key)
+    except Exception:  # noqa: BLE001 - a missing vote must not stop the run
+        return {"pos_votes": "", "pos_common": ""}
+    return {"pos_votes": int(votes or 0), "pos_common": int(common or 0)}
+
+
+# Methods that count as one weak, NER-like method for the confidence (extract.NER_LIKE_METHODS
+# of newer versions holds the same names).
+_NER_LIKE = frozenset(NER_LIKE_METHODS) | {"ner", "pattern_after", "link_text", "website_elsewhere"}
 
 
 def _best_form(forms: Counter) -> str:
@@ -2009,9 +2296,9 @@ def _confidence(methods: Counter, n_pages: int) -> str:
     strong = {"watchlist", "appositive"}
     # NER and the weak lower-case-head rule ('pattern_after') count as one method, so
     # a name they both find is not 'high' on that alone.
-    ms = set(methods)
-    if ms & NER_LIKE_METHODS:
-        ms = (ms - NER_LIKE_METHODS) | {"ner"}
+    ms = set(methods) - {""}
+    if ms & _NER_LIKE:
+        ms = (ms - _NER_LIKE) | {"ner"}
     if strong & ms or len(ms) >= 2:
         return "high"
     # 'title' (a recurring name in agenda titles) is a rule like 'pattern'.
@@ -2047,7 +2334,7 @@ def write_outputs(out: Path, mentions: List[dict], orgs: List[dict], page_rows: 
         "fetched_at", "is_pdf", "embedded_in", "region", "boilerplate", "repeat_context",
         "context_themes", "context_theme_terms",
         "paragraph_themes", "page_themes", "sentence", "context", "paragraph", "co_mentioned",
-        "link_domain", "org_key", "events_json",
+        "link_domain", "org_key", "duplicate_document_of", "translation_of", "events_json",
     ]
     write_csv(out / "mentions.csv", mentions if mention_rows is None else mention_rows, mention_fields)
     write_csv(out / "organisations.csv", orgs)

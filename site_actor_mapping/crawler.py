@@ -92,6 +92,26 @@ class _CappedRetry(Retry):
                                  _pool=_pool, _stacktrace=_stacktrace)
 
 
+def network_cause(exc: BaseException) -> str:
+    """Why a request failed, in a few words: "DNS", "refused", "timeout", "TLS
+    certificate error" or "connection failed"."""
+    if isinstance(exc, requests.exceptions.SSLError):
+        return "TLS certificate error"
+    if isinstance(exc, requests.exceptions.Timeout):
+        return "timeout"
+    text = repr(exc)
+    if re.search(r"NameResolution|Name or service not known|nodename nor servname|getaddrinfo|"
+                 r"Temporary failure in name resolution|No address associated|Failed to resolve", text):
+        return "DNS"
+    if re.search(r"Connection refused|ECONNREFUSED|WinError 10061", text):
+        return "refused"
+    if re.search(r"timed out|Timeout", text):
+        return "timeout"
+    if re.search(r"CERTIFICATE_VERIFY_FAILED|SSLError|certificate", text):
+        return "TLS certificate error"
+    return "connection failed"
+
+
 def make_session(user_agent: str, connect: int = 2) -> requests.Session:
     """A requests session that retries connection errors, 429 and 5xx with backoff.
 
@@ -347,6 +367,12 @@ class Crawler:
                                       and any(host.endswith("." + h) for h in self.hosts))
 
     def allowed(self, url: str) -> bool:
+        """robots.txt, following RFC 9309: a 4xx answer (also 401 and 403) means there
+        are no rules (2.3.1.3); a 5xx answer or 429 means "disallow all" for this run
+        (2.3.1.4; the site is tried again on the next run). When robots.txt cannot be
+        fetched at all, the start page is tried once: if it answers, robots.txt counts as
+        absent; if not, the host is treated as disallowed and the cause (DNS, refused,
+        timeout, TLS) is recorded."""
         if not self.cfg.respect_robots:
             return True
         p = urlparse(url)
@@ -354,7 +380,7 @@ class Crawler:
         if base not in self.robots:
             rp: Optional[robotparser.RobotFileParser] = robotparser.RobotFileParser()
             status: Optional[int] = None
-            reason = ""
+            cause = ""
             try:   # the session already retries connection errors, 429 and 5xx
                 if self._robots_session is None:
                     self._robots_session = make_session(self.cfg.user_agent, connect=1)
@@ -363,23 +389,44 @@ class Crawler:
                 status = resp.status_code
                 text = resp.text if status < 400 else ""
             except requests.RequestException as exc:
-                reason = f"connection failed: {type(exc).__name__}"
+                cause = network_cause(exc)
                 log.debug("robots.txt for %s: %s", base, exc)
             if status is not None and status < 400:
                 rp.parse(text.splitlines())
-            elif status is not None and status < 500 and status not in (401, 403, 429):
-                rp = None   # 404/410 etc.: there is no robots.txt, so everything is allowed
-            else:
-                # RFC 9309 2.3.1.4: an unreachable robots.txt (5xx, network error) means
-                # "disallow all"; 401/403 are treated the same way, as Python's own parser does.
+            elif status is not None and status < 500 and status != 429:
+                rp = None   # 4xx (also 401/403): there are no rules, everything is allowed
+            elif status is not None:
                 rp.disallow_all = True
-                reason = reason or f"HTTP {status}"
-                log.warning("robots.txt for %s could not be read (%s); host treated as disallowed",
-                            base, reason)
+                reason = f"robots.txt server error (retry on the next run) (HTTP {status})"
+                log.warning("robots.txt for %s answered HTTP %d: host treated as disallowed for this "
+                            "run (retried on the next run)", base, status)
                 self.robots_blocked.append((base, reason))
+            else:
+                probe = self._probe(base)
+                if not probe:
+                    rp = None   # the site answers: robots.txt counts as absent
+                    log.info("robots.txt for %s could not be fetched (%s), but the site answers: "
+                             "no robots.txt rules are applied", base, cause)
+                else:
+                    rp.disallow_all = True
+                    log.warning("robots.txt for %s could not be fetched (%s): host treated as disallowed",
+                                base, probe)
+                    self.robots_blocked.append((base, f"unreachable: {probe}"))
             self.robots[base] = rp
         rp = self.robots[base]
         return rp is None or rp.can_fetch(self.cfg.user_agent, url)
+
+    def _probe(self, base: str) -> str:
+        """Try the first start URL on `base` (else its home page) once: "" when it
+        answers, else the cause of the failure."""
+        host = urlparse(base).netloc.lower()
+        url = next((u for u in self.cfg.start_urls if urlparse(u).netloc.lower() == host), base + "/")
+        try:
+            resp = self.session.get(url, timeout=self.cfg.timeout, allow_redirects=True, stream=True)
+            resp.close()
+            return ""
+        except requests.RequestException as exc:
+            return network_cause(exc)
 
     # ------------------------------------------------------------------ fetch
     def _wait(self) -> None:
@@ -678,7 +725,8 @@ class Crawler:
             return []
         if self.cfg.calendar_url_pattern and not re.search(self.cfg.calendar_url_pattern, page.final_url):
             return []
-        from calendar_sweep import calendar_id, detect_mec, parse_month, sweep_by_clicking, sweep_mec
+        from calendar_sweep import (calendar_id, count_event_days, detect_mec, parse_month,
+                                    sweep_by_clicking, sweep_mec)
 
         home = calendar_home(page.final_url)
         # The index remembers a sweep for this exact range/method, so a narrow test
@@ -776,7 +824,9 @@ class Crawler:
                                      referrer=cal_home, kind="calendar", label=label)
                     self.cache.put(cal)
                     loaded.append(cal)
-                    log.info("  calendar %s %s: %d events", kind, label, n_events)
+                    n_days = count_event_days(html)
+                    log.info("  calendar %s %s: %d %s (%d event-%s)", kind, label, n_events,
+                             "event" if n_events == 1 else "events", n_days, "day" if n_days == 1 else "days")
             except ImportError:
                 log.warning("--calendar-click needs playwright: pip install playwright && "
                             "playwright install chromium")

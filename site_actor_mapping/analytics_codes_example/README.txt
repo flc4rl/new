@@ -20,3 +20,20 @@ event_codes.csv
   series_id        groups editions of a recurring event
   duplicate_of     event_id of the event this row duplicates
   country_override ISO codes separated by ";" (e.g. DE;AT)
+
+Source codes (--source-codes)
+  python analytics.py RESULTS -o OUT --source-codes OUT/org_codes_template.xlsx
+  The sources_to_code sheet of org_codes_template.xlsx (or that sheet saved as CSV)
+  lists every page and PDF with doc_kind (listing, page, programme, report) and a
+  suggested class. include 1 keeps a source in the network whatever its doc_kind
+  (a programme taken for a report), 0 leaves it out (a report taken for a page);
+  blank keeps the classification.
+
+Coding the theme passages (kwic_for_coding.xlsx, column relevance)
+  false_match      the match is not the theme at all. Example: "business empire",
+                   "media empire" (a company group, not imperialism); the theme
+                   file now excludes these senses, but code any that remain this
+                   way. (The French verb "empire" (worsens) never occurred in the
+                   first full run.)
+  off_topic_sense  the word in another sense, e.g. bees "colonising" a meadow.
+  list_or_tag      one item of a list of causes or a hashtag.

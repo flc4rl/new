@@ -95,6 +95,55 @@ Keep `run_info.json` and `run.log` with the results: they record the command,
 the versions and the spaCy models used, which the methods section needs. To
 record the exact package versions as well: `pip freeze > requirements.lock`.
 
+## Defaults for the network study, and what to re-run
+
+The defaults serve a network of organisations around events: what is not
+evidence that an organisation takes part in an event is flagged and kept out
+of the network by default. Nothing is deleted from the files, and one option
+brings each part back.
+
+| Default | What it does | To switch back |
+|---|---|---|
+| Network scope `participation` | `event_organisations` keeps the rows that are evidence of taking part: agenda entries and calendar cells, the event's own page, landing pages, programme, flyer, call and press-release PDFs, and linked pages tied to this event or one of its true editions. Everything else (linked reports and studies, other pages of a site several events link to, rows not tied to an event, sources about another year, copies of a document already tied to the event) goes to the new `context_organisations` sheet with its `context_reason` (see [Network scope](#network-scope-participation-and-context)) | `--network-scope all` (on `site_actors.py`, `make_master.py` and `analytics.py`) |
+| Theme filter `source` (unchanged) | Each source (web page, PDF, or one agenda entry) needs a theme hit of its own. New option `direct`: agenda entries, calendar cells, the event's own page and its landing page also count when any source of their event has a theme hit (on the first full run this would bring back 94 agenda entries naming organisations whose event has theme evidence elsewhere) | `--theme-filter direct` to try the looser rule |
+| Descriptive themes | `global_south` and `authoritarianism` are found and recorded (`focus_theme` = `no`) but do not drive the theme filter or the any-theme measures; `analytics.py` reports them in `descriptive_themes` | `--focus-themes colonialism,racism,fascism,global_south,authoritarianism` (on `site_actors.py`) |
+| Layer set `L1-L3s` (`analytics.py`) | The default network uses the listing (L1), the landing page (L2) and pages and PDFs on the event's own host (L3s); pages and PDFs on other hosts (L3x) are in the sensitivity table | `--layers L1-L3` |
+| Ordinary-word rules | One-word names that the part-of-speech tagger reads as ordinary words in their own contexts ("Welt", "Klimakrise", "Freitag") are dropped unless title, pattern, appositive or watchlist evidence, a strong link or a website given in the same paragraph supports them | (see [How organisations are found](#how-organisations-are-found)) |
+
+What to re-run on an existing results folder (no new crawl is needed; the
+times are for the full run of about 5,600 pages):
+
+| Command | Time | What it updates |
+|---|---|---|
+| `python make_master.py RUN -o RUN` (the run folder as its own output) | a few minutes | `doc_kind`, participation and the `context_organisations` sheet (attribution is worked out for older folders), the extended stoplist |
+| `python site_actors.py ... --no-crawl` with the same arguments and output folder | about 25 minutes, about 12 with `--ner-workers 4` | everything in the extraction: part-of-speech votes, PDF reflow and pages repeated inside a PDF read once, trimmed fragments and run-on names, the `link`/`link_text` and `website`/`website_elsewhere` split, the theme terms and descriptive themes, page languages; and edition and year attribution, merged duplicate events and document copies. PDF text changes, so most of the NER cache is not reused |
+| `python analytics.py RUN -o OUT` | about 2.5 minutes (was 10) | the faster network code, the L3 split, the backbone chart, communities, standardised prevalence and the curation template |
+
+The `--no-crawl` re-run writes the master files at its end, so
+`make_master.py` is only needed on its own when you do not re-run the
+extraction. Run `analytics.py` last.
+
+What the audit of the first full run (5,565 pages, 976 events) found, and what
+these defaults cost:
+
+- Precision of the 300 organisations with the most events: 0.53 before, about
+  0.75 with the new rules, and about 0.85 to 0.9 once the stoplist has been
+  reviewed against `org_codes_template.xlsx`.
+- The network shrinks from 32,884 rows and 15,302 organisations to about
+  13,000 to 15,000 rows and 7,000 to 8,000 organisations; organisation pairs
+  of the projection fall from 3.6 million to under 1 million, and the share of
+  them inside the largest event from 0.46 to about 0.2.
+- Colonialism precision on a stratified sample rises from 79 % to 98 % with
+  Global South made descriptive; 98 sources and 1,581 network rows (4.8 %)
+  lose their only theme hit.
+- Accepted losses: "Apple" and "Vox" (the case rule); a few local groups known
+  only from link text (e.g. "DGB-Jugend Region Stuttgart"); 31 real
+  organisations named only in reports (Forbes, Daesh, ECCAR) move to
+  `context_organisations`; about 1 in 8 held-out PDFs is misclassified (in 40:
+  1 programme wrongly taken for a report, 4 reports missed); about 20 % of the
+  sources whose only hit is "Global South" frame it as colonial and leave the
+  network under the theme filter.
+
 ## Install
 
 Needs Python 3.9 or newer (3.10 or newer recommended; `python3 --version`).
@@ -109,7 +158,8 @@ for m in en_core_web_sm fr_core_news_sm de_core_news_sm nl_core_news_sm it_core_
          xx_ent_wiki_sm; do python -m spacy download $m; done
 ```
 
-`networkx` and `matplotlib` are needed only by `analytics.py`.
+`networkx`, `numpy` and `matplotlib` are needed only by `analytics.py`;
+`scipy` is optional (faster layouts).
 
 Languages covered (theme terms, organisation words, language detection, spaCy
 NER): English, French, German, Dutch, Italian, Spanish, Portuguese, Catalan,
@@ -197,14 +247,16 @@ python site_actors.py https://example.org -o results/example_org --no-crawl \
 | `--spacy-model` | NER model, or `none` |
 | `--ner-size` | `sm` (default), `md` or `lg` spaCy models in automatic mode |
 | `--theme-scope` | `any` (default), `page`, `paragraph` or `sentence`: keep only mentions whose page / paragraph / context window contains a theme term |
-| `--focus-themes` | Comma-separated subset of themes that count for `--theme-scope` and `--theme-filter` |
+| `--focus-themes` | Comma-separated themes that count for `--theme-scope` and `--theme-filter` (default: every theme not marked `#: descriptive` in the theme file; descriptive themes are still recorded, with `focus_theme` = `no`) |
+| `--ner-workers` | Processes that run spaCy over the pages in a pre-pass that fills the NER cache (default 3; 1 = no parallel pre-pass). `--ner-workers 4` halves a full `--no-crawl` re-run |
 | `--context-sentences` | Sentences either side of the mention kept as context (default 1) |
 | `--strip-regions` | Drop nav, header, footer and sidebars entirely (by default they are kept but flagged) |
 | `--no-links` | Do not use outbound-link text and logo alt text as names |
 | `--min-mentions` | Drop organisations with fewer distinct mentions |
 | `--refresh` | Fetch again the pages already in the cache |
 | `--no-crawl` | Only analyse what is already cached (no web access) |
-| `--theme-filter` | Inclusion criterion of the master network: `source` (default), `site`, `event` or `none` (see below) |
+| `--theme-filter` | Inclusion criterion of the master network: `source` (default), `direct`, `site`, `event` or `none` (see below) |
+| `--network-scope` | `participation` (default): rows that are not evidence of taking part go to `context_organisations`; `all`: every row stays in `event_organisations` (see [Network scope](#network-scope-participation-and-context)) |
 | `--keep-menu-themes` | Keep theme terms found in menus, sidebars and site furniture in the main `master_themes` sheet |
 | `--keep-ner-only` | Keep organisations found only by NER (spaCy) with no other evidence in the master network (default: listed in the `ner_only_candidates` sheet) |
 | `--edition-policy` | `nearest` (default) or `all`: how a linked page reached from several editions of a recurring event is tied to them (see [Master files](#master-files)) |
@@ -262,8 +314,10 @@ the master file), which is the main handle for judging precision:
 | `pattern_after` | A capitalised name followed by a lower-case organisational noun; weak, so it is checked like NER | "the Abolitionist Futures collective" |
 | `appositive` | Names introduced or followed by a descriptor | "the feminist collective **Mujeres Creando**", "**Sea-Watch**, a German NGO", "l'associazione **Naga**" |
 | `ner` | spaCy named-entity recognition (`ORG`) | names without a tell-tale noun, e.g. "Abolitionist Futures" |
-| `link` | Text or logo alt text of links to other websites | partner logo strips, "supported by" lists |
-| `website` | A name that a linked web address spells, found in the text around it | "Code Rood ... code-rood.org" |
+| `link` | Text or logo alt text of links to other websites, when the text spells the linked site's name or the link goes to a site's home page | partner logo strips, "supported by" lists |
+| `link_text` | Any other link text (an article title, a page name linked deep into a site); weak, so it is checked like NER | "DGB-Jugend Region Stuttgart" linking to a sub-page |
+| `website` | A name that a web address given or linked in the same paragraph or agenda entry spells | "Code Rood ... code-rood.org" |
+| `website_elsewhere` | A name that a web address spells when the address is only given elsewhere in the corpus; weak, checked like NER (this is how "Welt", "Zeit" or "Blick" came from welt.de, zeit.de, blick.ch) | "Zeit" with zeit.de linked on another page |
 | `title` | A group named in an agenda entry's title that spaCy tagged as a person or "other", kept when the same name is in at least two titles or spells the entry's website or link | "Shell must fall", "Stay grounded" |
 
 Acronyms defined in the text, e.g. "Independent Workers Union of Great
@@ -273,8 +327,19 @@ case, accents, umlaut spellings, hyphens, a leading article or elided article
 spacing ("Geef Tegengas" and "Geef Tegen Gas") are merged too. The most
 frequent spelling is shown.
 
-Names found only by NER (or `pattern_after`), by link text, by a web address
-or by a descriptor are checked against the whole corpus before they are kept:
+Names found only by NER-like methods (`ner`, `pattern_after`, `link_text`,
+`website_elsewhere`), by a web address or by a descriptor are checked against
+the whole corpus before they are kept:
+
+- a one-word name that the language's part-of-speech tagger reads as an
+  ordinary word (noun, adjective, verb ...) in at least half of its own
+  contexts, or a weekday ("Freitag", "Samstag"), is dropped, unless title,
+  pattern, appositive or watchlist evidence, a strong link or a website given
+  in the paragraph itself supports it. Institutional compounds
+  ("Bundesregierung", "Landesregierung") and hyphenated organisation names
+  ("Rosa-Luxemburg-Stiftung") are exempt. `organisations.csv` records the
+  votes: `pos_votes` (contexts tagged) and `pos_common` (of them, read as an
+  ordinary word); both are blank for names of several words;
 
 - a name made only of words the corpus also writes in lower case ("Climate
   Justice", "Hydrogen", "Approach") is ordinary language, not a name;
@@ -329,9 +394,44 @@ count, for every page carrying it (flagged `boilerplate` in `theme_hits.csv`).
 | Value | Organisations of a source are kept when ... |
 |---|---|
 | `source` (default) | the source itself has a theme hit |
+| `direct` | the source itself has a theme hit; agenda entries, calendar cells, the event's own page and its landing page also when any source of their event has one |
 | `event` | any source tied to the same event has a theme hit |
 | `site` | any page of the same website has a theme hit; each agenda entry of a seed PDF is still judged on its own |
 | `none` | always (no inclusion criterion) |
+
+When to consider `direct`: under the default `source`, the first full run kept
+only 16 agenda-entry rows. 314 agenda entries were left out only because an
+entry of 15 to 50 words named no theme term, and 94 of them (112 organisation
+entries, e.g. Code Rood, ANV-COP21, Alternatiba, Extinction Rebellion) belong
+to events whose other sources do have theme evidence. `direct` lets the
+listing and the event's own pages pass on the event's evidence, while every
+other source still needs its own hit. It is a looser reading of the inclusion
+criterion, so it is an option, not the default.
+
+Only focus themes count. A line `#: descriptive` directly under a theme's
+`[header]` in the theme file marks a descriptive theme (older versions read
+the line as a comment): its hits are found and recorded in `theme_hits.csv`
+and `master_themes` (`focus_theme` = `no`) but do not count for the filter or
+for any-theme measures, and `analytics.py` reports them on their own. In
+`themes_colonialism_racism_fascism.txt`, `global_south` (24 variants of
+"Global South", "Globaler Süden", "Sud global" ...) and `authoritarianism` are
+descriptive. "Global South" is mostly a geographic or economic description; on
+the stratified sample of the first full run, making it descriptive raised the
+precision of colonialism hits from 79 % to 98 %, at the cost of 98 sources and
+1,581 network rows (4.8 %) that lose their only hit (about a fifth of those
+sources do frame the Global South as colonial). To count them as before:
+`--focus-themes colonialism,racism,fascism,global_south,authoritarianism`.
+
+Extractivism stays under colonialism. This is a choice about the construct:
+about 80 % of extractivism hits frame extraction without naming colonialism.
+To study it apart, use `themes_extractivism_separate.txt` (the same file with
+extractivism as its own theme) as `--themes`. The theme file also excludes
+"empire" in its non-colonial senses (a business or media empire, a historical
+state such as the Roman or Ottoman empire, campaign names), words that only
+contain a term ("ostracism", "conspiracist", German "Fahrerassistenz", Basque
+"nazio", Greek "απόφαση"), and adds the recall terms found in the first run
+(French and Portuguese plurals such as "néocoloniaux", "coloniais"; German
+"völkisch").
 
 `--focus-themes` limits which themes count. The log, the `about` sheet of
 `master_network.xlsx` and `run_info.json` (`master_files`) say how many rows,
@@ -424,7 +524,19 @@ source tied to two events gives two rows.
   `only_in_menus_or_footers`, `repeated_on_site` (every mention is in a
   passage repeated in the main content of many pages of the site, such as
   an organiser line on every event page; such rows stay in the network),
-  `source_has_theme`, `example_context`.
+  `source_has_theme`, then the network-scope columns (see
+  [Network scope](#network-scope-participation-and-context)): `doc_kind`
+  (`listing`, `page`, `programme` or `report`) and `doc_kind_reason`,
+  `attribution` (`event`, `edition`, `site_level`, `not_tied`, `other_year`),
+  `source_year` (the year a source's address or title names, or blank),
+  `duplicate_document_of` (the original this source is an exact copy of),
+  `translation_of` (the document this one translates), `participation`
+  (`yes` / `no`) and `context_reason`; `example_context` stays last. Masters
+  made by older versions lack these columns; `make_master.py` adds them when
+  run again on the folder, and `analytics.py` reads both.
+- `context_organisations` (also written as `master_network_context.csv`): the
+  rows with `participation` = `no`, same columns. With `--network-scope all`
+  it is empty and `event_organisations` holds every row.
 - `events`: each event of the network once, with all of its organisations.
 - `all_events`: every event found (agenda entries, calendar, event pages),
   with how well it was covered (`link_followed`, `link_status`,
@@ -446,9 +558,11 @@ source tied to two events gives two rows.
 - `sources`: every source read, with its theme hits.
 - `excluded_sources`: sources left out by the theme filter, with their
   organisations and the reason.
-- `about`: how the file was made (filter, counts before and after, the result
-  folders it was built from, the run's command and versions). `analytics.py`
-  reads its filter and folders.
+- `about`: how the file was made (filter, `network_scope`, counts before and
+  after, `context_rows_<reason>` for each context reason (`report`,
+  `other_year`, `site_level`, `not_tied`, `copy`), the result folders it was
+  built from, the run's command and versions). `analytics.py` reads its filter
+  and folders.
 
 A network name that joins several organisations ("Exxon & Shell",
 "Greenpeace and Civil Rights Defenders") is split into one row per
@@ -462,7 +576,11 @@ the masters are built.
 event, event date, link and key, the country columns, the source link, the
 sentence with two sentences before and after, the organisations named in that
 paragraph, the layer, whether the same sentence was already found elsewhere
-(`duplicate_of`), and `menu_or_sidebar`. Terms found only in menus, sidebars,
+(`duplicate_of`), and `menu_or_sidebar`, then `focus_theme` (`no` for a
+descriptive theme), `doc_kind`, `attribution`, `source_year`,
+`duplicate_document_of`, `translation_of`, `passage_id` (the same sentence has
+the same id wherever it occurs) and `doc_theme_rows` (how many theme rows the
+same source gives: a long report can give hundreds). Terms found only in menus, sidebars,
 footers, site furniture and short labels are in a separate sheet
 (`menus_and_sidebars`) unless `--keep-menu-themes` is given. Sheet `about`
 as above.
@@ -475,8 +593,24 @@ was found on; calendar cells to the event in the cell; every line of an agenda
 PDF to the agenda entry it belongs to. When several editions of a recurring
 event link to the same website, a linked page goes to the edition nearest its
 page date (`--edition-policy nearest`; the other editions are listed in
-`recurring_event_editions`), or to all of them with `--edition-policy all`
-(the behaviour of earlier versions). Event dates come from the calendar cells
+`recurring_event_editions`) when those events are one series (the same
+link once scheme, www., date and trailing slash are ignored, or names that
+share at least 40 % of their words once years, digits and bracket tags are
+removed); events that only share a website go to "(other pages of <site>)"
+(`attribution` `site_level`). With `--edition-policy all` a page goes to all
+of them (the behaviour of earlier versions). A linked source whose address or
+title names another year than its event's (`source_year`) is `other_year`.
+Exact copies of a document (the same file under `www.` or not, `http` or
+`https`, with or without a trailing slash, or the same text) are marked with
+`duplicate_document_of`; a copy tied to the same event as its original is
+context, and `analytics.py` counts each document once. Translations are marked
+with `translation_of` only; they change no tie. Pages repeated inside one PDF
+are read once (the Ulex "Documento" gave 1,365 theme rows, about 94 now).
+One event listed twice (in the calendar and an agenda PDF, or in two agenda
+entries with different links on the same website) is merged when both have the
+same start date and links on the same host (social-media and platform links
+are left alone); `events.csv` and `all_events` list the other keys in
+`merged_from`, and those keys still resolve. Event dates come from the calendar cells
 (start to end), the event page's structured data, or the date written in the
 agenda entry. Seed PDFs appear as `pdf:<file name>` in the `site` and
 `listed_on` columns.
@@ -486,11 +620,50 @@ other settings:
 
 ```bash
 python make_master.py results/run1 results/run2 -o results/master \
-  [--min-confidence medium] [--theme-filter source|site|event|none] [--keep-menu-themes] \
-  [--keep-ner-only]
+  [--min-confidence medium] [--theme-filter direct|source|site|event|none] \
+  [--network-scope participation|all] [--keep-menu-themes] [--keep-ner-only]
 ```
 
 `make_master.py` writes its own `run.log` in the output folder.
+
+## Network scope: participation and context
+
+A linked 60-page report names hundreds of organisations it cites, and none of
+them takes part in the event that linked it; in the first full run linked PDFs
+gave 53 % of all network rows (one study alone 1,100 rows tied to one event).
+Every network row therefore says what its source is and how it was tied to
+its event, and `--network-scope participation` (the default) keeps in
+`event_organisations` only the rows that are evidence of taking part.
+
+`doc_kind` (with `doc_kind_reason`), by `make_master.classify_document`:
+
+| `doc_kind` | Sources |
+|---|---|
+| `listing` | an agenda entry or a calendar cell |
+| `page` | the event's own page and the landing page (always), and any other web page |
+| `programme` | a PDF whose title or file name says programme, flyer, call, invitation, timetable or press release (`Programm`, `appel`, `Aufruf` ...), or a PDF of fewer than 3,000 words without such words |
+| `report` | a PDF whose title or file name says report, study, guide, newsletter, brochure (`Bericht`, `rapport`, `Studie` ...), a longer PDF without either kind of word, or a web page naming more than 100 organisations that is not a programme or partner list |
+
+A row is context (`participation` = `no`, with the reason in
+`context_reason`) when its source is a `report`; when it comes from "(other
+pages of <site>)" (`attribution` `site_level`) or from "(not tied to an
+event)" (`not_tied`); when its source names another year than its event's
+(`other_year`); or when its source is a copy of a document already tied to the
+same event. Agenda entries, calendar cells, the event's own page and landing
+pages are never reports or other-year sources. `--network-scope all` keeps
+every row in `event_organisations`, with the same flag columns.
+
+`analytics.py` reads both sheets: its default network uses the participation
+rows, its sensitivity table adds the context rows back ("+context rows"),
+only the reports ("reports included"), or caps every source at 50
+organisations. On masters made before these columns existed it classifies the
+sources itself with `make_master.classify_document` (or, when that cannot be
+imported, it takes an L3 source naming more than 100 organisations without a
+programme or partner word in its address or title for a report) and says
+which in its diagnostics. To correct a source by hand, fill in the `include`
+column of the `sources_to_code` sheet of `org_codes_template.xlsx` (1 =
+evidence of participation, 0 = leave out) and run `analytics.py` with
+`--source-codes`.
 
 ## Seed PDFs (agendas and link lists)
 
@@ -621,7 +794,8 @@ Written to `--output-dir`:
   `location_text`, plus `location_structured` from the event page),
   `entry_words`, `link_followed` and `link_status` (was the event's own link
   read, and if not, why), `pages_analysed`, `words_analysed`,
-  `org_mentions`, `sources_with_theme_hit`.
+  `org_mentions`, `sources_with_theme_hit`, `merged_from` (keys of duplicate
+  events merged into this one, "; "-joined).
 - `mentions.csv`: one row per mention: organisation, surface form, type,
   methods, event (with `event_key`), URL, `source_unit`, page title and date,
   `fetched_at`, page region, boilerplate flag, themes in the context window /
@@ -630,7 +804,8 @@ Written to `--output-dir`:
   This is the file for coding in Excel, NVivo, Atlas.ti etc.
 - `organisations.csv`: one row per organisation: type, confidence, mention
   and page counts, methods, spelling variants, acronyms, co-occurring themes
-  (overall and one column per theme), linked domains, first URL.
+  (overall and one column per theme), linked domains, first URL, and for
+  one-word names the part-of-speech votes `pos_votes` and `pos_common`.
 - `theme_hits.csv`: every theme term found, with its passage, event(s),
   source and whether it sits in a menu or sidebar (the source of
   `master_themes`).
@@ -698,6 +873,7 @@ folder) and never changes it:
 python analytics.py results/full_run -o results/full_run_analytics
 python analytics.py results/master -o results/analytics --run results/run1 results/run2
 python analytics.py results/full_run -o results/analytics_curated --org-codes org_codes.csv
+python analytics.py results/full_run -o results/analytics_all --network-scope all --layers L1-L3
 ```
 
 It needs `master_network`, `master_themes` and `events.csv`; `sources.csv`,
@@ -706,24 +882,40 @@ from every `--run` folder, combined), and analyses that need a missing file are 
 and listed in `summary.json`. A `make_master.py` output folder holds only the
 master files: without `--run`, the run folders it was built from (named in
 its `about` sheet) are used when they still exist; give `--run` when they
-have moved. The output folder receives:
+have moved. Older masters (without the network-scope, `focus_theme` or
+`passage_id` columns) are read too: missing `participation` counts as `yes`
+(and the sources are classified as described under
+[Network scope](#network-scope-participation-and-context)), missing
+`focus_theme` follows the `#: descriptive` marks of `--themes-file`, and a
+missing `passage_id` is worked out from the sentence. On the first full run it
+takes about 2.5 minutes and 1 GB of memory. The output folder receives:
 
 - `analytics.xlsx` (README and diagnostics sheets first) and the same tables
   as `tables/*.csv`: coverage by stream (agenda, calendar) with confidence
   intervals, missingness, the measurement ladder, concentration of theme hits
-  in a few documents, theme prevalence by stream, period, year, country and
-  language, per-entry and per-page rates, organisation centrality and
-  bridging, organisation by theme, theme co-occurrence, and a sensitivity
-  table across filters and scenarios.
+  in a few documents, documents and passages per event
+  (`event_theme_documents`), the descriptive themes, theme prevalence by
+  stream, period, year, country, language and words read, per-entry and
+  per-page rates, rows per tie level (`tie_levels`), organisation centrality,
+  communities and bridging, organisation by theme, theme co-occurrence, a
+  sensitivity table across filters, scenarios, layer sets and variants, and
+  checks of the inputs (`similar_sources`, `multi_name_series`).
 - `network/`: Gephi files (`.gexf`, `.graphml`) and node and edge CSVs of the
   event-organisation network and its organisation backbone, for the default
-  scenario and scenario A.
+  scenario and scenario A, and `org_backbone_core_<scenario>.gexf`: the
+  backbone restricted to organisations in two or more series (small enough to
+  open in Gephi at once). Backbone nodes carry their Louvain `community`;
+  edges of the bipartite graph carry `tie_sublevel`.
 - `charts/*.png`: six charts (coverage, measurement ladder, prevalence by
   stream and period, document concentration, backbone, prevalence by country).
 - `org_codes_template.xlsx`: the organisation authority list to curate (with
-  dropdowns), merge candidates and a stratified precision sample.
+  dropdowns and a `priority` column), the organisations in no series
+  (`no_series`), the sources with what the analysis took them for
+  (`sources_to_code`), merge candidates and a stratified precision sample.
 - `kwic_for_coding.xlsx`: theme passages in keyword-in-context layout with
-  coder columns, a codebook and a stratified coding sample.
+  coder columns, a codebook, a stratified coding sample (`coding_sample`
+  holds the 120 sampled passages, sorted by stratum, with `sample_weight` and
+  `double_coded`) and `event_level` (`no` for passages tied to no event).
 - `summary.json`, `summary.md` (a methods paragraph and caveats) and
   `analytics.log`.
 
@@ -733,51 +925,139 @@ the event title; C (the default) = organisations at or above
 C_curated = C without the places, site furniture, noise and event names you
 coded in `--org-codes`.
 
+Tie levels: L1 = the listing (agenda entry, calendar cell, the event's own
+page), L2 = the landing page the event links to, L3 = other linked pages and
+PDFs, split into L3s (on the event's own host, or a subdomain of it, or it of
+them; `www.` ignored) and L3x (other hosts). `--layers` picks the default set:
+`L1-L3s` (default), `L1-L3` or `L1+L2`; the sensitivity table always shows all
+three. L1 is structurally small (agenda entries name few organisations: 39
+rows against 1,797 on landing pages in the first full run), so a network on
+L1 alone says little. `tie_level` stays in the tables for older readers;
+`tie_sublevel` is the new column.
+
+The default network uses the participation rows (`--network-scope`), the
+theme filter of the masters, scenario C, the `L1-L3s` layers and series
+nodes. On the first full run (older masters, classified by
+`classify_document`) that is 230 series and about 5,900 organisations (1,207
+in two or more series), with about 0.5 million organisation pairs of which
+19 % lie inside the largest event, against 15,302 organisations, 3.6 million
+pairs and 46 % with every row. The sensitivity table's variants (column
+`variant`, at series level) show what each default leaves out:
+`+context rows` (every row), `reports included`, `cap 50 organisations per
+source` (most mentions first), `C without common_word? suggestions`, and
+`+L4` (rows of "(other pages of <site>)" given to the site's series when the
+site's event-tied rows all belong to one series; about 1,000 rows). The
+common-word suggestions are only suggestions: they never change the default
+network, because the ordinary-word rules of the extraction remove most such
+names and the analytics flag would also drop real organisations
+(Bundestag, Bundesregierung, Rosa-Luxemburg-Stiftung, Allianz, Milieudefensie,
+Spiegel, Linke).
+
 Some definitions behind the tables:
 
-- Event-level theme prevalence (`prev_*` tables, column `measure`): `own`
-  (the event's own listing text), `in_title`, and `any_all` (a theme on any
-  layer) are counted over all events of the group; `landing`, `linked` and
-  `any_web` only over the events whose link was read (column `denominator`).
-  `any_all` is the figure in `summary.md`; `any_web` can be lower than `own`
-  because its denominator is smaller.
+- Event-level theme prevalence (`prev_*` tables, column `measure`) counts
+  focus themes only: `own` (the event's own listing text), `in_title`, and
+  `any_all` (a theme on any layer) are counted over all events of the group;
+  `landing`, `linked`, `any_web` and `core` only over the events whose link
+  was read (column `denominator`). `core` counts L1, L2 and L3s sources that
+  are not reports, so long linked documents weigh less. `any_all` is the
+  figure in `summary.md`; `any_web` can be lower than `own` because its
+  denominator is smaller.
+- Prevalence depends on how much text was read: in the first full run the
+  share of events with a theme on any layer rises from 13 % for events with
+  fewer than 1,000 words read to 96 % for 100,000 words or more
+  (`prev_words_read`; each event's bin is `words_read_bin` in
+  `events_enriched`: `<1k`, `1-5k`, `5-20k`, `20-100k`, `>=100k`).
+  `share_std` gives the web-layer shares directly standardised over these
+  bins, with the bin mix of all events with web text as the standard (a bin
+  in which a group has no event takes the pooled share of that bin): by
+  period any_web is then 32, 35, 34, 43 and 53 %. Compare groups with
+  `share_std`, not `share`.
 - Event theme flags count every theme row outside menus and footers,
   including rows the pipeline marked `duplicate_of` (a passage seen first
   under another event); the de-duplication applies to the passage, document
-  and concentration counts only.
+  and concentration counts only. `event_theme_documents` gives, per event, the
+  distinct documents and passages with a hit by tie level, and flags the
+  events where one document gives more than half of the theme rows (Global
+  Power Up: 364 of 484 rows from one report). Raw theme rows are dominated by
+  long PDFs; count documents, passages or events.
+- Documents are identified by their address without scheme, `www.`, fragment
+  and trailing slash (the path keeps its case), and copies and translations
+  (`duplicate_document_of`, `translation_of`) count as one document; one
+  agenda entry is one document. `similar_sources` lists source pairs that name
+  nearly the same organisations (Jaccard 0.9 or more, at least 15 each) but
+  are tied to different series: copies the pipeline did not mark.
+- Series: editions share a series when they share a link; links to
+  platforms, pads and forms (`extract.is_skip_host`, e.g. `cryptpad.fr/form`)
+  never make a series. `multi_name_series` lists series whose editions carry
+  three or more unrelated names (two are mostly one event listed in two
+  languages); split them with `series_id` in `--event-codes`. Codes written
+  for an event key that the pipeline has since merged (`merged_from`) are
+  applied to the merged event.
+- `descriptive_themes`: rows, passages, documents, sites and events of each
+  descriptive theme, and how many of those events have no focus theme.
 - `link_followed` is true for every event with web-layer rows, even when
   `sites.csv` (from another run, or with the link host as the main site)
   does not list its host as read.
 - `bip_betweenness` (`org_centrality`) is shortest-path betweenness on the
   event-organisation graph, normalised by (n-1)(n-2)/2 over all its nodes as
   for a one-mode graph (not the bipartite maximum); compare it only within
-  one run.
+  one run. `org_centrality` also gives `n_sources`, `n_documents`, `n_L3s`
+  and `n_L3x`.
+- `communities`: Louvain communities of the default backbone (edge weight,
+  `--seed`, so the same seed gives the same partition), with their size, the
+  8 strongest members, dominant countries, the share of members seen in one
+  source only and the series covered; `summary.md` gives the modularity.
 - `org_theme`: at event level, `share`, `lift` and `shrunk` compare an
   organisation's series with the base rate over all sources; they are blank
   when the masters were already theme-filtered (see
   [Theme-hit inclusion criterion](#theme-hit-inclusion-criterion)).
+  Organisations named after a theme ("Rassismus", "Nazis", "Antifa", or a name
+  whose head is the theme word) are left out, since they co-occur with it by
+  construction. A pair is `robust` with two documents from two websites (or,
+  on unfiltered masters, the event-level rule); `org_bridging` lists the
+  organisations robust on two or more themes, by series, then documents.
 - `precision_by_stratum`: the `ALL` row is the stratified estimate, with a
   95 % interval (Wilson with the effective sample size, finite population
   correction) for the strict and lenient precision.
-- Before curation, `charts/05_backbone.png` colours organisations by the
+- `charts/05_backbone.png` draws the `--chart-nodes` (default 150)
+  organisations of the backbone with the highest strength among those in two
+  or more series (node size 20 + 12 x the square root of the series), and says
+  so in its title. scipy is not needed (`pip install scipy` only makes other
+  layouts faster). Before curation it colours organisations by the
   `suggested_class` guesses of `org_codes_template.xlsx` (`site_ui?`,
-  `place?`, `company?` ...) and says "uncurated" in its title; with
-  `--org-codes` it uses your `actor_class` codes.
+  `place?`, `company?`, `common_word?` ...) and says "uncurated" in its title;
+  with `--org-codes` it uses your `actor_class` codes.
 
-Options: `--theme-filter` (as in `make_master.py`; default: the filter the
-masters were built with, read from their `about` sheet, or `source` for older
-masters; filtered masters cannot be analysed without the criterion, so
-rebuild them with `make_master.py --theme-filter none` first), `--min-confidence`, `--org-codes` and `--event-codes` (curation files;
-examples and column meanings in `analytics_codes_example/README.txt`),
-`--themes-file`, `--backbone-alpha`, `--sample-size`, `--seed`,
-`--no-charts`, `--no-graphs`. When the default network has fewer than five
+Curation (`org_codes_template.xlsx`): code the `organisations` sheet in the
+order of `priority`: 1 = in two or more series of the default network, 2 = in
+one series there through the listing or the landing page, 3 = the rest;
+organisations in no series at all (priority 4) are in the `no_series` sheet.
+`suggested_class` `common_word?` marks weekdays (8 languages) and one-word
+title-case names that the language's part-of-speech tagger reads as an
+ordinary word in at least half of up to six of their contexts (on 128 hand
+labels of the first full run: 58 of 60 ordinary words found, 9 of 68 other
+names marked). The flag `only_in_reference_docs` marks names found only in
+linked reports. Fill in the curation columns, save the `organisations` sheet
+as `org_codes.csv` and run again with `--org-codes org_codes.csv` (an `.xlsx`
+file is read with its `no_series` sheet).
+
+Options: `--theme-filter` (as in `make_master.py`, including `direct`;
+default: the filter the masters were built with, read from their `about`
+sheet, or `source` for older masters without a record; filtered masters cannot
+be analysed without the criterion, so rebuild them with `make_master.py
+--theme-filter none` first), `--network-scope` (`participation` or `all`),
+`--layers` (`L1-L3s`, `L1-L3`, `L1+L2`), `--min-confidence`, `--org-codes`,
+`--event-codes` and `--source-codes` (curation files; examples and column
+meanings in `analytics_codes_example/README.txt`), `--themes-file`,
+`--backbone-alpha`, `--chart-nodes`, `--betweenness-k`, `--sample-size`,
+`--doc-cap`, `--precision-per-stratum`, `--seed`, `--no-charts`,
+`--no-graphs`. When the default network has fewer than five
 organisations (typical of a run on the agenda PDFs alone, where most names
 are low-confidence NER finds), the log, `summary.json` and `summary.md` warn
 that its centrality and backbone figures are not meaningful; use scenario A
-in the sensitivity table or `--min-confidence low` instead. Curation loop: fill in the `organisations`
-sheet of `org_codes_template.xlsx`, save it as `org_codes.csv` and run again
-with `--org-codes org_codes.csv`. `python analytics.py --selftest` checks the
-installation.
+in the sensitivity table or `--min-confidence low` instead.
+`python analytics.py --selftest` checks the installation.
 
 ## Limitations
 
@@ -789,5 +1069,14 @@ installation.
   sentence early, which only affects the context window, not detection.
 - Event countries rest on the event's name and agenda text; an event whose
   name names neither a country nor a known place gets no country.
+- Raw theme rows are dominated by long PDFs (one report can give hundreds of
+  rows to one event); report documents, passages and events, not rows.
+- Theme prevalence depends on how much text was read for an event; compare
+  groups with the standardised `share_std` or the `core` measure.
+- Extractivism counts as colonialism and Global South does not (see
+  [Theme-hit inclusion criterion](#theme-hit-inclusion-criterion)); both are
+  construct choices with the costs given there.
+- The network-scope rules misclassify about 1 PDF in 8; check the largest
+  sources in `sources_to_code` and correct them with `--source-codes`.
 - Respect the site's terms of use and `robots.txt`; keep `--delay` at 1s or
   more on small or volunteer-run sites.

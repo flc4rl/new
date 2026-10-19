@@ -6,7 +6,15 @@ Build the two master files from one or more result folders:
                    organisations were found for which event, and where.
                    Sheets:
                      event_organisations  the network (long format: a source
-                                          tied to two events gives two rows)
+                                          tied to two events gives two rows): by
+                                          default only rows that are evidence of
+                                          taking part in the event (see Network
+                                          scope below)
+                     context_organisations rows that are not (linked reports and
+                                          studies, other pages of a site several
+                                          events link to, sources about another
+                                          year, rows tied to no event, copies of
+                                          a document), with context_reason
                      events               each event of the network once, with
                                           its organisations
                      all_events           every event found (agenda entries,
@@ -38,12 +46,24 @@ Build the two master files from one or more result folders:
 
 Theme filter (--theme-filter, default "source"): a theme hit is the inclusion
 criterion for master_network. Organisations and events are kept only from
-sources with at least one theme term in their content (not only in menus,
-headers, footers or sidebars): "source" = the web page, the PDF, or for seed agendas the
-agenda entry itself; "site" = any page of the same website (an agenda entry
+sources with at least one hit of a focus theme in their content (not only in
+menus, headers, footers or sidebars; themes marked "#: descriptive" in the
+themes file do not count): "source" = the web page, the PDF, or for seed agendas
+the agenda entry itself; "direct" = as "source", but agenda entries, calendar
+cells, the event's own page and its landing page also pass when any source of
+their event has a hit; "site" = any page of the same website (an agenda entry
 is still judged on its own, as the agenda PDF counts as one site); "event" = any
 source tied to the same event; "none" keeps everything. master_themes is not
 filtered. The run log and the about sheet say how much was left out.
+
+Network scope (--network-scope, default "participation"): every network row
+says what kind of document its source is (doc_kind: listing, page, programme,
+report; see classify_document), how the source was tied to the event
+(attribution: event, edition, site_level, not_tied, other_year), whether it is
+a copy or translation of another document, and whether it is evidence of
+taking part in the event (participation, context_reason). Rows with
+participation=no go to the context_organisations sheet; "all" keeps every row
+in event_organisations.
 
 Country columns (event_country, country_iso, country_source, location_text)
 come from events.csv of each result folder, matched on event_key. For folders
@@ -61,6 +81,7 @@ several runs or to change the filter:
 
     python make_master.py results/movementhub results/pdf_agendas -o results/master
     python make_master.py results/movementhub -o results/movementhub --theme-filter none
+    python make_master.py results/movementhub -o results/movementhub --network-scope all
 """
 
 from __future__ import annotations
@@ -74,13 +95,19 @@ import re
 from collections import Counter, OrderedDict, defaultdict
 from pathlib import Path
 from typing import Dict, Iterator, List, Optional, Sequence, Set, Tuple
+from urllib.parse import unquote, urlparse
 
 log = logging.getLogger(__name__)
 csv.field_size_limit(10_000_000)
 
 NO_EVENT = "(not tied to an event)"
 CONFIDENCE_RANK = {"low": 0, "medium": 1, "high": 2}
-THEME_FILTERS = ["source", "site", "event", "none"]
+THEME_FILTERS = ["direct", "source", "site", "event", "none"]
+NETWORK_SCOPES = ["participation", "all"]
+# Layers that document the event itself: under the 'direct' theme filter they count when
+# any source of their event has a theme hit.
+DIRECT_LAYERS = {"listing_seed", "listing_calendar", "main_event_page", "landing"}
+LISTING_LAYERS = {"listing_seed", "listing_calendar"}
 FURNITURE_REGIONS = {"nav", "header", "footer", "aside"}
 COUNTRY_FIELDS = ["event_country", "country_iso", "country_source", "location_text"]
 
@@ -90,13 +117,16 @@ NETWORK_FIELDS = ["event", "event_date", "event_link", "event_key", *COUNTRY_FIE
                   "page_date", "fetched_at", "content_vs_event", "years_after_event",
                   "recurring_event_editions", "site_linked_from_events", "found_by",
                   "named_in_event_title", "only_in_menus_or_footers", "repeated_on_site", "source_has_theme",
+                  "doc_kind", "doc_kind_reason", "attribution", "source_year", "duplicate_document_of",
+                  "translation_of", "participation", "context_reason",
                   "example_context"]
 EVENT_FIELDS = ["event", "event_date", "event_link", "event_key", *COUNTRY_FIELDS,
                 "n_organisations", "organisations", "n_sources", "sources"]
 ALL_EVENT_FIELDS = ["event", "date", "event_link", "event_key", *COUNTRY_FIELDS, "listed_on",
                     "calendar_months", "entry_words", "link_followed", "link_status", "pages_analysed",
                     "words_analysed", "org_mentions", "sources_with_theme_hit", "in_network",
-                    "network_organisations", "left_out_by_theme_filter", "location_structured"]
+                    "network_organisations", "left_out_by_theme_filter", "location_structured",
+                    "merged_from"]
 THEME_FIELDS = ["theme", "term", "event", "event_date", "event_link", "event_key", *COUNTRY_FIELDS,
                 "n_events_for_passage", "layer", "content_vs_event", "years_after_event",
                 "recurring_event_editions", "site_linked_from_events",
@@ -104,7 +134,8 @@ THEME_FIELDS = ["theme", "term", "event", "event_date", "event_link", "event_key
                 "context_before", "sentence", "context_after", "organisations_in_paragraph",
                 "organisations_in_paragraph_keys",
                 "site", "site_role", "is_pdf", "pdf_found_on", "region", "boilerplate",
-                "menu_or_sidebar", "duplicate_of"]
+                "menu_or_sidebar", "duplicate_of", "focus_theme", "doc_kind", "attribution",
+                "source_year", "duplicate_document_of", "translation_of", "passage_id", "doc_theme_rows"]
 SOURCE_FIELDS = ["source_unit", "source_link", "page_title", "site", "site_role", "site_status", "kind",
                  "is_pdf", "page_date", "fetched_at", "words", "event_keys", "events", "org_mentions",
                  "has_theme_hit", "theme_hits", "menu_theme_hits", "in_network"]
@@ -183,6 +214,106 @@ def _layer_fallback(row: dict, ev: dict) -> str:
         return "landing"
     pdf = _true(row.get("is_pdf")) or bool(re.search(r"\.pdf(?:\?|$)", url, re.I))
     return "linked_pdf" if pdf else "linked_page"
+
+
+# --------------------------------------------------------------------------
+# What kind of document a source is, and how it was tied to its event
+# --------------------------------------------------------------------------
+# Words in a PDF's title or file name that make it part of the event itself (a programme,
+# flyer, call, invitation, press release) or a publication about something else (a
+# report, study, guide, newsletter). Matched anywhere in a word ("Programmheft").
+_PROGRAMME_WORDS = re.compile(
+    r"(?i)prog(?:ramm|rama|ramme|ram)?\b|prog[_\-. ]|programm|programa|programme|program[_\-. ]|flyer"
+    r"|faltblatt|folder|aufruf|appel|call[_\-. ]?(?:for|to)|einladung|invitation|invito|welcome|willkommen"
+    r"|bienvenue|accueil|livret|carnet|leaflet|tract|plakat|affiche|poster|ablaufplan|zeitplan|timetable"
+    r"|schedule|horaire|fahrplan|pressemitteilung|press[_\- ]?release|communiqu|planprog")
+_PROGRAMME_CASED = re.compile(r"\bPM[_\-]")
+_REPORT_WORDS = re.compile(
+    r"(?i)report|rapport|bericht|studie|study|étude|etude|estudio|informe|relat[oó]rio|zpr[aá]va|dossier"
+    r"|working[_\- ]?paper|paper|booklet|brosch|brochure|guide|handbook|handbuch|leitfaden|assessment"
+    r"|review|publikation|publication|analys|annual|jahresbericht|newsletter|bulletin|echoes|zeitung"
+    r"|beilage|journal|magazin|zine|factsheet|fact[_\- ]sheet|position|memorandum|satzung|statut"
+    r"|estatuto|beleidsplan|aanbeveling|recommendation|forderung|faq|strategie|strategy"
+    r"|legal[_\- ]?opinion")
+# Pages that name many organisations as the event's own partners, not as a report would.
+_PARTNER_WORDS = re.compile(
+    r"(?i)partner|partenaires|unterst[uü]tzer|signataires|signatories|who we are|[uü]ber uns"
+    r"|qui sommes|line-?up|agenda")
+LONG_PDF_WORDS = 3000      # a PDF without either kind of word is a report from this length
+MANY_ORGS_ON_PAGE = 100    # a web page naming more organisations is a list or report
+
+
+def classify_document(url: str, title: str, words: int, n_orgs: int, is_pdf: bool,
+                      layer: str) -> Tuple[str, str]:
+    """The kind of document a source is, and why: 'listing' (an agenda entry or calendar
+    cell), 'programme' (a PDF that is part of the event: programme, flyer, call,
+    invitation, press release, or a short PDF), 'report' (a linked publication: report,
+    study, guide, newsletter, or a long PDF; or a web page naming more than
+    MANY_ORGS_ON_PAGE organisations that is not a programme or partner list) or 'page'.
+    Landing pages and the event's own page are always 'page'."""
+    if layer in LISTING_LAYERS:
+        return "listing", "agenda entry or calendar cell"
+    if layer in ("landing", "main_event_page"):
+        return "page", "the event's own page" if layer == "main_event_page" else "the page the event links to"
+    try:
+        name = unquote(urlparse(url or "").path.rstrip("/").rsplit("/", 1)[-1])
+    except ValueError:
+        name = ""
+    text = f"{title or ''} {name}"
+    prog = _PROGRAMME_WORDS.search(text) or _PROGRAMME_CASED.search(text)
+    if is_pdf:
+        if prog:
+            return "programme", f"programme word '{prog.group(0).strip()}' in the title or file name"
+        rep = _REPORT_WORDS.search(text)
+        if rep:
+            return "report", f"report word '{rep.group(0).strip()}' in the title or file name"
+        if (words or 0) >= LONG_PDF_WORDS:
+            return "report", f"PDF of {words} words (at least {LONG_PDF_WORDS})"
+        return "programme", f"PDF of {words or 0} words (fewer than {LONG_PDF_WORDS})"
+    if layer in ("linked_page", "main_page") and (n_orgs or 0) > MANY_ORGS_ON_PAGE:
+        if prog:
+            return "page", f"names {n_orgs} organisations, programme word '{prog.group(0).strip()}'"
+        try:   # the whole address counts here (/qui-sommes-nous/notre-manifeste/)
+            path = re.sub(r"[-_/.+]+", " ", unquote(urlparse(url or "").path))
+        except ValueError:
+            path = ""
+        partner = _PARTNER_WORDS.search(f"{title or ''} {path}")
+        if partner:
+            return "page", f"names {n_orgs} organisations, partner word '{partner.group(0).strip()}'"
+        return "report", f"web page naming {n_orgs} organisations (more than {MANY_ORGS_ON_PAGE})"
+    return "page", ""
+
+
+ATTRIBUTIONS = ("event", "edition", "site_level", "not_tied", "other_year")
+_CONTEXT_REASONS = OrderedDict([("report", "linked report or study"),
+                                ("other_year", "about another year"),
+                                ("site_level", "other pages of a site several events link to"),
+                                ("not_tied", "not tied to an event"),
+                                ("copy", "copy of")])
+
+
+def _attribution(ev: dict) -> str:
+    """How a row's source was tied to its event; derived for folders made before
+    events_json had it ('(other pages of ...' -> site_level, no event -> not_tied)."""
+    a = ev.get("attribution") or ""
+    if a in ATTRIBUTIONS:
+        return a
+    name = str(ev.get("name") or NO_EVENT)
+    if name == NO_EVENT or not name.strip():
+        return "not_tied"
+    return "site_level" if name.startswith("(") else "event"
+
+
+def _parse_editions(value: str) -> List[Tuple[str, str]]:
+    """recurring_event_editions ("Name (2023-07-12 to 2023-07-14); Other (2021-08-01)")
+    as (name, date) pairs."""
+    out = []
+    for part in (value or "").split("; "):
+        if not part.strip():
+            continue
+        m = re.match(r"(.*) \((\d{4}-\d\d(?:-\d\d)?[^()]*)\)$", part)
+        out.append((m.group(1), m.group(2)) if m else (part, ""))
+    return out
 
 
 _title_key_cache: Dict[str, str] = {}
@@ -315,7 +446,29 @@ def _country_of(ev: dict, by_key: Dict[str, dict], by_name: Dict[tuple, dict]) -
 # --------------------------------------------------------------------------
 # Corpus evidence for organisation names (NER-only candidates, coordinated names)
 # --------------------------------------------------------------------------
-NER_ONLY_METHODS = frozenset({"ner", "pattern_after"})   # extract.NER_LIKE_METHODS
+NER_ONLY_METHODS = frozenset({"ner", "pattern_after", "link_text", "website_elsewhere"})  # fallback
+
+
+def _weak_methods() -> frozenset:
+    """Methods that are not evidence on their own (extract.NER_LIKE_METHODS, else the
+    fallback above). 'website' and 'link' of older folders stay strong."""
+    try:
+        from extract import NER_LIKE_METHODS
+        return frozenset(NER_LIKE_METHODS) or NER_ONLY_METHODS
+    except ImportError:
+        return NER_ONLY_METHODS
+
+
+# Weekday names are never organisations, however often they appear ("Freitag", "Samedi").
+WEEKDAYS = frozenset("""
+monday tuesday wednesday thursday friday saturday sunday
+montag dienstag mittwoch donnerstag freitag samstag sonnabend sonntag
+lundi mardi mercredi jeudi vendredi samedi dimanche
+lunes martes miércoles miercoles jueves viernes sábado sabado domingo
+lunedì lunedi martedì martedi mercoledì mercoledi giovedì giovedi venerdì venerdi sabato domenica
+maandag dinsdag woensdag donderdag vrijdag zaterdag zondag
+segunda terça terca quarta quinta sexta
+""".split())
 CANDIDATE_FIELDS = NETWORK_FIELDS + ["corpus_sources", "corpus_sites", "why_candidate"]
 _LEGAL_FORM = re.compile(r"\s(?:AG|SE|plc|PLC|Ltd\.?|Limited|GmbH|LLC|Inc\.?|S\.?A\.?|SpA|S\.p\.A\.|N\.?V\.?|"
                          r"B\.?V\.?|e\.\s?V\.|Oy|Oyj|AB|ASA|A/S|SAS|SARL|Srl|KG|Corp\.?|Corporation)$")
@@ -354,6 +507,11 @@ class OrgEvidence:
         self.spelt: Set[str] = set()
         self.watch: Set[str] = set()
         self.by_name: Dict[str, str] = {}     # canonical key of a display name -> org_key
+        self.weak = _weak_methods()
+        # Part-of-speech votes of one-word names (organisations.csv pos_votes, pos_common):
+        # key -> (votes, common). Folders without the columns keep the older rule.
+        self.pos: Dict[str, Tuple[int, int]] = {}
+        self.no_pos_folders: List[str] = []
         for res in results:
             for m in _iter(res / "mentions.csv"):
                 k = m.get("org_key") or ""
@@ -368,12 +526,24 @@ class OrgEvidence:
                 self.surfaces[k][m.get("organisation", "")] += 1
                 if m.get("org_type"):
                     self.typed.add(k)
+            has_pos = None
             for o in _iter(res / "organisations.csv"):
                 k = o.get("org_key") or ""
+                if has_pos is None:
+                    has_pos = "pos_votes" in o
                 if k and o.get("acronyms"):
                     self.spelt.add(k)
                 if k and o.get("methods"):
                     self.methods[k] |= _method_names(o["methods"])
+                if k and has_pos and str(o.get("pos_votes") or "").strip():
+                    try:
+                        v, c = int(float(o["pos_votes"])), int(float(o.get("pos_common") or 0))
+                    except ValueError:
+                        continue
+                    pv, pc = self.pos.get(k, (0, 0))
+                    self.pos[k] = (pv + v, pc + c)
+            if has_pos is False and (res / "mentions.csv").exists():
+                self.no_pos_folders.append(str(res))
             self.watch |= _watchlist_keys(res)
         try:
             from extract import canonical_key, tidy_surface
@@ -391,7 +561,7 @@ class OrgEvidence:
     def why_not(self, key: str) -> str:
         """"" when the name is corroborated, else why it is only a candidate."""
         methods = self.methods.get(key, set())
-        if not methods or methods - NER_ONLY_METHODS:
+        if not methods or methods - self.weak:
             return ""   # unknown here (keep it) or found by another rule as well
         if key in self.typed or key in self.spelt or key in self.watch:
             return ""
@@ -406,11 +576,35 @@ class OrgEvidence:
             return ""   # a coined one-word name with an inner capital ("GroenFront", "BlackRock")
         content = self.content.get(key, set())
         seed_entries = {src for src, _, seed in content if seed}
-        if ((len({src for src, _, _ in content}) >= 3 and len({site for _, site, _ in content}) >= 2)
-                or len(seed_entries) >= 3) and not _is_place(surface):
+        broad = ((len({src for src, _, _ in content}) >= 3 and len({site for _, site, _ in content}) >= 2)
+                 or len(seed_entries) >= 3) and not _is_place(surface)
+        common = self.ordinary_word(key, surface)
+        if broad and not common:
             return ""
-        return (f"found only by NER (spaCy), in {n_src} source{'s' if n_src != 1 else ''} on "
-                f"{n_sites} website{'s' if n_sites != 1 else ''}, with no other evidence")
+        how = "NER (spaCy)" if methods <= {"ner", "pattern_after"} else "NER (spaCy) or link text"
+        why = (f"found only by {how}, in {n_src} source{'s' if n_src != 1 else ''} on "
+               f"{n_sites} website{'s' if n_sites != 1 else ''}, with no other evidence")
+        return f"{why}; {common}" if broad else why
+
+    def ordinary_word(self, key: str, surface: str) -> str:
+        """Why a one-word name may not use the breadth rule (named in 3 sources on 2
+        websites, or in 3 agenda entries), or "": a weekday never; another one-word name
+        that is not an acronym or camelCase only when the part-of-speech tagger mostly
+        read it as a name (pos_votes >= 2, fewer than half of them an ordinary word).
+        Names without votes (folders made before pos_votes existed) keep the older rule."""
+        if " " in key.strip():
+            return ""
+        if key.casefold() in WEEKDAYS or surface.casefold() in WEEKDAYS:
+            return "a weekday"
+        if _ACRONYM.fullmatch(surface) or _CAMEL.fullmatch(surface):
+            return ""
+        if key not in self.pos:
+            return ""
+        votes, common = self.pos[key]
+        if votes >= 2 and common / votes < 0.5:
+            return ""
+        return (f"one word read as an ordinary word in {common} of {votes} contexts"
+                if votes else "one word with no part-of-speech reading as a name")
 
     def attested(self, name: str) -> str:
         """org_key of `name` when the corpus or a watchlist knows it as a corroborated
@@ -558,6 +752,8 @@ class ThemeFilter:
                         self.menu_only_units.add(u)
                 # Events tied to themed passages (also names-only ids for completeness).
                 for r in _iter(res / "theme_hits.csv"):
+                    if (r.get("focus_theme") or "yes") == "no":
+                        continue
                     if not _is_menu_theme(r) and (r.get("source_unit") or r.get("source_link")) in self.units:
                         self.events.update(_event_id(e) for e in _events_of(r))
             elif not (res / "theme_hits.csv").exists():
@@ -581,6 +777,8 @@ class ThemeFilter:
                 self.old_folders.append(str(res))
                 for r in _iter(res / "theme_hits.csv"):
                     u = r.get("source_link", "")
+                    if (r.get("focus_theme") or "yes") == "no":
+                        continue    # a descriptive theme does not count for the filter
                     if _is_menu_theme(r):
                         self.menu_only_units.add(u)
                         continue
@@ -595,6 +793,14 @@ class ThemeFilter:
     def keeps(self, m: dict, ev: dict) -> bool:
         if self.mode == "none":
             return True
+        if self.mode == "direct":
+            # The listing, the event's own page and its landing page pass when any source
+            # of their event has a theme hit; every other source needs its own hit.
+            if self.unit_of(m) in self.units:
+                return True
+            return (not str(ev.get("name") or NO_EVENT).startswith("(")
+                    and (ev.get("layer") or _layer_fallback(m, ev)) in DIRECT_LAYERS
+                    and _event_id(ev) in self.events)
         if self.mode == "site":
             if m.get("site_role") == "seed":
                 # The "site" of an agenda entry is the whole agenda PDF: one hit anywhere in
@@ -605,7 +811,10 @@ class ThemeFilter:
             return _event_id(ev) in self.events
         return self.unit_of(m) in self.units
 
-    def reason(self, m: dict) -> str:
+    def reason(self, m: dict, ev: Optional[dict] = None) -> str:
+        if (self.mode == "direct" and ev is not None
+                and (ev.get("layer") or _layer_fallback(m, ev)) in DIRECT_LAYERS):
+            return "event has no theme hit"
         if self.mode == "site" and m.get("site_role") != "seed":
             return "no theme term on any page of this website"
         if self.mode == "event":
@@ -618,15 +827,122 @@ class ThemeFilter:
 # --------------------------------------------------------------------------
 # Tables
 # --------------------------------------------------------------------------
+class DocInfo:
+    """What the result folders say about each source, for classify_document and the
+    copy rule: words (sources.csv, else pages.csv), distinct organisations named in its
+    content, and the events each source link is tied to."""
+
+    def __init__(self, results: Sequence[Path]):
+        self.words: Dict[str, int] = {}
+        self.orgs: Dict[str, Set[str]] = defaultdict(set)
+        self.link_events: Dict[str, Set[str]] = defaultdict(set)
+        self.event_links: Dict[tuple, str] = {}           # (event name, date) -> link
+        self.links_by_name: Dict[str, Set[str]] = defaultdict(set)
+        for res in results:
+            src = res / "sources.csv"
+            rows = _iter(src) if src.exists() else (
+                {"source_unit": p.get("url", ""), "source_link": p.get("url", ""), "words": p.get("words"),
+                 "event_keys": p.get("event_keys", "")} for p in _iter(res / "pages.csv"))
+            for r in rows:
+                u = r.get("source_unit") or r.get("source_link") or ""
+                try:
+                    self.words[u] = int(float(r.get("words") or 0))
+                except ValueError:
+                    pass
+                self.link_events[r.get("source_link") or u].update(
+                    k for k in (r.get("event_keys") or "").split("; ") if k)
+            for e in _iter(res / "events.csv"):
+                self.event_links.setdefault((e.get("event", ""), e.get("date", "")), e.get("event_link", ""))
+                self.links_by_name[e.get("event", "")].add(e.get("event_link", ""))
+
+    def n_orgs(self, unit: str) -> int:
+        return len(self.orgs.get(unit, ()))
+
+    def classify(self, row: dict) -> Tuple[str, str]:
+        unit = row.get("source_unit") or row.get("source_link") or ""
+        return classify_document(row.get("source_link", ""), row.get("source_title") or row.get("page_title", ""),
+                                 self.words.get(unit, 0), self.n_orgs(unit), _true(row.get("is_pdf")),
+                                 row.get("layer", ""))
+
+    def link_of(self, name: str, date: str) -> str:
+        link = self.event_links.get((name, date))
+        if link is None:
+            links = sorted(self.links_by_name.get(name, ()))
+            link = links[0] if links else ""
+        return link
+
+
+def _derived_attribution(m: dict, ev: dict, layer: str, docs: Optional[DocInfo]) -> Tuple[str, str]:
+    """(attribution, source_year) of a row. New folders store them in events_json. For
+    older folders they are worked out here: placeholders as in _attribution; a linked
+    page or PDF tied to the nearest of several editions whose events are not one series
+    (events.same_series) is site_level; one whose address or title names a year that is
+    not its event's is other_year."""
+    if "attribution" in ev:
+        return _attribution(ev), str(ev.get("source_year") or "")
+    a = _attribution(ev)
+    if a != "event" or layer not in ("linked_page", "linked_pdf"):
+        return a, ""
+    try:
+        from events import event_years, same_series, source_year
+    except ImportError:
+        return a, ""
+    eds = _parse_editions(m.get("recurring_event_editions", ""))
+    if eds and docs is not None:
+        name, link = ev.get("name", ""), ev.get("link", "")
+        if not any(same_series(name, link, n, docs.link_of(n, d)) for n, d in eds):
+            return "site_level", ""
+    years = event_years(ev.get("date", ""))
+    if years:
+        sy = source_year(m.get("url") or m.get("source_link", ""), m.get("page_title", ""), years)
+        if sy is not None and sy not in years:
+            return "other_year", str(sy)
+    return a, ""
+
+
+def participation(rows: List[dict], docs: DocInfo) -> Counter:
+    """Fill doc_kind, doc_kind_reason, participation and context_reason of network rows
+    (in place). A row is evidence of taking part in its event (participation=yes)
+    unless its source is a linked report or study, it is about another year, it comes
+    from other pages of a site several events link to, it is tied to no event, or its
+    source is a copy of a document already tied to the same event. Returns the rows
+    per reason."""
+    reasons: Counter = Counter()
+    for r in rows:
+        kind, why = docs.classify(r)
+        r["doc_kind"], r["doc_kind_reason"] = kind, why
+        out = []
+        if kind == "report":
+            out.append(("report", _CONTEXT_REASONS["report"]))
+        att = r.get("attribution") or "event"
+        if att == "other_year":
+            out.append(("other_year", f"about another year ({r.get('source_year') or '?'})"))
+        if att == "site_level" or (r["event"].startswith("(") and r["event"] != NO_EVENT and att != "not_tied"):
+            out.append(("site_level", _CONTEXT_REASONS["site_level"]))
+        if att == "not_tied" or r["event"] == NO_EVENT:
+            out.append(("not_tied", _CONTEXT_REASONS["not_tied"]))
+        orig = r.get("duplicate_document_of") or ""
+        if orig and _event_id({"key": r.get("event_key"), "name": r["event"], "link": r["event_link"]}) \
+                in docs.link_events.get(orig, ()):
+            out.append(("copy", f"copy of {orig}"))
+        r["participation"] = "no" if out else "yes"
+        r["context_reason"] = "; ".join(t for _, t in out)
+        for k, _ in out:
+            reasons[k] += 1
+    return reasons
+
+
 def network_rows(results: Sequence[Path], min_confidence: str = "low",
                  theme_filter: Optional[ThemeFilter] = None,
                  excluded: Optional[Dict[str, dict]] = None,
                  before: Optional[Dict[tuple, list]] = None,
-                 judge: Optional["ThemeFilter"] = None) -> List[dict]:
+                 judge: Optional["ThemeFilter"] = None,
+                 docs: Optional[DocInfo] = None) -> List[dict]:
     """master_network rows (one per event x organisation x source). Mentions the
     theme filter leaves out are summarised per source in `excluded`; `before`
     receives every row key before the filter: [only in furniture, organisation,
-    event id, placeholder event]."""
+    event id, placeholder event]. `docs` (if given) receives the organisations named
+    in each source's content and the events of each source link, before the filter."""
     rows: "OrderedDict[tuple, dict]" = OrderedDict()
     by_key, by_name = _countries(results)
     judge = judge or theme_filter
@@ -651,7 +967,12 @@ def network_rows(results: Sequence[Path], min_confidence: str = "low",
                 continue
             is_bp = _is_menu_mention(m)
             is_rep = _true(m.get("boilerplate"))
-            for ev in _events_of(m):
+            m_evs = _events_of(m)
+            if docs is not None:
+                if not is_bp:
+                    docs.orgs[m.get("source_unit") or m["url"]].add(m.get("org_key") or nm)
+                docs.link_events[m["url"]].update(_event_id(e) for e in m_evs)
+            for ev in m_evs:
                 if before is not None:
                     b = before.setdefault((_event_id(ev), m["organisation"], m["url"]),
                                           [True, m["organisation"], _event_id(ev),
@@ -663,7 +984,7 @@ def network_rows(results: Sequence[Path], min_confidence: str = "low",
                         x = excluded.setdefault(u, {
                             "source_unit": u, "source_link": m.get("url", ""), "site": m.get("site", ""),
                             "site_role": m.get("site_role", ""), "_events": OrderedDict(),
-                            "_orgs": OrderedDict(), "reason": theme_filter.reason(m)})
+                            "_orgs": OrderedDict(), "reason": theme_filter.reason(m, ev)})
                         x["_events"][ev.get("name", "")] = None
                         x["_orgs"][m["organisation"]] = None
                     continue
@@ -671,6 +992,8 @@ def network_rows(results: Sequence[Path], min_confidence: str = "low",
                 key = (_event_id(ev), m["organisation"], m["url"])
                 r = rows.get(key)
                 if r is None:
+                    layer = ev.get("layer") or _layer_fallback(m, ev)
+                    attribution, s_year = _derived_attribution(m, ev, layer, docs)
                     r = rows[key] = {
                         "event": name, "event_date": ev.get("date", ""), "event_link": ev.get("link", ""),
                         "event_key": ev.get("key", ""), **_country_of(ev, by_key, by_name),
@@ -680,7 +1003,7 @@ def network_rows(results: Sequence[Path], min_confidence: str = "low",
                         "source_link": m["url"], "source_unit": m.get("source_unit") or m["url"],
                         "source_title": m.get("page_title", ""),
                         "site": m.get("site", ""), "site_role": m.get("site_role", ""),
-                        "layer": ev.get("layer") or _layer_fallback(m, ev),
+                        "layer": layer,
                         "is_pdf": _true(m.get("is_pdf")),
                         "page_date": m.get("page_date", ""), "fetched_at": m.get("fetched_at", ""),
                         "content_vs_event": ev.get("content_vs_event", ""),
@@ -691,6 +1014,10 @@ def network_rows(results: Sequence[Path], min_confidence: str = "low",
                                                  else _in_title(m.get("org_key", ""), name)),
                         "source_has_theme": (_true(m["source_has_theme"]) if m.get("source_has_theme")
                                              else judge.unit_of(m) in judge.units if can_judge else ""),
+                        "attribution": attribution, "source_year": s_year,
+                        "duplicate_document_of": m.get("duplicate_document_of", ""),
+                        "translation_of": m.get("translation_of", ""),
+                        "doc_kind": "", "doc_kind_reason": "", "participation": "yes", "context_reason": "",
                         "_methods": Counter(), "_bp": True, "_rep": True, "example_context": "", "_ex_bp": True,
                     }
                 r["mentions_on_source"] += 1
@@ -763,32 +1090,60 @@ def all_event_rows(results: Sequence[Path], network: List[dict], before: Set[str
     return out
 
 
-def theme_rows(results: Sequence[Path], keep_menu_themes: bool = False) -> Tuple[List[dict], List[dict]]:
+def passage_id(sentence: str) -> str:
+    """The same passage (sentence casefolded, whitespace normalised) has the same id."""
+    import hashlib
+    return hashlib.sha1(" ".join((sentence or "").casefold().split()).encode("utf-8")).hexdigest()[:12]
+
+
+def theme_rows(results: Sequence[Path], keep_menu_themes: bool = False,
+               docs: Optional[DocInfo] = None) -> Tuple[List[dict], List[dict]]:
     """master_themes rows, one per theme term and event (long format), and the rows
     found in menus, sidebars, site furniture and short labels (kept apart unless
-    keep_menu_themes)."""
+    keep_menu_themes). Every row says whether its theme is a focus theme (descriptive
+    themes are recorded with focus_theme=no), the document's kind (doc_kind, when
+    `docs` is given), how the source was tied to the event, copies, a passage_id and
+    how many rows of the same sheet come from the same source (doc_theme_rows)."""
     by_key, by_name = _countries(results)
     out: List[dict] = []
     menus: List[dict] = []
+    kinds: Dict[tuple, str] = {}
     for res in results:
         for r in _iter(res / "theme_hits.csv"):
             evs = _events_of(r)
             menu = _is_menu_theme(r)
+            pid = passage_id(r.get("sentence", ""))
             for ev in evs:
+                layer = ev.get("layer") or _layer_fallback(r, ev)
+                attribution, s_year = _derived_attribution(r, ev, layer, docs)
                 row = {**r, "event": ev.get("name") or NO_EVENT, "event_date": ev.get("date", ""),
                        "event_link": ev.get("link", ""), "event_key": ev.get("key", ""),
                        **_country_of(ev, by_key, by_name),
                        "n_events_for_passage": r.get("n_events") or len(evs),
-                       "layer": ev.get("layer") or _layer_fallback(r, ev),
+                       "layer": layer,
                        "content_vs_event": ev.get("content_vs_event", ""),
                        "years_after_event": ev.get("years_after_event", ""),
-                       "menu_or_sidebar": menu}
+                       "menu_or_sidebar": menu,
+                       "focus_theme": r.get("focus_theme") or "yes",
+                       "attribution": attribution, "source_year": s_year,
+                       "duplicate_document_of": r.get("duplicate_document_of", ""),
+                       "translation_of": r.get("translation_of", ""),
+                       "passage_id": pid}
+                if docs is not None:
+                    unit = r.get("source_unit") or r.get("source_link", "")
+                    kk = (unit, layer)
+                    if kk not in kinds:
+                        kinds[kk] = docs.classify({**row, "source_title": r.get("page_title", "")})[0]
+                    row["doc_kind"] = kinds[kk]
                 row.pop("events_json", None)
                 (menus if menu and not keep_menu_themes else out).append(row)
     key = lambda r: (r["event"].startswith("("), r.get("event_date") or "", r["event"].casefold(),  # noqa: E731
                      r.get("source_link", ""), r.get("theme", ""))
-    out.sort(key=key)
-    menus.sort(key=key)
+    for sheet in (out, menus):
+        per_doc = Counter(r.get("source_unit") or r.get("source_link", "") for r in sheet)
+        for r in sheet:
+            r["doc_theme_rows"] = per_doc[r.get("source_unit") or r.get("source_link", "")]
+        sheet.sort(key=key)
     return out, menus
 
 
@@ -919,11 +1274,17 @@ def _about_rows(results: Sequence[Path], facts: List[Tuple[str, object]]) -> Lis
 
 def build_masters(results: Sequence[Path], out_dir: Path, min_confidence: str = "low",
                   theme_filter: str = "source", keep_menu_themes: bool = False,
-                  stats: Optional[dict] = None, keep_ner_only: bool = False) -> List[Path]:
+                  stats: Optional[dict] = None, keep_ner_only: bool = False,
+                  network_scope: str = "participation") -> List[Path]:
     """Write master_network and master_themes (.csv and .xlsx) to out_dir and
     return their paths. `stats` (if given) receives the counts of what the theme
     filter kept and left out. Names found only by NER with no other evidence (see
-    OrgEvidence) go to the ner_only_candidates sheet unless keep_ner_only."""
+    OrgEvidence) go to the ner_only_candidates sheet unless keep_ner_only. With
+    network_scope 'participation', rows that are not evidence of taking part in the
+    event (see participation()) go to the context_organisations sheet and
+    master_network_context.csv; with 'all' the network keeps every row."""
+    if network_scope not in NETWORK_SCOPES:
+        raise ValueError(f"--network-scope must be one of {', '.join(NETWORK_SCOPES)}")
     out_dir.mkdir(parents=True, exist_ok=True)
     results = [Path(r) for r in results]
     tf = ThemeFilter(theme_filter, results)
@@ -937,15 +1298,22 @@ def build_masters(results: Sequence[Path], out_dir: Path, min_confidence: str = 
                     ", ".join(tf.from_mentions))
     excluded: Dict[str, dict] = {}
     before: Dict[tuple, list] = {}
+    docs = DocInfo(results)
     kept_net = network_rows(results, min_confidence, tf if theme_filter != "none" else None,
-                            excluded, before, judge=tf)
+                            excluded, before, judge=tf, docs=docs)
     evidence = OrgEvidence(results)
+    if evidence.no_pos_folders and not keep_ner_only:
+        log.info("organisations.csv in %s has no pos_votes column (made by an older version): "
+                 "one-word names found only by NER keep the older rule (3 sources on 2 websites). "
+                 "Run site_actors.py --no-crawl on the folder to add the part-of-speech votes",
+                 ", ".join(evidence.no_pos_folders))
     n_split = split_coordinated(kept_net, evidence)
     if n_split:
         kept_net.sort(key=_network_order)
         log.info("Split %d network %s naming several organisations at once (\"Exxon & Shell\") "
                  "into one row per organisation; found_by says 'split from ...'", n_split,
                  "row" if n_split == 1 else "rows")
+    participation(kept_net, docs)
     net = [r for r in kept_net if not r["only_in_menus_or_footers"]]
     furniture = [r for r in kept_net if r["only_in_menus_or_footers"]]
     tf_net = list(net)   # what the theme filter kept, before the NER-only candidates go
@@ -966,13 +1334,26 @@ def build_masters(results: Sequence[Path], out_dir: Path, min_confidence: str = 
                      "(--keep-ner-only on site_actors.py or make_master.py keeps them; a --watchlist entry "
                      "confirms a name)",
                      len(candidates), len({r["organisation"] for r in candidates}))
+    # Participation: what is evidence of taking part in the event stays in the network.
+    if network_scope == "participation":
+        context = [r for r in net if r["participation"] == "no"]
+        net = [r for r in net if r["participation"] == "yes"]
+    else:
+        context = []
+    context_counts: Counter = Counter()    # rows flagged per reason (in either scope)
+    for r in net + context:
+        if r["participation"] != "no":
+            continue
+        for k, label in _CONTEXT_REASONS.items():
+            if r["context_reason"].startswith(label) or f"; {label}" in r["context_reason"]:
+                context_counts[k] += 1
     kept_net = net + furniture
     before_content = [b for b in before.values() if not b[0]]
     del before
     before_ids = {b[2] for b in before_content if not b[3]}
     events = event_rows(net)
     all_events = all_event_rows(results, net, before_ids)
-    themes, menu_themes = theme_rows(results, keep_menu_themes)
+    themes, menu_themes = theme_rows(results, keep_menu_themes, docs)
     sources = source_rows(results, kept_net)
     for x in excluded.values():
         evs, orgs = list(x.pop("_events")), list(x.pop("_orgs"))
@@ -989,11 +1370,12 @@ def build_masters(results: Sequence[Path], out_dir: Path, min_confidence: str = 
                         for r in tf_net if not r["event"].startswith("(")}), len(before_ids)),
     }
     left_out_sources = len({x["source_unit"] for x in excl})
-    # What master_network actually holds (after the NER-only step): the counts above are
-    # taken before it, so they say what the theme filter alone kept.
+    # What master_network actually holds (after the NER-only step and the network scope):
+    # the counts above are taken before them, so they say what the theme filter alone kept.
+    real_events = [e for e in events if not e["event"].startswith("(")]
     in_file = {"network_rows_in_file": len(net),
                "organisations_in_file": len({r["organisation"] for r in net}),
-               "events_in_file": len(events)}
+               "events_in_file": len(real_events)}
     if theme_filter != "none":
         log.info("Theme filter '%s': kept %d of %d network rows, %d of %d organisations and %d of %d "
                  "events; %d %s with organisations but no theme hit %s left out (listed in the "
@@ -1009,22 +1391,37 @@ def build_masters(results: Sequence[Path], out_dir: Path, min_confidence: str = 
             else:
                 log.warning("The theme filter left master_network empty: no source has a theme hit. "
                             "Check the --themes file.")
+    if network_scope == "participation":
+        log.info("Network scope 'participation': %d rows are evidence of taking part in their event; "
+                 "%d rows are in the context_organisations sheet and master_network_context.csv (%s). "
+                 "Use --network-scope all to keep every row in the network.",
+                 len(net), len(context),
+                 ", ".join(f"{_CONTEXT_REASONS[k]}: {v}" for k, v in context_counts.most_common()) or "none")
     n_rows, n_orgs, n_events = in_file.values()
-    log.info("master_network: %d row%s, %d organisation%s, %d event%s%s",
+    n_placeholders = len(events) - len(real_events)
+    log.info("master_network: %d row%s, %d organisation%s, %d event%s%s%s",
              n_rows, "" if n_rows == 1 else "s", n_orgs, "" if n_orgs == 1 else "s",
              n_events, "" if n_events == 1 else "s",
-             "" if theme_filter == "none" and not candidates else " (after %s%s)" % (
-                 f"the theme filter '{theme_filter}'" if theme_filter != "none" else "",
-                 ("%s%d NER-only rows moved to ner_only_candidates" % (
-                     " and " if theme_filter != "none" else "", len(candidates))) if candidates else ""))
+             (f" plus {n_placeholders} placeholder event{'s' if n_placeholders != 1 else ''} "
+              "(other pages of a site, not tied)") if n_placeholders else "",
+             "" if theme_filter == "none" and not candidates and network_scope == "all" else " (after %s)" % (
+                 ", ".join(x for x in (
+                     f"the theme filter '{theme_filter}'" if theme_filter != "none" else "",
+                     f"{len(candidates)} NER-only rows moved to ner_only_candidates" if candidates else "",
+                     f"{len(context)} context rows moved to context_organisations"
+                     if network_scope == "participation" else "") if x)))
     if menu_themes:
         log.info("%d theme rows from menus, sidebars, site furniture and short labels are in the "
                  "menus_and_sidebars sheet of master_themes (--keep-menu-themes keeps them in the main "
                  "sheet)", len(menu_themes))
-    summary = {"theme_filter": theme_filter, "keep_menu_themes": keep_menu_themes,
-               "min_confidence": min_confidence,
+    summary = {"theme_filter": theme_filter, "network_scope": network_scope,
+               "keep_menu_themes": keep_menu_themes, "min_confidence": min_confidence,
                **{f"{k}_kept": a for k, (a, _) in n.items()}, **{f"{k}_before_filter": b for k, (_, b) in n.items()},
                **in_file,
+               "placeholder_events_in_file": n_placeholders,
+               "context_rows": len(context),
+               **{f"context_rows_{k}": context_counts.get(k, 0) for k in _CONTEXT_REASONS},
+               "rows_not_participation": sum(1 for r in net + context if r["participation"] == "no"),
                "sources_left_out": left_out_sources,
                "keep_ner_only": keep_ner_only, "ner_only_candidate_rows": len(candidates),
                "ner_only_candidate_organisations": len({r["organisation"] for r in candidates}),
@@ -1039,11 +1436,14 @@ def build_masters(results: Sequence[Path], out_dir: Path, min_confidence: str = 
 
     paths = []
     _write_csv(out_dir / "master_network.csv", net, NETWORK_FIELDS)
+    _write_csv(out_dir / "master_network_context.csv", context, NETWORK_FIELDS)
     _write_csv(out_dir / "master_themes.csv", themes, THEME_FIELDS)
-    paths += [out_dir / "master_network.csv", out_dir / "master_themes.csv"]
+    paths += [out_dir / "master_network.csv", out_dir / "master_network_context.csv",
+              out_dir / "master_themes.csv"]
     if _write_xlsx(out_dir / "master_network.xlsx", [("event_organisations", net, NETWORK_FIELDS),
                                                       ("events", events, EVENT_FIELDS),
                                                       ("all_events", all_events, ALL_EVENT_FIELDS),
+                                                      ("context_organisations", context, NETWORK_FIELDS),
                                                       ("menus_and_footers", furniture, NETWORK_FIELDS),
                                                       ("ner_only_candidates", candidates, CANDIDATE_FIELDS),
                                                       ("sources", sources, SOURCE_FIELDS),
@@ -1065,9 +1465,18 @@ def main(argv: Optional[List[str]] = None) -> None:
                     help="Leave out organisations below this confidence in master_network")
     ap.add_argument("--theme-filter", choices=THEME_FILTERS, default="source",
                     help="Keep organisations and events only from sources with a theme hit: the "
-                         "source itself ('source': page, PDF or agenda entry), any page of its "
-                         "website ('site'; agenda entries are still judged one by one), any source "
-                         "of the same event ('event'), or keep everything ('none')")
+                         "source itself ('source': page, PDF or agenda entry); as 'source', but "
+                         "agenda entries, calendar cells, the event's own page and its landing page "
+                         "also count when any source of their event has a hit ('direct'); any page "
+                         "of its website ('site'; agenda entries are still judged one by one), any "
+                         "source of the same event ('event'), or keep everything ('none')")
+    ap.add_argument("--network-scope", choices=NETWORK_SCOPES, default="participation",
+                    help="'participation': the network keeps the rows that are evidence of taking "
+                         "part in the event; linked reports and studies, other pages of a site "
+                         "several events link to, sources about another year, rows tied to no event "
+                         "and copies of a document go to the context_organisations sheet and "
+                         "master_network_context.csv. 'all': every row stays in the network (as in "
+                         "earlier versions), with the flag columns")
     ap.add_argument("--keep-ner-only", action="store_true",
                     help="Keep organisations found only by NER (spaCy) with no other evidence in the "
                          "network; by default they are listed in the ner_only_candidates sheet")
@@ -1090,7 +1499,8 @@ def main(argv: Optional[List[str]] = None) -> None:
     if missing:
         ap.error(f"no mentions.csv in {', '.join(missing)} (not a site_actors.py result folder?)")
     for p in build_masters(args.results, args.output_dir, args.min_confidence, args.theme_filter,
-                           args.keep_menu_themes, keep_ner_only=args.keep_ner_only):
+                           args.keep_menu_themes, keep_ner_only=args.keep_ner_only,
+                           network_scope=args.network_scope):
         print(p)
 
 

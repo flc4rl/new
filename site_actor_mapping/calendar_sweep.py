@@ -115,8 +115,28 @@ def _html_strings(obj) -> List[str]:
     return []
 
 
+_EVENT_ID = re.compile(r"""data-event-id\s*=\s*["']?([^"'\s>]+)""")
+
+
 def count_events(html: str, mec: bool = False) -> int:
+    """Events shown: distinct MEC event ids (data-event-id) when the page has them, else
+    the event markers (a multi-day event shows one marker per day)."""
+    ids = set(_EVENT_ID.findall(html))
+    if ids:
+        return len(ids)
     return len((MEC_EVENT_MARKERS if mec else EVENT_MARKERS).findall(html))
+
+
+def count_event_days(html: str) -> int:
+    """Event-days shown: distinct (day cell, event id) pairs of a MEC month view, else
+    the number of event markers."""
+    pairs, day = set(), ""
+    for m in re.finditer(r"""data-mec-cell\s*=\s*["']?(\d{8})|data-event-id\s*=\s*["']?([^"'\s>]+)""", html):
+        if m.group(1):
+            day = m.group(1)
+        elif day:
+            pairs.add((day, m.group(2)))
+    return len(pairs) or len(MEC_EVENT_MARKERS.findall(html))
 
 
 def sweep_mec(session: requests.Session, cfg: MecConfig, wait: Callable[[], None], timeout: float,
