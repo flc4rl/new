@@ -48,7 +48,7 @@ from crawler import CachedPage, CrawlConfig, Crawler, PageCache, normalise_url, 
 from extract import (
     NER_LIKE_METHODS, Block, OrgExtractor, ParsedPage, ThemeSet, Watchlist, acronym_pairs, block_hash,
     canonical_key, clean_ws, is_skip_host, load_stoplist, page_language, parse_html, parse_pdf_text,
-    split_sentences, squash_runs, weak_methods_for,
+    site_names, split_sentences, squash_key, squash_runs, weak_methods_for,
 )
 from events import EventIndex, EventRef, event_years, same_series, series_components, source_year
 from linked_sites import (PLATFORM_HOSTS, Site, SiteRegistry, Via, collect_targets, crawl_linked,
@@ -2029,6 +2029,8 @@ def run(args: argparse.Namespace, out: Path, info: dict) -> int:
             if k in rejected or not weak_of(k, r["methods"].split("+"), r.get("surface_form", "")):
                 continue
             surface = r.get("surface_form", "")
+            if _on_own_site(k, surface, r.get("site", "")):
+                continue       # "Lebenslaute" on lebenslaute.net: the group's own website
             if (k, surface) not in ordinary:
                 ordinary[(k, surface)] = ordinary_of(k, surface or None)
             if ordinary[(k, surface)]:
@@ -2338,6 +2340,15 @@ def aggregate(rows: List[dict], extractor: OrgExtractor, acr_display: Dict[str, 
 
 REJECTED_FIELDS = ["organisation", "org_key", "scope", "reason", "reason_text", "mentions_dropped",
                    "mentions_kept", "methods_dropped", "pages", "sites", "example_url", "example_context"]
+
+
+def _on_own_site(key: str, surface: str, site: str) -> bool:
+    """Is the mention on the website that the name spells ("Lebenslaute" on
+    lebenslaute.net, "Shell" on shell.com)? There it names the site's own organisation."""
+    if not site or ":" in site:
+        return False
+    names = {squash_key(n) for n in site_names(site.lower().removeprefix("www."))}
+    return bool(names & {squash_key(key), squash_key(surface or key)} - {""})
 
 
 def _rejected_rows(dropped: List[dict], mention_rows: List[dict], rejected: Set[str],

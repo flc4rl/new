@@ -35,3 +35,8 @@ Climate Justice Action | Climat Justice Action | CJA
 =Shell Must Fall
 # The party under its full name only (bare "Linke" is also the German adjective "left")
 Die Linke
+
+# Targets and groups whose names are also ordinary words (added after the first full run)
+=Shell | Royal Dutch Shell | Shell plc
+=Lebenslaute
+=Seebrücke

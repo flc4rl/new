@@ -3058,9 +3058,7 @@ class OrgExtractor:
         # adjective in fewer than 15% of them, is used as a name, not as a noun. Measured
         # on the first full run: Greenpeace 8%, Attac 9%, Lebenslaute 12%, Mediapart 0%;
         # Klimagerechtigkeit 18%, Solidarität 42%, Zeit 80%, Welt 94%.
-        w = strip_elision(surface.strip()).casefold().strip("’'")
-        mod, caps = getattr(self, "_modified", {}).get(w, (0, 0))
-        return not (caps >= 4 and mod < 0.15 * caps)
+        return not self._used_as_name(strip_elision(surface.strip()).casefold().strip("’'"))
 
     def is_lowercase_word(self, key: str, surface: Optional[str] = None) -> bool:
         """Is this one-word name a word the corpus writes in lower case (see
@@ -3082,6 +3080,12 @@ class OrgExtractor:
         if len(w) > 3 and w.endswith("s"):
             forms.add(w[:-1])
         return bool(forms & self._lowercase_keys)
+
+    def _used_as_name(self, word: str) -> bool:
+        """Is this casefolded word capitalised at least 4 times in the corpus and put
+        after an article or an inflected adjective in fewer than 15% of them?"""
+        mod, caps = getattr(self, "_modified", {}).get(word, (0, 0))
+        return caps >= 4 and mod < 0.15 * caps
 
     def merge_key(self, name: str) -> str:
         """The organisation key for `name` (a name or a canonical key) in this run.

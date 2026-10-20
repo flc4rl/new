@@ -299,7 +299,7 @@ Options for calendars and linked websites are listed under
   name means the text must write it with a capital (`=Stay Grounded` does not
   match "we must stay grounded"). Matches inside web or e-mail addresses are
   not counted.
-- **Field watchlist** (optional, `field_watchlist.txt`): 15 central groups of
+- **Field watchlist** (optional, `field_watchlist.txt`): 18 central groups and targets of
   the climate-justice field (Alternatiba, ANV-COP21, Amis de la Terre, Ende
   Gelände, Code Rood, Extinction Rebellion, Soulèvements de la Terre, Reclaim
   the Power, Stay Grounded, Attac, Greenpeace, Fridays for Future, Scientist
