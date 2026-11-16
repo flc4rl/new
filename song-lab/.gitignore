@@ -1,0 +1,15 @@
+# Dependencies and build output
+node_modules/
+dist/
+
+# Local study data: SQLite file, recordings, backups.
+# Lyrics are copyrighted and voice takes are personal, so none of this is ever committed.
+data/
+*.sqlite
+*.sqlite-journal
+songlab-backup-*.json
+tutor-queue-*.md
+
+# Secrets
+.env
+.env.*

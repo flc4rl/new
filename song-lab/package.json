@@ -1,0 +1,35 @@
+{
+  "name": "sudanese-arabic-song-lab",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Local web app that turns songs on YouTube into study material for Sudanese (Khartoum) Arabic.",
+  "engines": {
+    "node": ">=22.13"
+  },
+  "scripts": {
+    "start": "vite build && tsx --disable-warning=ExperimentalWarning server/index.ts --open",
+    "serve": "tsx --disable-warning=ExperimentalWarning server/index.ts",
+    "dev": "tsx watch --clear-screen=false --disable-warning=ExperimentalWarning server/index.ts --dev",
+    "build": "vite build",
+    "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p tsconfig.server.json",
+    "test": "tsx --disable-warning=ExperimentalWarning --test test/*.test.ts"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^1.9.0",
+    "@fontsource/noto-naskh-arabic": "^5.3.0",
+    "@vitejs/plugin-react": "^6.3.0",
+    "lucide-react": "^1.73.0",
+    "react": "^19.3.1",
+    "react-dom": "^19.3.1",
+    "tsx": "^4.23.15",
+    "vite": "^8.3.8",
+    "zod": "^4.6.7"
+  },
+  "devDependencies": {
+    "@types/node": "^22.20.5",
+    "@types/react": "^19.2.0",
+    "@types/react-dom": "^19.2.0",
+    "typescript": "^7.0.2"
+  }
+}

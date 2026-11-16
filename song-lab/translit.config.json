@@ -1,0 +1,27 @@
+{
+  "dialect": "Sudanese Arabic as spoken in Khartoum",
+  "rules": [
+    "Write the sound heard in the recording, not the spelling. Arabic script omits short vowels, so the transliteration cannot be worked out from the script by rule.",
+    "Long vowels are doubled: aa, ii, uu, ee, oo.",
+    "A doubled consonant (shadda) is written twice: kattar.",
+    "The article is written as heard and joined with a hyphen: al-beet, ash-shams.",
+    "Capital letters mark emphatic consonants and the deep h. Lower case is never emphatic, so a line never starts with a capital just because it is the start of a line."
+  ],
+  "letters": [
+    { "arabic": "ق", "write": "g", "sound": "hard g, as in galb (heart); write q only where q is actually sung" },
+    { "arabic": "ج", "write": "j", "sound": "a stop made further back than English j" },
+    { "arabic": "ث", "write": "s or t", "sound": "as heard" },
+    { "arabic": "ذ", "write": "z or d", "sound": "as heard" },
+    { "arabic": "ظ", "write": "Z", "sound": "emphatic z" },
+    { "arabic": "ص", "write": "S", "sound": "emphatic s" },
+    { "arabic": "ض", "write": "D", "sound": "emphatic d" },
+    { "arabic": "ط", "write": "T", "sound": "emphatic t" },
+    { "arabic": "ح", "write": "H", "sound": "breathy h from the throat" },
+    { "arabic": "خ", "write": "kh", "sound": "as in Bach" },
+    { "arabic": "غ", "write": "gh", "sound": "voiced kh" },
+    { "arabic": "ش", "write": "sh", "sound": "as in ship" },
+    { "arabic": "ع", "write": "3", "sound": "voiced throat sound" },
+    { "arabic": "ء", "write": "'", "sound": "glottal stop" }
+  ],
+  "otherConsonants": "All other consonants use their usual Latin letter."
+}
