@@ -101,8 +101,9 @@ export const api = {
   deleteSong: (id: string, keepCards: boolean) => del(`/api/songs/${id}?keepCards=${keepCards ? 1 : 0}`),
   lookup: (url: string) => get<YouTubeLookup>(`/api/youtube/lookup?url=${encodeURIComponent(url)}`),
 
-  addLines: (songId: string, text: string, afterLineId?: string | null) =>
-    post<Line[]>(`/api/songs/${songId}/lines`, { text, afterLineId }),
+  addLines: (songId: string, text: string) => post<Line[]>(`/api/songs/${songId}/lines`, { text }),
+  addBlankLine: (songId: string, afterLineId: string) =>
+    post<Line[]>(`/api/songs/${songId}/lines`, { blank: true, afterLineId }),
   updateLine: (id: string, p: LinePatch) => patch<Line>(`/api/lines/${id}`, p),
   deleteLine: (id: string) => del(`/api/lines/${id}`),
   moveLine: (id: string, delta: -1 | 1) => post<Line[]>(`/api/lines/${id}/move`, { delta }),

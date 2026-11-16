@@ -942,3 +942,180 @@ select {
   display: grid;
   gap: 12px;
 }
+
+/* ---------- lyrics ---------- */
+
+.lyrics-inner {
+  max-width: 760px;
+  margin: 0 auto;
+  display: grid;
+  gap: 12px;
+}
+
+.lyrics-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  min-height: 34px;
+}
+
+.lyrics-toolbar .push {
+  margin-left: auto;
+}
+
+.lines {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 2px;
+}
+
+.line {
+  display: grid;
+  grid-template-columns: 52px minmax(0, 1fr) auto;
+  gap: 0 8px;
+  padding: 8px 8px 8px 6px;
+  border-radius: var(--radius);
+  border-inline-start: 3px solid transparent;
+  scroll-margin: 30vh 0;
+}
+
+.line:hover,
+.line:focus-within {
+  background: var(--surface);
+}
+
+.line-gutter {
+  display: grid;
+  justify-items: center;
+  align-content: start;
+  gap: 4px;
+  padding-top: 12px;
+  color: var(--ink-3);
+  font-size: 0.8rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.line-text {
+  display: grid;
+  gap: 1px;
+  min-width: 0;
+}
+
+.editable {
+  display: block;
+  width: 100%;
+  margin: 0;
+  padding: 2px 6px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  resize: none;
+  overflow: hidden;
+  field-sizing: content;
+  min-height: 1.6em;
+}
+
+.editable:hover {
+  border-color: var(--line);
+}
+
+.editable:focus {
+  outline: none;
+  border-color: var(--accent);
+  background: var(--surface);
+}
+
+.editable::placeholder {
+  color: var(--ink-3);
+  opacity: 0.7;
+  font-style: italic;
+}
+
+/* Arabic: about 1.5 times the size of the Latin rows beneath it. */
+.line-ar {
+  font-size: 1.6rem;
+  font-weight: 600;
+  line-height: 1.75;
+  text-align: right;
+}
+
+.line-ar::placeholder {
+  font-style: normal;
+}
+
+.line-tr {
+  font-size: 1.05rem;
+  line-height: 1.5;
+  color: var(--ink);
+}
+
+.line-gl {
+  font-size: 0.95rem;
+  line-height: 1.45;
+  color: var(--ink-2);
+}
+
+.line-actions {
+  display: flex;
+  align-items: flex-start;
+  gap: 2px;
+  padding-top: 8px;
+}
+
+.paste-area {
+  font-size: 1.4rem;
+  line-height: 1.9;
+  resize: vertical;
+}
+
+.menu {
+  position: relative;
+}
+
+.menu-list {
+  position: absolute;
+  top: 100%;
+  inset-inline-end: 0;
+  z-index: 30;
+  min-width: 190px;
+  padding: 4px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  box-shadow: var(--shadow);
+}
+
+.menu-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 7px 9px;
+  border: 0;
+  border-radius: 4px;
+  background: none;
+  text-align: start;
+  cursor: pointer;
+}
+
+.menu-item:hover:not(:disabled) {
+  background: var(--surface-2);
+}
+
+.menu-item:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.menu-item.is-danger {
+  color: var(--danger);
+}
+
+.confirm-ar {
+  font-size: 1.4rem;
+  line-height: 1.8;
+  color: var(--ink);
+}

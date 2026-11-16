@@ -1,5 +1,5 @@
 // Punctuation, symbols and tatweel at the edges of a token are not part of the word.
-const EDGES = /^[\p{P}\p{S}ـ]+|[\p{P}\p{S}ـ]+$/gu
+const EDGES = /^[\p{P}\p{S}\u0640]+|[\p{P}\p{S}\u0640]+$/gu
 
 /** Split a lyric line into words on whitespace. Vowel marks inside a word are kept. */
 export function splitWords(arabic: string): string[] {
@@ -30,5 +30,5 @@ export function formatTime(sec: number | null | undefined, decimals = 1): string
 
 /** Wrap right-to-left text so neighbouring Latin text and punctuation keep their order in plain text. */
 export function isolateRtl(text: string): string {
-  return text ? `⁧${text}⁩` : text
+  return text ? `\u2067${text}\u2069` : text
 }
