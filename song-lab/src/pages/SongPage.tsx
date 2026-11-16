@@ -1,15 +1,23 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { ArrowLeft, ClipboardPaste, Pencil } from 'lucide-react'
+import { ArrowLeft, ClipboardPaste, Eraser, Pencil } from 'lucide-react'
 import { api, type LinePatch } from '../api'
+import { useApp } from '../App'
 import { useHotkeys, useLoad, usePlayer } from '../lib/hooks'
+import { activeLineAt, lineEnd, nudge, NUDGE_SEC, round2 } from '../lib/timing'
 import { Button, Confirm, EmptyState, LoadError, Spinner, useToast } from '../components/ui'
 import { PlayerFrame, Transport } from '../components/PlayerPanel'
+import { LoopPanel, ShortcutList, SyncPanel } from '../components/StagePanels'
 import { EditSongDialog } from '../components/SongDialogs'
 import { LineRow, type LineActions } from '../components/LineRow'
+import { Menu } from '../components/Menu'
 import { PasteLyricsDialog } from '../components/PasteLyricsDialog'
 import type { Line, SongDetail } from '../../shared/types'
 
 type SetDetail = (next: SongDetail | ((prev: SongDetail) => SongDetail)) => void
+
+/** How much of a line is played back after a nudge, so the new edge can be heard. */
+const NUDGE_PREVIEW_SEC = 2.5
+const SEEK_STEP_SEC = 3
 
 export function SongPage({ songId }: { songId: string }) {
   const detail = useLoad(() => api.song(songId), [songId])
@@ -28,14 +36,26 @@ export function SongPage({ songId }: { songId: string }) {
 function SongView({ detail, setDetail, reload }: { detail: SongDetail; setDetail: SetDetail; reload: () => Promise<void> }) {
   const { song, lines } = detail
   const toast = useToast()
+  const { settings, saveSettings } = useApp()
   const { hostRef, player, snap, retry } = usePlayer(song.youtubeId, song.savedRate)
+
   const [editing, setEditing] = useState(false)
   const [pasting, setPasting] = useState(false)
   const [deleting, setDeleting] = useState<Line | null>(null)
+  const [clearing, setClearing] = useState(false)
+
+  /** The highlighted line: the one being sung, looped or picked by hand. */
+  const [cursorId, setCursorId] = useState<string | null>(null)
+  /** The line a loop or a one-off play is holding on to. */
+  const [spanLineId, setSpanLineId] = useState<string | null>(null)
+  const [looping, setLooping] = useState(false)
+  const [syncing, setSyncing] = useState(false)
+  /** In sync mode: the line the next tap will time. Equal to lines.length when only the final end is missing. */
+  const [syncIndex, setSyncIndex] = useState(0)
 
   // The newest state, for handlers that must not be recreated on every change.
-  const live = useRef({ detail })
-  live.current = { detail }
+  const live = useRef({ detail, snap, player, settings, cursorId, spanLineId, looping, syncing, syncIndex })
+  live.current = { detail, snap, player, settings, cursorId, spanLineId, looping, syncing, syncIndex }
 
   const focusLine = useRef<string | null>(null)
   useEffect(() => {
@@ -53,6 +73,34 @@ function SongView({ detail, setDetail, reload }: { detail: SongDetail; setDetail
       .catch(toast.error)
   }, [snap.status, snap.rate, song.id, song.savedRate, setDetail, toast])
 
+  // When the player lets go of a loop, by finishing it or because the user moved away, so does the page.
+  useEffect(() => {
+    if (!snap.loop) {
+      setSpanLineId(null)
+      setLooping(false)
+    }
+  }, [snap.loop])
+
+  // Highlight the line being sung.
+  useEffect(() => {
+    if (!player) return
+    return player.onTick((t) => {
+      const s = live.current
+      if (s.syncing || s.spanLineId || !s.snap.playing) return
+      const active = activeLineAt(s.detail.lines, t)
+      if (active && active.id !== s.cursorId) setCursorId(active.id)
+    })
+  }, [player])
+
+  // Keep the highlighted line in view, and in sync mode the line that is waiting for its tap.
+  const followId = syncing ? (lines[syncIndex]?.id ?? cursorId) : cursorId
+  useEffect(() => {
+    if (!followId) return
+    const active = document.activeElement
+    if (active instanceof HTMLTextAreaElement || active instanceof HTMLInputElement) return
+    document.getElementById(`line-${followId}`)?.scrollIntoView({ block: 'center', behavior: 'smooth' })
+  }, [followId])
+
   const actions = useMemo(() => {
     const fail = (err: unknown) => {
       toast.error(err)
@@ -61,6 +109,12 @@ function SongView({ detail, setDetail, reload }: { detail: SongDetail; setDetail
     const setLines = (next: Line[]) => setDetail((d) => ({ ...d, lines: next }))
     const patchLine = (line: Line) =>
       setDetail((d) => ({ ...d, lines: d.lines.map((l) => (l.id === line.id ? line : l)) }))
+
+    const saveLine = (id: string, patch: LinePatch) => {
+      // Show the edit at once; the server's answer then confirms it.
+      setDetail((d) => ({ ...d, lines: d.lines.map((l) => (l.id === id ? { ...l, ...patch } : l)) }))
+      api.updateLine(id, patch).then(patchLine).catch(fail)
+    }
 
     const removeLine = async (line: Line) => {
       try {
@@ -71,13 +125,99 @@ function SongView({ detail, setDetail, reload }: { detail: SongDetail; setDetail
       }
     }
 
+    const cursorLine = () => {
+      const s = live.current
+      return s.detail.lines.find((l) => l.id === s.cursorId) ?? null
+    }
+
+    /** Play one stretch of the song a number of times, holding the highlight on its line. */
+    const playSpan = (lineId: string, start: number, end: number, repeats: number, pauseSec: number, leadInSec: number) => {
+      const s = live.current
+      if (!s.player || s.snap.status !== 'ready') return
+      setCursorId(lineId)
+      setSpanLineId(lineId)
+      setLooping(repeats !== 1)
+      s.player.startLoop({ start, end, repeats: repeats === 0 ? Infinity : repeats, pauseSec, leadInSec })
+    }
+
+    const loopLine = (line: Line) => {
+      const s = live.current
+      if (line.startSec == null) return
+      const { loopRepeats, loopPauseSec, loopLeadInSec } = s.settings
+      playSpan(line.id, line.startSec, lineEnd(s.detail.lines, line)!, loopRepeats, loopPauseSec, loopLeadInSec)
+    }
+
+    const playLine = (line: Line) => {
+      const s = live.current
+      if (line.startSec == null) return
+      playSpan(line.id, line.startSec, lineEnd(s.detail.lines, line)!, 1, 0, s.settings.loopLeadInSec)
+    }
+
+    const toggleLoop = () => {
+      const s = live.current
+      if (s.looping) {
+        s.player?.stopLoop()
+        return
+      }
+      const line = cursorLine()
+      if (line) loopLine(line)
+    }
+
+    const startSync = (from?: number) => {
+      const s = live.current
+      const all = s.detail.lines
+      if (all.length === 0) return
+      s.player?.stopLoop()
+      const firstUntimed = all.findIndex((l) => l.startSec == null)
+      const index = from ?? (firstUntimed >= 0 ? firstUntimed : 0)
+      const previous = all[index - 1]
+      setSyncing(true)
+      setSyncIndex(index)
+      setCursorId(previous?.id ?? null)
+      // Go back to the line before, so there is a run-up to the tap.
+      if (previous?.startSec != null) s.player?.seek(previous.startSec)
+      else if (index === 0) s.player?.seek(0)
+    }
+
+    const tap = () => {
+      const s = live.current
+      if (!s.player || !s.syncing) return
+      const all = s.detail.lines
+      // A tap always lands a little after the sound; take the reaction time back off.
+      const lag = s.snap.playing ? s.settings.tapOffsetSec * s.snap.rate : 0
+      const t = round2(Math.max(0, s.player.time() - lag))
+      const index = s.syncIndex
+      if (index >= all.length) {
+        const last = all[all.length - 1]
+        if (last?.startSec != null && t > last.startSec) saveLine(last.id, { endSec: t })
+        setSyncing(false)
+        toast.info('Every line is timed.')
+        return
+      }
+      const line = all[index]
+      const previous = all[index - 1]
+      saveLine(line.id, { startSec: t, endSec: null })
+      // A line ends where the next begins.
+      if (previous?.startSec != null && t > previous.startSec) saveLine(previous.id, { endSec: t })
+      setCursorId(line.id)
+      setSyncIndex(index + 1)
+    }
+
+    const undoTap = () => {
+      const s = live.current
+      if (!s.syncing || s.syncIndex === 0) return
+      const all = s.detail.lines
+      const index = s.syncIndex - 1
+      const previous = all[index - 1]
+      saveLine(all[index].id, { startSec: null, endSec: null })
+      setSyncIndex(index)
+      setCursorId(previous?.id ?? null)
+      s.player?.seek(Math.max(0, (previous?.startSec ?? 0) - 1))
+    }
+
     const lineActions: LineActions = {
-      saveLine(id: string, patch: LinePatch) {
-        // Show the edit at once; the server's answer then confirms it.
-        setDetail((d) => ({ ...d, lines: d.lines.map((l) => (l.id === id ? { ...l, ...patch } : l)) }))
-        api.updateLine(id, patch).then(patchLine).catch(fail)
-      },
-      deleteLine(line: Line) {
+      saveLine,
+      deleteLine(line) {
         const d = live.current.detail
         const hasWork =
           line.translit !== '' ||
@@ -90,10 +230,10 @@ function SongView({ detail, setDetail, reload }: { detail: SongDetail; setDetail
         if (hasWork) setDeleting(line)
         else void removeLine(line)
       },
-      moveLine(id: string, delta: -1 | 1) {
+      moveLine(id, delta) {
         api.moveLine(id, delta).then(setLines).catch(fail)
       },
-      addLineAfter(line: Line) {
+      addLineAfter(line) {
         api
           .addBlankLine(line.songId, line.id)
           .then((next) => {
@@ -103,16 +243,111 @@ function SongView({ detail, setDetail, reload }: { detail: SongDetail; setDetail
           })
           .catch(fail)
       },
+      selectLine(line) {
+        const s = live.current
+        if (s.syncing) {
+          startSync(s.detail.lines.findIndex((l) => l.id === line.id))
+          return
+        }
+        setCursorId(line.id)
+        if (line.startSec == null) return
+        if (s.looping) loopLine(line)
+        else {
+          s.player?.stopLoop()
+          s.player?.seek(line.startSec)
+        }
+      },
+      playLine,
+      nudgeLine(line, edge, direction) {
+        const s = live.current
+        const fresh = s.detail.lines.find((l) => l.id === line.id)
+        if (!fresh || fresh.startSec == null) return
+        const changes = nudge(s.detail.lines, fresh, edge, direction * NUDGE_SEC)
+        if (changes.length === 0) return
+        for (const change of changes) {
+          const patch: LinePatch = {}
+          if (change.startSec !== undefined) patch.startSec = change.startSec
+          if (change.endSec !== undefined) patch.endSec = change.endSec
+          saveLine(change.id, patch)
+        }
+        const mine = changes.find((c) => c.id === fresh.id)!
+        const start = mine.startSec ?? fresh.startSec
+        const end = mine.endSec ?? lineEnd(s.detail.lines, fresh)!
+        if (s.looping && s.spanLineId === fresh.id) {
+          // Keep looping, on the new edges.
+          playSpan(fresh.id, start, end, s.settings.loopRepeats, s.settings.loopPauseSec, s.settings.loopLeadInSec)
+        } else if (edge === 'start') {
+          // Play from exactly the new start, with no lead-in, so the edge can be judged by ear.
+          playSpan(fresh.id, start, Math.min(end, start + NUDGE_PREVIEW_SEC), 1, 0, 0)
+        } else {
+          playSpan(fresh.id, Math.max(start, end - NUDGE_PREVIEW_SEC), end, 1, 0, 0)
+        }
+      },
+      syncFrom(line) {
+        startSync(live.current.detail.lines.findIndex((l) => l.id === line.id))
+      },
     }
-    return { ...lineActions, removeLine, setLines, fail }
+
+    const stepLine = (delta: -1 | 1) => {
+      const s = live.current
+      const all = s.detail.lines
+      if (all.length === 0) return
+      const index = all.findIndex((l) => l.id === s.cursorId)
+      const target = all[Math.min(all.length - 1, Math.max(0, index + delta))]
+      lineActions.selectLine(target)
+    }
+
+    const nudgeCursor = (edge: 'start' | 'end', direction: -1 | 1) => {
+      const line = cursorLine()
+      if (line) lineActions.nudgeLine(line, edge, direction)
+    }
+
+    return {
+      ...lineActions,
+      removeLine,
+      setLines,
+      fail,
+      cursorLine,
+      toggleLoop,
+      startSync,
+      tap,
+      undoTap,
+      stepLine,
+      nudgeCursor,
+    }
   }, [reload, setDetail, toast])
 
   useHotkeys({
     ' ': () => player?.toggle(),
+    ArrowUp: () => actions.stepLine(-1),
+    ArrowDown: () => actions.stepLine(1),
+    ArrowLeft: () => player?.seek(player.time() - SEEK_STEP_SEC),
+    ArrowRight: () => player?.seek(player.time() + SEEK_STEP_SEC),
+    Enter: () => {
+      if (syncing) actions.tap()
+      else {
+        const line = actions.cursorLine()
+        if (line) actions.playLine(line)
+      }
+    },
+    Backspace: () => actions.undoTap(),
+    l: () => !syncing && actions.toggleLoop(),
+    s: () => (syncing ? setSyncing(false) : actions.startSync()),
     '-': () => player?.stepRate(-1),
     '=': () => player?.stepRate(1),
     '+': () => player?.stepRate(1),
+    ',': () => actions.nudgeCursor('start', -1),
+    '.': () => actions.nudgeCursor('start', 1),
+    '<': () => actions.nudgeCursor('end', -1),
+    '>': () => actions.nudgeCursor('end', 1),
+    Escape: () => {
+      if (syncing) setSyncing(false)
+      else player?.stopLoop()
+    },
   })
+
+  const cursor = lines.find((l) => l.id === cursorId) ?? null
+  const timedCount = lines.filter((l) => l.startSec != null).length
 
   return (
     <div className="song-page">
@@ -138,6 +373,30 @@ function SongView({ detail, setDetail, reload }: { detail: SongDetail; setDetail
           {snap.status === 'ready' && snap.rates.length === 1 && (
             <p className="stage-note">YouTube does not offer other speeds for this video.</p>
           )}
+
+          {!syncing && (
+            <LoopPanel
+              snap={snap}
+              settings={settings}
+              looping={looping}
+              canLoop={snap.status === 'ready' && cursor?.startSec != null}
+              onToggle={actions.toggleLoop}
+              onSettings={(patch) => saveSettings(patch).catch(toast.error)}
+            />
+          )}
+          <SyncPanel
+            lines={lines}
+            syncing={syncing}
+            syncIndex={syncIndex}
+            playing={snap.playing}
+            onStart={() => actions.startSync()}
+            onTap={actions.tap}
+            onUndo={actions.undoTap}
+            onDone={() => setSyncing(false)}
+          />
+
+          <ShortcutList />
+
           {song.notes && (
             <section className="stage-section">
               <h2>Notes</h2>
@@ -168,11 +427,24 @@ function SongView({ detail, setDetail, reload }: { detail: SongDetail; setDetail
               <>
                 <div className="lyrics-toolbar">
                   <span className="muted small">
-                    {lines.length} {lines.length === 1 ? 'line' : 'lines'}
+                    {lines.length} {lines.length === 1 ? 'line' : 'lines'} · {timedCount} timed
                   </span>
-                  <Button size="sm" className="push" icon={<ClipboardPaste size={14} />} onClick={() => setPasting(true)}>
+                  <span className="push" />
+                  <Button size="sm" icon={<ClipboardPaste size={14} />} onClick={() => setPasting(true)}>
                     Add lyrics
                   </Button>
+                  <Menu
+                    label="More lyric actions"
+                    items={[
+                      {
+                        label: 'Clear all timings',
+                        icon: <Eraser size={15} />,
+                        danger: true,
+                        disabled: timedCount === 0,
+                        onSelect: () => setClearing(true),
+                      },
+                    ]}
+                  />
                 </div>
                 <ol className="lines">
                   {lines.map((line, i) => (
@@ -182,6 +454,9 @@ function SongView({ detail, setDetail, reload }: { detail: SongDetail; setDetail
                       number={i + 1}
                       isFirst={i === 0}
                       isLast={i === lines.length - 1}
+                      isCurrent={line.id === cursorId}
+                      isNextTap={syncing && i === syncIndex}
+                      endSec={line.id === cursorId ? lineEnd(lines, line) : null}
                       actions={actions}
                     />
                   ))}
@@ -232,6 +507,23 @@ function SongView({ detail, setDetail, reload }: { detail: SongDetail; setDetail
             Its transliteration, gloss, timing, words, questions and recording go with it. Review cards made from it are
             kept, without their clip.
           </p>
+        </Confirm>
+      )}
+
+      {clearing && (
+        <Confirm
+          title="Clear all timings?"
+          confirmLabel="Clear timings"
+          danger
+          onClose={() => setClearing(false)}
+          onConfirm={() => {
+            setClearing(false)
+            player?.stopLoop()
+            setSyncing(false)
+            api.clearTimings(song.id).then(reload).catch(actions.fail)
+          }}
+        >
+          <p>Every line loses its start and end time, and the song has to be tapped in again. The text is not touched.</p>
         </Confirm>
       )}
     </div>

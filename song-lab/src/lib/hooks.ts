@@ -128,6 +128,8 @@ export function useHotkeys(map: Record<string, (e: KeyboardEvent) => void>, enab
       if (e.ctrlKey || e.metaKey || e.altKey) return
       if (isTyping(e.target) || document.querySelector('dialog[open]')) return
       const key = e.key.length === 1 ? e.key.toLowerCase() : e.key
+      // A button reached with the Tab key keeps its own Space and Enter.
+      if ((key === ' ' || key === 'Enter') && e.target instanceof HTMLElement && e.target.closest('button, a, summary')) return
       const handler = mapRef.current[key]
       if (!handler) return
       e.preventDefault()

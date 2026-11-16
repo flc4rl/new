@@ -104,7 +104,9 @@ export interface Settings {
   tapOffsetSec: number
   /** Seconds a loop starts before the line, so the first syllable is not clipped. */
   loopLeadInSec: number
+  /** How many times a line loop plays; 0 means until stopped. */
   loopRepeats: number
+  /** Seconds of silence between repeats. */
   loopPauseSec: number
 }
 

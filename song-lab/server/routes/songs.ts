@@ -27,7 +27,7 @@ const settingsPatch = z.object({
   cardDirections: z.enum(['both', 'ar-en', 'en-ar']).optional(),
   tapOffsetSec: z.number().min(0).max(1).optional(),
   loopLeadInSec: z.number().min(0).max(2).optional(),
-  loopRepeats: z.number().int().min(1).max(99).optional(),
+  loopRepeats: z.number().int().min(0).max(99).optional(),
   loopPauseSec: z.number().min(0).max(30).optional(),
 })
 

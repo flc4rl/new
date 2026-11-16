@@ -51,6 +51,18 @@ export function App() {
     void boot()
   }, [boot])
 
+  // A button clicked with the mouse should not keep the focus, or Space would press it again
+  // instead of playing and pausing the song. Buttons reached with the keyboard are left alone.
+  useEffect(() => {
+    const onClick = (e: MouseEvent) => {
+      if (e.detail === 0 || !(e.target instanceof Element)) return
+      const control = e.target.closest('button, summary')
+      if (control instanceof HTMLElement && document.activeElement === control) control.blur()
+    }
+    document.addEventListener('click', onClick)
+    return () => document.removeEventListener('click', onClick)
+  }, [])
+
   const saveSettings = useCallback(async (patch: Partial<Settings>) => {
     setSettings((s) => ({ ...s, ...patch }))
     setSettings(await api.saveSettings(patch))
