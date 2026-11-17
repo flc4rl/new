@@ -122,9 +122,9 @@ export const api = {
   queue: () => get<ReviewQueue>('/api/review/queue'),
   grade: (cardId: string, grade: Grade) => post<{ card: CardView; requeue: boolean }>('/api/review', { cardId, grade }),
 
-  draft: (songId: string, lineIds: string[], replaceDrafts: boolean) =>
-    post<DraftResult>('/api/draft', { songId, lineIds, replaceDrafts }),
+  draft: (songId: string, lineIds: string[]) => post<DraftResult>('/api/draft', { songId, lineIds }),
   tutor: () => get<TutorSongGroup[]>('/api/tutor'),
+  tutorMarkdownUrl: '/api/tutor/export.md',
   addQuestion: (q: { lineId?: string; wordId?: string; text: string }) => post<Question>('/api/questions', q),
   updateQuestion: (id: string, p: { text?: string; resolved?: boolean }) => patch<Question>(`/api/questions/${id}`, p),
   deleteQuestion: (id: string) => del(`/api/questions/${id}`),

@@ -1,11 +1,24 @@
-import { memo } from 'react'
-import { ArrowDown, ArrowUp, Layers, Minus, Play, Plus, Rows3, Timer, Trash2 } from 'lucide-react'
+import { memo, useState } from 'react'
+import {
+  ArrowDown,
+  ArrowUp,
+  CircleCheck,
+  Layers,
+  MessageCircleQuestion,
+  Minus,
+  Play,
+  Plus,
+  Rows3,
+  Timer,
+  Trash2,
+} from 'lucide-react'
 import type { LinePatch } from '../api'
 import { EditableText } from './EditableText'
 import { Menu } from './Menu'
 import { WordsPanel, type WordActions } from './WordsPanel'
+import { AskForm, QuestionList } from './Questions'
 import { formatTime } from '../../shared/text'
-import type { CardRef, Line, Word } from '../../shared/types'
+import type { CardRef, Line, Question, Word } from '../../shared/types'
 
 export interface LineActions extends WordActions {
   saveLine: (id: string, patch: LinePatch) => void
@@ -20,6 +33,7 @@ export interface LineActions extends WordActions {
   syncFrom: (line: Line) => void
   toggleWords: (lineId: string) => void
   makeLineCard: (line: Line) => void
+  setLineStatus: (line: Line, status: Line['status']) => void
 }
 
 function Nudger({
@@ -55,6 +69,7 @@ export const LineRow = memo(function LineRow({
   endSec,
   words,
   cards,
+  questions,
   wordsOpen,
   actions,
 }: {
@@ -71,14 +86,24 @@ export const LineRow = memo(function LineRow({
   words: Word[]
   /** Review cards made from this line or its words. */
   cards: CardRef[]
+  /** Questions about this line and its words. */
+  questions: Question[]
   wordsOpen: boolean
   actions: LineActions
 }) {
+  const [asking, setAsking] = useState(false)
   const timed = line.startSec != null
   const hasLineCard = cards.some((c) => c.kind === 'line')
+  const verified = line.status === 'verified'
+  const claudeDraft = !verified && line.source === 'claude'
+  const lineQuestions = questions.filter((q) => !q.wordId)
+  const wordQuestions = questions.filter((q) => q.wordId && !q.resolved)
+  const openWordQuestions = wordQuestions.length
   return (
     <li
-      className={`line${isCurrent ? ' is-current' : ''}${isNextTap ? ' is-next-tap' : ''}`}
+      className={`line${isCurrent ? ' is-current' : ''}${isNextTap ? ' is-next-tap' : ''}${verified ? ' is-verified' : ''}${
+        claudeDraft ? ' is-claude' : ''
+      }`}
       id={`line-${line.id}`}
       aria-current={isCurrent ? 'true' : undefined}
     >
@@ -117,6 +142,39 @@ export const LineRow = memo(function LineRow({
           onSave={(gloss) => actions.saveLine(line.id, { gloss, source: 'user' })}
         />
 
+        {(claudeDraft || (line.unsure && !verified) || openWordQuestions > 0) && (
+          <div className="line-tags">
+            {claudeDraft && (
+              <span className="tag tag-draft" title="Drafted by Claude. Check it, or ask your tutor, then mark it verified.">
+                Claude draft
+              </span>
+            )}
+            {line.unsure && !verified && (
+              <span className="tag tag-unsure" title="Claude was not sure about this line">
+                Claude unsure
+              </span>
+            )}
+            {openWordQuestions > 0 && !wordsOpen && (
+              <button type="button" className="tag tag-question" onClick={() => actions.toggleWords(line.id)}>
+                {openWordQuestions} {openWordQuestions === 1 ? 'question' : 'questions'} on words
+              </button>
+            )}
+          </div>
+        )}
+        {line.note && (
+          <p className="line-note ltr" dir="auto">
+            {line.note}
+          </p>
+        )}
+        <QuestionList questions={lineQuestions} actions={actions} />
+        {asking && (
+          <AskForm
+            placeholder="Question for the tutor about this line"
+            onAsk={(text) => actions.addQuestion({ lineId: line.id }, text)}
+            onClose={() => setAsking(false)}
+          />
+        )}
+
         {isCurrent && (
           <div className="line-timing">
             {timed ? (
@@ -134,10 +192,20 @@ export const LineRow = memo(function LineRow({
           </div>
         )}
 
-        {wordsOpen && <WordsPanel line={line} words={words} cards={cards} actions={actions} />}
+        {wordsOpen && <WordsPanel line={line} words={words} cards={cards} questions={wordQuestions} actions={actions} />}
       </div>
 
       <div className="line-actions">
+        <button
+          type="button"
+          className={`btn btn-ghost btn-sm btn-icon status-icon${verified ? ' is-verified' : ''}`}
+          aria-pressed={verified}
+          aria-label={verified ? `Line ${number} is verified` : `Mark line ${number} as verified`}
+          title={verified ? 'Verified. Click to set it back to draft.' : 'Draft. Click to mark it verified, once checked.'}
+          onClick={() => actions.setLineStatus(line, verified ? 'draft' : 'verified')}
+        >
+          <CircleCheck size={16} />
+        </button>
         <button
           type="button"
           className="btn btn-ghost btn-sm btn-icon"
@@ -161,6 +229,7 @@ export const LineRow = memo(function LineRow({
         <Menu
           label={`More actions for line ${number}`}
           items={[
+            { label: 'Ask the tutor about this line', icon: <MessageCircleQuestion size={15} />, onSelect: () => setAsking(true) },
             { label: 'Sync from this line', icon: <Timer size={15} />, onSelect: () => actions.syncFrom(line) },
             { label: 'Add a line below', icon: <Plus size={15} />, onSelect: () => actions.addLineAfter(line) },
             { label: 'Move up', icon: <ArrowUp size={15} />, disabled: isFirst, onSelect: () => actions.moveLine(line.id, -1) },

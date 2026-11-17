@@ -1,5 +1,5 @@
 import { createContext, useCallback, useContext, useEffect, useState, type ReactNode } from 'react'
-import { Layers, Library } from 'lucide-react'
+import { GraduationCap, Layers, Library } from 'lucide-react'
 import { api } from './api'
 import { useRoute } from './lib/hooks'
 import { LoadError, Spinner, ToastHost } from './components/ui'
@@ -7,6 +7,7 @@ import { LibraryPage } from './pages/LibraryPage'
 import { SongPage } from './pages/SongPage'
 import { ReviewPage } from './pages/ReviewPage'
 import { DeckPage } from './pages/DeckPage'
+import { TutorPage } from './pages/TutorPage'
 import { DEFAULT_SETTINGS, type Meta, type Settings } from '../shared/types'
 
 interface AppState {
@@ -103,6 +104,7 @@ export function App() {
   else if (page === 'song' && route[1]) content = <SongPage key={route[1]} songId={route[1]} />
   else if (page === 'review') content = <ReviewPage />
   else if (page === 'deck') content = <DeckPage />
+  else if (page === 'tutor') content = <TutorPage key={route[1] ?? 'queue'} print={route[1] === 'print'} />
   else content = <LibraryPage />
 
   return (
@@ -122,6 +124,9 @@ export function App() {
             </NavLink>
             <NavLink href="#/review" active={page === 'review' || page === 'deck'} icon={<Layers size={16} />} badge={dueCount}>
               Review
+            </NavLink>
+            <NavLink href="#/tutor" active={page === 'tutor'} icon={<GraduationCap size={16} />}>
+              Tutor
             </NavLink>
           </nav>
         </header>

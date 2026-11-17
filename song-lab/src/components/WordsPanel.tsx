@@ -1,10 +1,11 @@
 import { memo, useState, type FormEvent } from 'react'
-import { Layers, Plus, RefreshCw, Trash2 } from 'lucide-react'
+import { CircleCheck, Layers, MessageCircleQuestion, Plus, RefreshCw, Trash2 } from 'lucide-react'
 import type { WordPatch } from '../api'
 import { CommitInput } from './CommitInput'
-import { REGISTERS, type CardRef, type Line, type Register, type Word } from '../../shared/types'
+import { AskForm, QuestionList, type QuestionActions } from './Questions'
+import { REGISTERS, type CardRef, type Line, type Question, type Register, type Word } from '../../shared/types'
 
-export interface WordActions {
+export interface WordActions extends QuestionActions {
   splitLine: (lineId: string) => void
   addWord: (lineId: string, arabic: string) => void
   saveWord: (id: string, patch: WordPatch) => void
@@ -18,10 +19,39 @@ const REGISTER_HINT: Record<Register, string> = {
   unknown: 'Not decided yet',
 }
 
-function WordEditor({ word, hasCard, actions }: { word: Word; hasCard: boolean; actions: WordActions }) {
+function WordEditor({
+  word,
+  hasCard,
+  questions,
+  actions,
+}: {
+  word: Word
+  hasCard: boolean
+  questions: Question[]
+  actions: WordActions
+}) {
+  const [asking, setAsking] = useState(false)
   const save = (patch: WordPatch) => actions.saveWord(word.id, patch)
+  const verified = word.status === 'verified'
   return (
     <div className="word-editor">
+      <div className="word-editor-status">
+        <button
+          type="button"
+          className={`status-btn${verified ? ' is-verified' : ''}`}
+          aria-pressed={verified}
+          title={verified ? 'Verified. Click to set it back to draft.' : 'Mark as verified, once you or your tutor has checked it'}
+          onClick={() => save({ status: verified ? 'draft' : 'verified' })}
+        >
+          <CircleCheck size={14} />
+          {verified ? 'Verified' : 'Draft · mark verified'}
+        </button>
+        {word.unsure && !verified && (
+          <span className="tag tag-unsure" title="Claude was not sure about this word">
+            Claude unsure
+          </span>
+        )}
+      </div>
       <label className="field word-field-ar">
         <span>Arabic</span>
         <CommitInput rtl value={word.arabic} label="Word, Arabic" onCommit={(arabic) => arabic && save({ arabic })} />
@@ -59,10 +89,28 @@ function WordEditor({ word, hasCard, actions }: { word: Word; hasCard: boolean; 
         <span>Note</span>
         <CommitInput value={word.note} label="Word, note" placeholder="optional" onCommit={(note) => save({ note })} />
       </label>
+      {questions.length > 0 && (
+        <div className="word-field-note">
+          <QuestionList questions={questions} actions={actions} />
+        </div>
+      )}
+      {asking && (
+        <div className="word-field-note">
+          <AskForm
+            placeholder={`Question about ${word.arabic}`}
+            onAsk={(text) => actions.addQuestion({ wordId: word.id }, text)}
+            onClose={() => setAsking(false)}
+          />
+        </div>
+      )}
       <div className="word-editor-actions">
         <button type="button" className="chip-btn" disabled={hasCard} onClick={() => actions.makeWordCard(word)}>
           <Layers size={13} />
           {hasCard ? 'In the deck' : 'Make a card'}
+        </button>
+        <button type="button" className="chip-btn" onClick={() => setAsking(true)}>
+          <MessageCircleQuestion size={13} />
+          Ask the tutor
         </button>
         <button type="button" className="chip-btn is-danger" onClick={() => actions.deleteWord(word)}>
           <Trash2 size={13} />
@@ -77,17 +125,21 @@ export const WordsPanel = memo(function WordsPanel({
   line,
   words,
   cards,
+  questions,
   actions,
 }: {
   line: Line
   words: Word[]
   cards: CardRef[]
+  /** Questions about this line's words. */
+  questions: Question[]
   actions: WordActions
 }) {
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const [adding, setAdding] = useState(false)
   const selected = words.find((w) => w.id === selectedId) ?? null
   const inDeck = (word: Word) => cards.some((c) => c.kind === 'word' && c.wordId === word.id)
+  const questionsOf = (word: Word) => questions.filter((q) => q.wordId === word.id && !q.resolved)
 
   if (words.length === 0) {
     return (
@@ -114,6 +166,7 @@ export const WordsPanel = memo(function WordsPanel({
       <div className="word-chips" dir="rtl">
         {words.map((word) => {
           const hasCard = inDeck(word)
+          const asked = questionsOf(word).length > 0
           return (
             <div
               key={word.id}
@@ -132,6 +185,14 @@ export const WordsPanel = memo(function WordsPanel({
                 <span className="ltr word-tr">{word.translit || '·'}</span>
                 <span className="ltr word-gl">{word.gloss || '·'}</span>
               </button>
+              {(asked || (word.unsure && word.status === 'draft')) && (
+                <span
+                  className={`word-chip-flag${asked ? ' is-question' : ''}`}
+                  title={asked ? 'Open question for the tutor' : 'Claude was not sure about this word'}
+                >
+                  ?
+                </span>
+              )}
               <button
                 type="button"
                 className="word-chip-card"
@@ -147,7 +208,15 @@ export const WordsPanel = memo(function WordsPanel({
         })}
       </div>
 
-      {selected && <WordEditor key={selected.id} word={selected} hasCard={inDeck(selected)} actions={actions} />}
+      {selected && (
+        <WordEditor
+          key={selected.id}
+          word={selected}
+          hasCard={inDeck(selected)}
+          questions={questionsOf(selected)}
+          actions={actions}
+        />
+      )}
 
       <div className="words-foot">
         {adding ? (

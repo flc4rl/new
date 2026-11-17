@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { ArrowLeft, ClipboardPaste, Eraser, Pencil, Rows3, SplitSquareHorizontal } from 'lucide-react'
+import { ArrowLeft, ClipboardPaste, Eraser, Pencil, Rows3, Sparkles, SplitSquareHorizontal } from 'lucide-react'
 import { api, type LinePatch, type NewCard } from '../api'
 import { useApp } from '../App'
 import { useHotkeys, useLoad, usePlayer } from '../lib/hooks'
@@ -11,12 +11,14 @@ import { EditSongDialog } from '../components/SongDialogs'
 import { LineRow, type LineActions } from '../components/LineRow'
 import { Menu } from '../components/Menu'
 import { PasteLyricsDialog } from '../components/PasteLyricsDialog'
-import type { CardRef, Line, SongDetail, Word } from '../../shared/types'
+import { DraftDialog } from '../components/DraftDialog'
+import type { CardRef, Line, Question, SongDetail, Word } from '../../shared/types'
 
 type SetDetail = (next: SongDetail | ((prev: SongDetail) => SongDetail)) => void
 
 const NO_WORDS: Word[] = []
 const NO_CARDS: CardRef[] = []
+const NO_QUESTIONS: Question[] = []
 
 /** How much of a line is played back after a nudge, so the new edge can be heard. */
 const NUDGE_PREVIEW_SEC = 2.5
@@ -39,13 +41,14 @@ export function SongPage({ songId }: { songId: string }) {
 function SongView({ detail, setDetail, reload }: { detail: SongDetail; setDetail: SetDetail; reload: () => Promise<void> }) {
   const { song, lines } = detail
   const toast = useToast()
-  const { settings, saveSettings, refreshCounts } = useApp()
+  const { meta, settings, saveSettings, refreshCounts } = useApp()
   const { hostRef, player, snap, retry } = usePlayer(song.youtubeId, song.savedRate)
 
   const [editing, setEditing] = useState(false)
   const [pasting, setPasting] = useState(false)
   const [deleting, setDeleting] = useState<Line | null>(null)
   const [clearing, setClearing] = useState(false)
+  const [drafting, setDrafting] = useState(false)
 
   /** The highlighted line: the one being sung, looped or picked by hand. */
   const [cursorId, setCursorId] = useState<string | null>(null)
@@ -357,6 +360,23 @@ function SongView({ detail, setDetail, reload }: { detail: SongDetail; setDetail
       deleteWord(word) {
         api.deleteWord(word.id).then(reload).catch(fail)
       },
+      setLineStatus(line, status) {
+        saveLine(line.id, { status })
+      },
+      addQuestion(target, text) {
+        api
+          .addQuestion({ ...target, text })
+          .then((q) => setDetail((d) => ({ ...d, questions: [...d.questions, q] })))
+          .catch(fail)
+      },
+      resolveQuestion(question) {
+        setDetail((d) => ({ ...d, questions: d.questions.map((q) => (q.id === question.id ? { ...q, resolved: true } : q)) }))
+        api.updateQuestion(question.id, { resolved: true }).catch(fail)
+      },
+      deleteQuestion(question) {
+        setDetail((d) => ({ ...d, questions: d.questions.filter((q) => q.id !== question.id) }))
+        api.deleteQuestion(question.id).catch(fail)
+      },
       makeWordCard(word) {
         if (!word.gloss) {
           toast.info('Give the word a meaning first, so the card has an answer.')
@@ -450,6 +470,16 @@ function SongView({ detail, setDetail, reload }: { detail: SongDetail; setDetail
     }
     return map
   }, [detail.words])
+  const questionsByLine = useMemo(() => {
+    const map = new Map<string, Question[]>()
+    for (const question of detail.questions) {
+      if (!question.lineId || question.resolved) continue
+      const list = map.get(question.lineId)
+      if (list) list.push(question)
+      else map.set(question.lineId, [question])
+    }
+    return map
+  }, [detail.questions])
   const cardsByLine = useMemo(() => {
     const map = new Map<string, CardRef[]>()
     for (const card of detail.cards) {
@@ -543,6 +573,11 @@ function SongView({ detail, setDetail, reload }: { detail: SongDetail; setDetail
                     {lines.length} {lines.length === 1 ? 'line' : 'lines'} · {timedCount} timed
                   </span>
                   <span className="push" />
+                  {meta.claude && (
+                    <Button size="sm" icon={<Sparkles size={14} />} onClick={() => setDrafting(true)}>
+                      Draft with Claude
+                    </Button>
+                  )}
                   <Button
                     size="sm"
                     icon={<Rows3 size={14} />}
@@ -589,6 +624,7 @@ function SongView({ detail, setDetail, reload }: { detail: SongDetail; setDetail
                       endSec={line.id === cursorId ? lineEnd(lines, line) : null}
                       words={wordsByLine.get(line.id) ?? NO_WORDS}
                       cards={cardsByLine.get(line.id) ?? NO_CARDS}
+                      questions={questionsByLine.get(line.id) ?? NO_QUESTIONS}
                       wordsOpen={allWordsOpen || openWords.has(line.id)}
                       actions={actions}
                     />
@@ -641,6 +677,19 @@ function SongView({ detail, setDetail, reload }: { detail: SongDetail; setDetail
             kept, without their clip.
           </p>
         </Confirm>
+      )}
+
+      {drafting && (
+        <DraftDialog
+          songId={song.id}
+          lines={lines}
+          words={detail.words}
+          model={meta.model}
+          onDone={() => {
+            void reload()
+          }}
+          onClose={() => setDrafting(false)}
+        />
       )}
 
       {clearing && (

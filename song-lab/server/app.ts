@@ -2,6 +2,7 @@ import { Router } from './http'
 import { registerSongRoutes } from './routes/songs'
 import { registerLineRoutes } from './routes/lines'
 import { registerDeckRoutes } from './routes/deck'
+import { registerTutorRoutes } from './routes/tutor'
 
 /** All /api routes. Kept apart from the HTTP listener so tests can drive it directly. */
 export function buildRouter(): Router {
@@ -9,5 +10,6 @@ export function buildRouter(): Router {
   registerSongRoutes(router)
   registerLineRoutes(router)
   registerDeckRoutes(router)
+  registerTutorRoutes(router)
   return router
 }

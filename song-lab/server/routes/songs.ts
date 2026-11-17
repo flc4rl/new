@@ -1,6 +1,7 @@
 import { z } from 'zod'
 import { HttpError, type Router } from '../http'
-import { claudeAvailable, CLAUDE_MODEL, loadTranslitConfig } from '../config'
+import { CLAUDE_MODEL, loadTranslitConfig } from '../config'
+import { draftingAvailable } from '../drafts'
 import * as store from '../store'
 import { parseYouTubeId, watchUrl } from '../../shared/youtube'
 import type { Meta } from '../../shared/types'
@@ -39,7 +40,7 @@ function requireYouTubeId(url: string): string {
 
 export function registerSongRoutes(router: Router): void {
   router.get('/api/meta', (): Meta => ({
-    claude: claudeAvailable(),
+    claude: draftingAvailable(),
     model: CLAUDE_MODEL,
     translit: loadTranslitConfig(),
   }))
