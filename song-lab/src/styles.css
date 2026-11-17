@@ -2306,3 +2306,85 @@ select {
 .inline-icon {
   vertical-align: -2px;
 }
+
+/* ---------- settings ---------- */
+
+.settings {
+  gap: 16px;
+}
+
+.settings-section {
+  display: grid;
+  gap: 12px;
+}
+
+.settings-section .segmented {
+  justify-self: start;
+}
+
+.check {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--ink-2);
+}
+
+.setting-row {
+  display: grid;
+  grid-template-columns: 1fr 7em;
+  gap: 16px;
+  align-items: center;
+}
+
+.setting-row > span {
+  display: grid;
+  gap: 2px;
+}
+
+.setting-row small {
+  font-size: 0.85rem;
+}
+
+.scheme-rules {
+  margin: 0;
+  padding-left: 1.2em;
+  display: grid;
+  gap: 4px;
+  color: var(--ink-2);
+}
+
+.scheme {
+  border-collapse: collapse;
+  font-size: 0.93rem;
+}
+
+.scheme th,
+.scheme td {
+  padding: 4px 12px 4px 0;
+  border-bottom: 1px solid var(--line);
+  text-align: start;
+  vertical-align: middle;
+}
+
+.scheme th {
+  color: var(--ink-3);
+  font-size: 0.8rem;
+  font-weight: 600;
+}
+
+.scheme-ar {
+  font-size: 1.4rem;
+  text-align: center;
+}
+
+code {
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: var(--surface-2);
+  font-size: 0.9em;
+}
+
+.topbar-end .is-active {
+  color: var(--accent);
+  background: var(--accent-soft);
+}

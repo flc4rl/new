@@ -870,6 +870,7 @@ export function importBackup(backup: Backup): Record<string, number> {
   )
   const recordings = backup.recordings.filter((r) => lineIds.has(r.lineId))
 
+  let keptRecordings = 0
   tx(() => {
     for (const table of ['reviews', 'cards', 'questions', 'recordings', 'words', 'lines', 'songs', 'settings']) {
       run(`DELETE FROM ${table}`)
@@ -915,16 +916,23 @@ export function importBackup(backup: Backup): Record<string, number> {
         q.id, q.lineId, q.wordId, q.text, q.resolved ? 1 : 0, q.createdAt,
       )
     }
-    // Recordings: clear the folder, then write back the takes that came with audio.
-    fs.rmSync(RECORDINGS_DIR, { recursive: true, force: true })
+    // Recordings: write the takes that came with audio. A take that came without audio is kept
+    // only if its file is still on disk. Every other file in the folder is removed.
     fs.mkdirSync(RECORDINGS_DIR, { recursive: true })
+    const keep = new Set<string>()
     for (const rec of recordings) {
-      if (!rec.dataBase64) continue
       const ext = path.extname(rec.filePath).slice(1)
       if (!AUDIO_TYPES[ext]) continue
       const filePath = `recordings/${rec.lineId}.${ext}`
-      fs.writeFileSync(path.join(DATA_DIR, filePath), Buffer.from(rec.dataBase64, 'base64'))
+      const full = path.join(DATA_DIR, filePath)
+      if (rec.dataBase64) fs.writeFileSync(full, Buffer.from(rec.dataBase64, 'base64'))
+      else if (!fs.existsSync(full)) continue
+      keep.add(path.basename(full))
+      keptRecordings++
       run('INSERT INTO recordings (id, lineId, filePath, createdAt) VALUES (?, ?, ?, ?)', rec.id, rec.lineId, filePath, rec.createdAt)
+    }
+    for (const file of fs.readdirSync(RECORDINGS_DIR)) {
+      if (!keep.has(file)) fs.rmSync(path.join(RECORDINGS_DIR, file), { force: true })
     }
     for (const [key, value] of Object.entries(backup.settings ?? {})) {
       if (key in DEFAULT_SETTINGS && value !== undefined) {
@@ -939,6 +947,6 @@ export function importBackup(backup: Backup): Record<string, number> {
     cards: backup.cards.length,
     reviews: reviews.length,
     questions: questions.length,
-    recordings: recordings.filter((r) => r.dataBase64).length,
+    recordings: keptRecordings,
   }
 }

@@ -281,8 +281,8 @@ function PrintView({ groups }: { groups: TutorSongGroup[] }) {
               <p className="ar print-ar" lang="ar">
                 {item.line.arabic}
               </p>
-              <p className="ltr print-tr">{item.line.translit || '—'}</p>
-              <p className="ltr print-gl">{item.line.gloss || '—'}</p>
+              <p className="ltr print-tr">{item.line.translit || '(no transliteration)'}</p>
+              <p className="ltr print-gl">{item.line.gloss || '(no English)'}</p>
               {item.line.note && <p className="small">{item.line.note}</p>}
               {item.questions.map((q) => (
                 <p key={q.id} className="print-q" dir="auto">
@@ -297,9 +297,9 @@ function PrintView({ groups }: { groups: TutorSongGroup[] }) {
                         <td className="ar" lang="ar">
                           {word.arabic}
                         </td>
-                        <td className="ltr">{word.translit || '—'}</td>
+                        <td className="ltr">{word.translit || '(none)'}</td>
                         <td className="ltr">
-                          {word.gloss || '—'}
+                          {word.gloss || '(none)'}
                           {questions.map((q) => (
                             <div key={q.id} className="print-q" dir="auto">
                               <b>Question:</b> {q.text}

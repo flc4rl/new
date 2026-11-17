@@ -1,5 +1,5 @@
 import { createContext, useCallback, useContext, useEffect, useState, type ReactNode } from 'react'
-import { GraduationCap, Layers, Library } from 'lucide-react'
+import { GraduationCap, Layers, Library, Monitor, Moon, Settings as SettingsIcon, Sun } from 'lucide-react'
 import { api } from './api'
 import { useRoute } from './lib/hooks'
 import { LoadError, Spinner, ToastHost } from './components/ui'
@@ -8,6 +8,8 @@ import { SongPage } from './pages/SongPage'
 import { ReviewPage } from './pages/ReviewPage'
 import { DeckPage } from './pages/DeckPage'
 import { TutorPage } from './pages/TutorPage'
+import { SettingsPage } from './pages/SettingsPage'
+import { useTheme, type ThemeChoice } from './lib/theme'
 import { DEFAULT_SETTINGS, type Meta, type Settings } from '../shared/types'
 
 interface AppState {
@@ -46,6 +48,29 @@ function NavLink({
       <span>{children}</span>
       {badge ? <span className="nav-badge">{badge}</span> : null}
     </a>
+  )
+}
+
+const NEXT_THEME: Record<ThemeChoice, ThemeChoice> = { system: 'light', light: 'dark', dark: 'system' }
+const THEME_LABEL: Record<ThemeChoice, string> = {
+  system: 'Theme: same as the computer',
+  light: 'Theme: light',
+  dark: 'Theme: dark',
+}
+
+function ThemeButton() {
+  const { choice, setChoice } = useTheme()
+  const Icon = choice === 'light' ? Sun : choice === 'dark' ? Moon : Monitor
+  return (
+    <button
+      type="button"
+      className="btn btn-ghost btn-sm btn-icon"
+      onClick={() => setChoice(NEXT_THEME[choice])}
+      aria-label={`${THEME_LABEL[choice]}. Click to change.`}
+      title={`${THEME_LABEL[choice]} (click to change)`}
+    >
+      <Icon size={17} />
+    </button>
   )
 }
 
@@ -104,6 +129,7 @@ export function App() {
   else if (page === 'song' && route[1]) content = <SongPage key={route[1]} songId={route[1]} />
   else if (page === 'review') content = <ReviewPage />
   else if (page === 'deck') content = <DeckPage />
+  else if (page === 'settings') content = <SettingsPage />
   else if (page === 'tutor') content = <TutorPage key={route[1] ?? 'queue'} print={route[1] === 'print'} />
   else content = <LibraryPage />
 
@@ -129,6 +155,17 @@ export function App() {
               Tutor
             </NavLink>
           </nav>
+          <div className="topbar-end">
+            <ThemeButton />
+            <a
+              href="#/settings"
+              className={`btn btn-ghost btn-sm btn-icon${page === 'settings' ? ' is-active' : ''}`}
+              aria-label="Settings and backup"
+              title="Settings and backup"
+            >
+              <SettingsIcon size={17} />
+            </a>
+          </div>
         </header>
         <main className="main">
           {meta && !error ? (
