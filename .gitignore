@@ -20,3 +20,6 @@ id_rsa*
 id_ed25519*
 credentials.json
 .credentials.json
+
+# macOS folder metadata
+.DS_Store
