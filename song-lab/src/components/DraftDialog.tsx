@@ -1,5 +1,5 @@
 import { useMemo, useState } from 'react'
-import { Sparkles } from 'lucide-react'
+import { Languages, Sparkles } from 'lucide-react'
 import { api } from '../api'
 import { Button, Modal, Spinner, useToast } from './ui'
 import type { DraftResult, Line, Word } from '../../shared/types'
@@ -18,6 +18,7 @@ export function DraftDialog({
   lines,
   words,
   model,
+  provider,
   onDone,
   onClose,
 }: {
@@ -25,6 +26,8 @@ export function DraftDialog({
   lines: Line[]
   words: Word[]
   model: string
+  /** Claude writes transliteration, English and words; Google writes English and word meanings. */
+  provider: 'claude' | 'google'
   onDone: () => void
   onClose: () => void
 }) {
@@ -46,7 +49,7 @@ export function DraftDialog({
     setRunning(true)
     try {
       const ids = lines.filter((l) => chosen.has(l.id)).map((l) => l.id)
-      setResult(await api.draft(songId, ids))
+      setResult(await (provider === 'claude' ? api.draft(songId, ids) : api.googleTranslate(songId, ids)))
       onDone()
     } catch (err) {
       toast.error(err)
@@ -60,11 +63,18 @@ export function DraftDialog({
       <Modal title="Drafts saved" onClose={onClose}>
         <div className="modal-text">
           <p>
-            Claude drafted {result.updatedLines} {result.updatedLines === 1 ? 'line' : 'lines'} and {result.updatedWords}{' '}
+            {provider === 'claude' ? 'Claude drafted' : 'Google translated'} {result.updatedLines} {result.updatedLines === 1 ? 'line' : 'lines'} and {result.updatedWords}{' '}
             {result.updatedWords === 1 ? 'word' : 'words'}. Everything is marked as a draft, and nothing you had typed
             or verified was changed.
           </p>
-          <p>Lines and words Claude was not sure about are tagged “Claude unsure”. The tutor queue lists them all.</p>
+          {provider === 'claude' ? (
+            <p>Lines and words Claude was not sure about are tagged “Claude unsure”. The tutor queue lists them all.</p>
+          ) : (
+            <p>
+              Google reads the lyrics as Modern Standard Arabic, so check Sudanese words with your tutor. The
+              transliteration is still yours to write. The tutor queue lists every draft.
+            </p>
+          )}
           {result.skipped.length > 0 && (
             <ul className="draft-skipped">
               {result.skipped.map((s) => (
@@ -86,13 +96,22 @@ export function DraftDialog({
   }
 
   return (
-    <Modal title="Draft with Claude" onClose={running ? () => {} : onClose} wide>
+    <Modal title={provider === 'claude' ? 'Draft with Claude' : 'Translate with Google'} onClose={running ? () => {} : onClose} wide>
       <div className="modal-text">
-        <p>
-          Claude fills in the transliteration, the English gloss and the words of the lines you tick, in Khartoum
-          pronunciation and the app’s transliteration scheme. Only empty fields are filled; everything is saved as a
-          draft for you or your tutor to check. Claude never adds or completes lyrics.
-        </p>
+        {provider === 'claude' ? (
+          <p>
+            Claude fills in the transliteration, the English gloss and the words of the lines you tick, in Khartoum
+            pronunciation and the app’s transliteration scheme. Only empty fields are filled; everything is saved as a
+            draft for you or your tutor to check. Claude never adds or completes lyrics.
+          </p>
+        ) : (
+          <p>
+            Google Translate fills in the English of the lines you tick, splits them into words and gives each word its
+            dictionary meanings. Only empty fields are filled, and everything is saved as a draft. Google reads the
+            lyrics as Modern Standard Arabic, so Sudanese words can come out wrong. It uses Google’s free web service,
+            unofficially, so it may stop working at times.
+          </p>
+        )}
       </div>
       <div className="draft-pick">
         <span className="muted small">
@@ -127,16 +146,27 @@ export function DraftDialog({
       <footer className="modal-foot">
         {running ? (
           <span className="push">
-            <Spinner label="Claude is working. This can take a minute or two." />
+            <Spinner
+              label={
+                provider === 'claude'
+                  ? 'Claude is working. This can take a minute or two.'
+                  : 'Asking Google, one word at a time. This takes a few seconds per line.'
+              }
+            />
           </span>
         ) : (
-          <span className="muted small push">Model: {model}</span>
+          <span className="muted small push">{provider === 'claude' ? `Model: ${model}` : 'Google Translate'}</span>
         )}
         <Button onClick={onClose} disabled={running}>
           Cancel
         </Button>
-        <Button variant="primary" icon={<Sparkles size={15} />} onClick={run} disabled={running || chosen.size === 0}>
-          Draft {chosen.size} {chosen.size === 1 ? 'line' : 'lines'}
+        <Button
+          variant="primary"
+          icon={provider === 'claude' ? <Sparkles size={15} /> : <Languages size={15} />}
+          onClick={run}
+          disabled={running || chosen.size === 0}
+        >
+          {provider === 'claude' ? 'Draft' : 'Translate'} {chosen.size} {chosen.size === 1 ? 'line' : 'lines'}
         </Button>
       </footer>
     </Modal>

@@ -26,11 +26,20 @@ Always use the `http://localhost` address. Opening the files directly (`file://`
 
 To use another port: `PORT=5180 npm start` (macOS and Linux) or `$env:PORT=5180; npm start` (Windows PowerShell).
 
-## Turn on "Draft with Claude" (optional)
+## Translation
 
-Claude translates the lyrics for you: the transliteration in Khartoum pronunciation, the English, and each word with its meaning. With a key set, it does this by itself as soon as you paste lyrics (switch that off in Settings), and the **Draft with Claude** button redoes it for lines you choose. Without an API key the app works fully; you type translations yourself.
+Two helpers fill in translations for you. Everything they write is saved as a draft and tagged with where it came from ("Google draft", "Claude draft"), and nothing you typed or verified is ever overwritten.
 
-Claude is used rather than Google Translate because Google reads Sudanese as Modern Standard Arabic, gives no transliteration or word breakdown, and needs its own paid Google Cloud key.
+**Google Translate (free, no key, on by default).** It fills in the English of each line, splits the line into words and gives each word its dictionary meanings, which also links the words for hovering. Open a word to see Google's dictionary and click a sense to use it. Pasted lyrics are translated straight away; the **Translate with Google** button does it for lines you choose.
+
+- It uses the free service behind the translate.google.com website, unofficially. Google may refuse requests or change it at any time; the app then says so and everything else keeps working. Each line and word is asked only once and remembered.
+- Your lyrics are sent to Google.
+- Google reads the lyrics as Modern Standard Arabic, so Sudanese words can come out wrong, and it does not write the transliteration. Check its drafts with your tutor.
+- Switch it off under Settings, Google Translate.
+
+**Claude (optional, needs a paid API key)** does more: the transliteration in Khartoum pronunciation, the English, and each word with its meaning, register and links. With a key set, Claude translates pasted lyrics instead of Google, and the **Draft with Claude** button appears.
+
+### Turning on Claude
 
 1. Create an API key at <https://console.anthropic.com>. Requests are billed to that account.
 2. Give the key to the app in one of two ways:

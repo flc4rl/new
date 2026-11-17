@@ -3,6 +3,8 @@ import { CircleCheck, Layers, MessageCircleQuestion, Plus, RefreshCw, Trash2 } f
 import type { WordPatch } from '../api'
 import { CommitInput } from './CommitInput'
 import { AskForm, QuestionList, type QuestionActions } from './Questions'
+import { GoogleDictionary } from './GoogleDictionary'
+import { useApp } from '../App'
 import { REGISTERS, type CardRef, type Line, type Question, type Register, type Word } from '../../shared/types'
 
 export interface WordActions extends QuestionActions {
@@ -31,6 +33,7 @@ function WordEditor({
   actions: WordActions
 }) {
   const [asking, setAsking] = useState(false)
+  const { settings } = useApp()
   const save = (patch: WordPatch) => actions.saveWord(word.id, patch)
   const verified = word.status === 'verified'
   return (
@@ -98,6 +101,11 @@ function WordEditor({
         <span>Note</span>
         <CommitInput value={word.note} label="Word, note" placeholder="optional" onCommit={(note) => save({ note })} />
       </label>
+      {settings.googleTranslate && (
+        <div className="word-field-note">
+          <GoogleDictionary arabic={word.arabic} onPick={(gloss) => save({ gloss })} />
+        </div>
+      )}
       {questions.length > 0 && (
         <div className="word-field-note">
           <QuestionList questions={questions} actions={actions} />

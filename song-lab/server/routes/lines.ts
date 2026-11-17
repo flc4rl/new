@@ -22,7 +22,7 @@ const linePatch = z.object({
   startSec: seconds.optional(),
   endSec: seconds.optional(),
   status: z.enum(['draft', 'verified']).optional(),
-  source: z.enum(['user', 'claude', 'tutor']).optional(),
+  source: z.enum(['user', 'claude', 'google', 'tutor']).optional(),
   note: text(5000).optional(),
 })
 

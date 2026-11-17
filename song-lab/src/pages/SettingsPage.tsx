@@ -228,6 +228,26 @@ export function SettingsPage() {
       </section>
 
       <section className="panel settings-section">
+        <h2>Google Translate</h2>
+        <label className="check">
+          <input type="checkbox" checked={settings.googleTranslate} onChange={(e) => void save({ googleTranslate: e.target.checked })} />
+          Use Google Translate for the English of lines and the dictionary meanings of words
+        </label>
+        <p className="muted small">
+          Free, with no key: the app uses the same service as the translate.google.com website, unofficially. Google
+          may refuse or change it at any time; the app then says so and everything else keeps working. Your lyrics are
+          sent to Google. Each line and word is asked only once and remembered. Google reads the lyrics as Modern
+          Standard Arabic and does not write the transliteration, so check its drafts with your tutor.
+        </p>
+        {!meta.claude && settings.googleTranslate && (
+          <label className="check">
+            <input type="checkbox" checked={settings.autoDraft} onChange={(e) => void save({ autoDraft: e.target.checked })} />
+            Translate pasted lyrics straight away
+          </label>
+        )}
+      </section>
+
+      <section className="panel settings-section">
         <h2>Transliteration scheme</h2>
         <p className="muted">
           To match your tutor’s or the coursebook’s convention, edit <code>translit.config.json</code> in the app

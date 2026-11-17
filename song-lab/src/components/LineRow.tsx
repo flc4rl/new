@@ -111,14 +111,16 @@ export const LineRow = memo(function LineRow({
   const timed = line.startSec != null
   const hasLineCard = cards.some((c) => c.kind === 'line')
   const verified = line.status === 'verified'
-  const claudeDraft = !verified && line.source === 'claude'
+  /** Text drafted by Claude or Google, not yet checked. */
+  const machine = !verified && (line.source === 'claude' || line.source === 'google') ? line.source : null
+  const claudeDraft = machine !== null
   const lineQuestions = questions.filter((q) => !q.wordId)
   const wordQuestions = questions.filter((q) => q.wordId && !q.resolved)
   const openWordQuestions = wordQuestions.length
   return (
     <li
       className={`line${isCurrent ? ' is-current' : ''}${isNextTap ? ' is-next-tap' : ''}${verified ? ' is-verified' : ''}${
-        claudeDraft ? ' is-claude' : ''
+        claudeDraft ? ' is-machine' : ''
       }`}
       id={`line-${line.id}`}
       aria-current={isCurrent ? 'true' : undefined}
@@ -163,9 +165,9 @@ export const LineRow = memo(function LineRow({
 
         {(claudeDraft || (line.unsure && !verified) || openWordQuestions > 0) && (
           <div className="line-tags">
-            {claudeDraft && (
-              <span className="tag tag-draft" title="Drafted by Claude. Check it, or ask your tutor, then mark it verified.">
-                Claude draft
+            {machine && (
+              <span className="tag tag-draft" title={`Drafted by ${machine === 'claude' ? 'Claude' : 'Google Translate'}. Check it, or ask your tutor, then mark it verified.`}>
+                {machine === 'claude' ? 'Claude draft' : 'Google draft'}
               </span>
             )}
             {line.unsure && !verified && (

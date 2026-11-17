@@ -2,7 +2,7 @@
 // All times are seconds from the start of the video; all dates are ISO strings.
 
 export type Status = 'draft' | 'verified'
-export type Source = 'user' | 'claude' | 'tutor'
+export type Source = 'user' | 'claude' | 'google' | 'tutor'
 export type Register = 'everyday' | 'poetic' | 'unknown'
 export type CardKind = 'word' | 'line' | 'phrase'
 export type Direction = 'ar-en' | 'en-ar'
@@ -110,8 +110,10 @@ export interface Settings {
   loopRepeats: number
   /** Seconds of silence between repeats. */
   loopPauseSec: number
-  /** Translate pasted lyrics with Claude straight away, when a key is set. */
+  /** Translate pasted lyrics straight away: with Claude when a key is set, otherwise with Google. */
   autoDraft: boolean
+  /** Use Google Translate's free web service (unofficial) for English and word meanings. */
+  googleTranslate: boolean
 }
 
 export const DEFAULT_SETTINGS: Settings = {
@@ -122,6 +124,7 @@ export const DEFAULT_SETTINGS: Settings = {
   loopRepeats: 5,
   loopPauseSec: 1,
   autoDraft: true,
+  googleTranslate: true,
 }
 
 // ---- API payloads ----
@@ -213,6 +216,19 @@ export interface TutorLineItem {
 export interface TutorSongGroup {
   song: Song
   lines: TutorLineItem[]
+}
+
+export interface GoogleEntry {
+  /** Part of speech, such as "noun". */
+  pos: string
+  terms: string[]
+}
+
+export interface GoogleLookup {
+  translation: string
+  /** Google's romanisation follows the spelling (ق as q), not Khartoum pronunciation. */
+  romanization: string
+  dictionary: GoogleEntry[]
 }
 
 export interface DraftResult {

@@ -1887,14 +1887,14 @@ select {
 
 /* ---------- drafts and questions ---------- */
 
-.line.is-claude .line-tr,
-.line.is-claude .line-gl {
+.line.is-machine .line-tr,
+.line.is-machine .line-gl {
   color: var(--draft);
   font-style: italic;
 }
 
-.line.is-claude .line-tr:focus,
-.line.is-claude .line-gl:focus {
+.line.is-machine .line-tr:focus,
+.line.is-machine .line-gl:focus {
   font-style: normal;
 }
 
@@ -2445,5 +2445,71 @@ code {
   align-items: center;
   gap: 6px;
   font-size: 0.85rem;
+  color: var(--accent);
+}
+
+/* ---------- Google dictionary ---------- */
+
+.gdict {
+  display: grid;
+  gap: 6px;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+}
+
+.gdict-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.82rem;
+  font-weight: 650;
+  color: var(--ink-2);
+}
+
+.gdict-head .muted {
+  margin-left: auto;
+  font-weight: 400;
+}
+
+.gdict-list {
+  display: grid;
+  gap: 4px;
+  margin: 0;
+}
+
+.gdict-list > div {
+  display: grid;
+  grid-template-columns: 6em 1fr;
+  gap: 8px;
+  align-items: baseline;
+}
+
+.gdict-list dt {
+  font-size: 0.8rem;
+  font-style: italic;
+  color: var(--ink-3);
+}
+
+.gdict-list dd {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin: 0;
+}
+
+.gdict-term {
+  padding: 1px 8px;
+  border: 1px solid var(--line-strong);
+  border-radius: 999px;
+  background: var(--surface);
+  color: var(--ink);
+  font-size: 0.85rem;
+  cursor: pointer;
+}
+
+.gdict-term:hover {
+  border-color: var(--accent);
   color: var(--accent);
 }

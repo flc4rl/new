@@ -5,6 +5,7 @@ import { registerDeckRoutes } from './routes/deck'
 import { registerTutorRoutes } from './routes/tutor'
 import { registerRecordingRoutes } from './routes/recordings'
 import { registerBackupRoutes } from './routes/backup'
+import { registerGoogleRoutes } from './routes/google'
 
 /** All /api routes. Kept apart from the HTTP listener so tests can drive it directly. */
 export function buildRouter(): Router {
@@ -15,5 +16,6 @@ export function buildRouter(): Router {
   registerTutorRoutes(router)
   registerRecordingRoutes(router)
   registerBackupRoutes(router)
+  registerGoogleRoutes(router)
   return router
 }

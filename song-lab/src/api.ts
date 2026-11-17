@@ -2,6 +2,7 @@ import type {
   CardView,
   Direction,
   DraftResult,
+  GoogleLookup,
   Grade,
   Line,
   Meta,
@@ -124,6 +125,8 @@ export const api = {
   grade: (cardId: string, grade: Grade) => post<{ card: CardView; requeue: boolean }>('/api/review', { cardId, grade }),
 
   draft: (songId: string, lineIds: string[]) => post<DraftResult>('/api/draft', { songId, lineIds }),
+  googleTranslate: (songId: string, lineIds: string[]) => post<DraftResult>('/api/google/translate', { songId, lineIds }),
+  googleLookup: (text: string) => get<GoogleLookup>(`/api/google/lookup?text=${encodeURIComponent(text)}`),
   tutor: () => get<TutorSongGroup[]>('/api/tutor'),
   tutorMarkdownUrl: '/api/tutor/export.md',
   addQuestion: (q: { lineId?: string; wordId?: string; text: string }) => post<Question>('/api/questions', q),

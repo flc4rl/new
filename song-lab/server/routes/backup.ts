@@ -21,7 +21,7 @@ const backupSchema = z.object({
   lines: z.array(
     z.object({
       id, songId: id, order: z.number().int().min(0), arabic: text, translit: text, gloss: text,
-      startSec: seconds, endSec: seconds, status, source: z.enum(['user', 'claude', 'tutor']), note: text,
+      startSec: seconds, endSec: seconds, status, source: z.enum(['user', 'claude', 'google', 'tutor']), note: text,
       unsure: z.boolean().default(false),
     }),
   ),

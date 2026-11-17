@@ -31,6 +31,7 @@ const settingsPatch = z.object({
   loopRepeats: z.number().int().min(0).max(99).optional(),
   loopPauseSec: z.number().min(0).max(30).optional(),
   autoDraft: z.boolean().optional(),
+  googleTranslate: z.boolean().optional(),
 })
 
 function requireYouTubeId(url: string): string {

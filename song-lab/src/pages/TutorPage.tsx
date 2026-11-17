@@ -141,7 +141,7 @@ function TutorLine({
           </a>
         )}
         {item.lineIsDraft ? (
-          <span className="tag tag-draft">{line.source === 'claude' ? 'Claude draft' : 'draft'}</span>
+          <span className="tag tag-draft">{line.source === 'claude' ? 'Claude draft' : line.source === 'google' ? 'Google draft' : 'draft'}</span>
         ) : (
           <span className="tag tag-verified">verified</span>
         )}
@@ -275,7 +275,7 @@ function PrintView({ groups }: { groups: TutorSongGroup[] }) {
               <h3>
                 Line {item.line.order + 1}
                 {item.line.startSec != null ? ` · ${formatTime(item.line.startSec, 0)}` : ''}
-                {item.lineIsDraft ? ` · ${item.line.source === 'claude' ? 'Claude draft' : 'draft'}` : ''}
+                {item.lineIsDraft ? ` · ${item.line.source === 'claude' ? 'Claude draft' : item.line.source === 'google' ? 'Google draft' : 'draft'}` : ''}
                 {item.lineIsDraft && item.line.unsure ? ' · Claude unsure' : ''}
               </h3>
               <p className="ar print-ar" lang="ar">

@@ -9,7 +9,8 @@ export function PasteLyricsDialog({
   onClose,
 }: {
   hasLines: boolean
-  autoTranslate: boolean
+  /** Who will translate the lines after they are added, if anyone. */
+  autoTranslate: 'claude' | 'google' | null
   onAdd: (text: string) => Promise<void>
   onClose: () => void
 }) {
@@ -33,8 +34,10 @@ export function PasteLyricsDialog({
       <p className="muted">
         Type or paste the Arabic, one line of the song per row. {hasLines ? 'New lines are added at the end. ' : ''}
         Lyrics stay on this computer, in the app’s data folder.
-        {autoTranslate &&
+        {autoTranslate === 'claude' &&
           ' Claude then translates them for you: transliteration, English and words, saved as drafts for you to check.'}
+        {autoTranslate === 'google' &&
+          ' Google Translate then fills in the English and the meaning of each word, saved as drafts for you to check.'}
       </p>
       <textarea
         className="input ar paste-area"

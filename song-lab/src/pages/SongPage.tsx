@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { ArrowLeft, ClipboardPaste, Eraser, Pencil, Rows3, Sparkles, SplitSquareHorizontal } from 'lucide-react'
+import { ArrowLeft, ClipboardPaste, Eraser, Languages, Pencil, Rows3, Sparkles, SplitSquareHorizontal } from 'lucide-react'
 import { api, type LinePatch, type NewCard } from '../api'
 import { useApp } from '../App'
 import { useHotkeys, useLoad, usePlayer } from '../lib/hooks'
@@ -49,20 +49,31 @@ function SongView({ detail, setDetail, reload }: { detail: SongDetail; setDetail
   const [pasting, setPasting] = useState(false)
   const [deleting, setDeleting] = useState<Line | null>(null)
   const [clearing, setClearing] = useState(false)
-  const [drafting, setDrafting] = useState(false)
+  const [drafting, setDrafting] = useState<'claude' | 'google' | null>(null)
   /** Lines Claude is translating in the background, after a paste. */
   const [translating, setTranslating] = useState(0)
+  const [translator, setTranslator] = useState<'claude' | 'google'>('claude')
 
-  /** Translate new lines straight away, when a key is set and the setting is on. */
+  /** Who translates pasted lyrics: Claude when a key is set, otherwise Google, if switched on. */
+  const autoProvider: 'claude' | 'google' | null = !settings.autoDraft
+    ? null
+    : meta.claude
+      ? 'claude'
+      : settings.googleTranslate
+        ? 'google'
+        : null
+
+  /** Translate new lines straight away. */
   const autoTranslate = (lineIds: string[]) => {
-    if (!meta.claude || !settings.autoDraft || lineIds.length === 0) return
+    const provider = autoProvider
+    if (!provider || lineIds.length === 0) return
     setTranslating((n) => n + lineIds.length)
-    api
-      .draft(song.id, lineIds)
+    setTranslator(provider)
+    ;(provider === 'claude' ? api.draft(song.id, lineIds) : api.googleTranslate(song.id, lineIds))
       .then((result) => {
         void reload()
         toast.info(
-          `Claude translated ${result.updatedLines} ${result.updatedLines === 1 ? 'line' : 'lines'}. ` +
+          `${provider === 'claude' ? 'Claude' : 'Google'} translated ${result.updatedLines} ${result.updatedLines === 1 ? 'line' : 'lines'}. ` +
             'They are drafts: check them, then mark them verified.',
         )
       })
@@ -634,12 +645,17 @@ function SongView({ detail, setDetail, reload }: { detail: SongDetail; setDetail
                   {translating > 0 && (
                     <span className="translating" role="status">
                       <span className="spinner-dot" />
-                      Claude is translating {translating} {translating === 1 ? 'line' : 'lines'}…
+                      {translator === 'claude' ? 'Claude' : 'Google'} is translating {translating} {translating === 1 ? 'line' : 'lines'}…
                     </span>
                   )}
                   {meta.claude && (
-                    <Button size="sm" icon={<Sparkles size={14} />} onClick={() => setDrafting(true)}>
+                    <Button size="sm" icon={<Sparkles size={14} />} onClick={() => setDrafting('claude')}>
                       Draft with Claude
+                    </Button>
+                  )}
+                  {settings.googleTranslate && (
+                    <Button size="sm" icon={<Languages size={14} />} onClick={() => setDrafting('google')}>
+                      Translate with Google
                     </Button>
                   )}
                   <Button
@@ -712,7 +728,7 @@ function SongView({ detail, setDetail, reload }: { detail: SongDetail; setDetail
       {pasting && (
         <PasteLyricsDialog
           hasLines={lines.length > 0}
-          autoTranslate={meta.claude && settings.autoDraft}
+          autoTranslate={autoProvider}
           onClose={() => setPasting(false)}
           onAdd={async (text) => {
             try {
@@ -753,10 +769,11 @@ function SongView({ detail, setDetail, reload }: { detail: SongDetail; setDetail
           lines={lines}
           words={detail.words}
           model={meta.model}
+          provider={drafting}
           onDone={() => {
             void reload()
           }}
-          onClose={() => setDrafting(false)}
+          onClose={() => setDrafting(null)}
         />
       )}
 

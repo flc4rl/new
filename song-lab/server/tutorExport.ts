@@ -7,7 +7,7 @@ const ar = isolateRtl
 
 function flags(item: { status: string; unsure: boolean }, source?: string): string {
   const parts: string[] = []
-  if (item.status === 'draft') parts.push(source === 'claude' ? 'Claude draft' : 'draft')
+  if (item.status === 'draft') parts.push(source === 'claude' ? 'Claude draft' : source === 'google' ? 'Google draft' : 'draft')
   if (item.unsure) parts.push('Claude unsure')
   return parts.length ? ` _(${parts.join(', ')})_` : ''
 }
