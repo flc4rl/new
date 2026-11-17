@@ -1,6 +1,8 @@
 /* ---------- tokens ---------- */
 
 :root {
+  /* How big Arabic is shown, changed with A− and A+ (1 = the original size). */
+  --ar-scale: 1.5;
   color-scheme: light;
   --bg: #f6f3ec;
   --surface: #ffffff;
@@ -1147,7 +1149,7 @@ select {
 
 /* Arabic: about 1.5 times the size of the Latin rows beneath it. */
 .line-ar {
-  font-size: 1.6rem;
+  font-size: calc(1.6rem * var(--ar-scale));
   font-weight: 600;
   line-height: 1.75;
   text-align: right;
@@ -1177,7 +1179,7 @@ select {
 }
 
 .paste-area {
-  font-size: 1.4rem;
+  font-size: calc(1.4rem * var(--ar-scale));
   line-height: 1.9;
   resize: vertical;
 }
@@ -1226,7 +1228,7 @@ select {
 }
 
 .confirm-ar {
-  font-size: 1.4rem;
+  font-size: calc(1.4rem * var(--ar-scale));
   line-height: 1.8;
   color: var(--ink);
 }
@@ -1279,7 +1281,7 @@ select {
 }
 
 .sync-next {
-  font-size: 1.5rem;
+  font-size: calc(1.5rem * var(--ar-scale));
   font-weight: 600;
   line-height: 1.7;
 }
@@ -1414,7 +1416,7 @@ select {
 }
 
 .word-ar {
-  font-size: 1.35rem;
+  font-size: calc(1.35rem * var(--ar-scale));
   font-weight: 600;
   line-height: 1.6;
 }
@@ -1475,7 +1477,7 @@ select {
 }
 
 .word-editor .input.ar {
-  font-size: 1.2rem;
+  font-size: calc(1.2rem * var(--ar-scale));
   padding: 2px 8px;
 }
 
@@ -1672,7 +1674,7 @@ select {
 }
 
 .flashcard-ar {
-  font-size: 2.1rem;
+  font-size: calc(2.1rem * var(--ar-scale));
   font-weight: 600;
   line-height: 1.7;
   text-align: center;
@@ -1689,7 +1691,7 @@ select {
 }
 
 .flashcard-context {
-  font-size: 1.15rem;
+  font-size: calc(1.15rem * var(--ar-scale));
   color: var(--ink-2);
   text-align: center;
 }
@@ -1825,7 +1827,7 @@ select {
 }
 
 .deck-ar {
-  font-size: 1.35rem;
+  font-size: calc(1.35rem * var(--ar-scale));
   font-weight: 600;
   line-height: 1.6;
   text-align: right;
@@ -1863,7 +1865,7 @@ select {
 }
 
 .phrase-ar {
-  font-size: 1.3rem;
+  font-size: calc(1.3rem * var(--ar-scale));
 }
 
 @media (max-width: 700px) {
@@ -2076,7 +2078,7 @@ select {
 }
 
 .draft-ar {
-  font-size: 1.2rem;
+  font-size: calc(1.2rem * var(--ar-scale));
   line-height: 1.7;
   white-space: nowrap;
   overflow: hidden;
@@ -2174,7 +2176,7 @@ select {
 
 .tutor-word-ar {
   display: block;
-  font-size: 1.3rem;
+  font-size: calc(1.3rem * var(--ar-scale));
   font-weight: 600;
   line-height: 1.5;
 }
@@ -2213,7 +2215,7 @@ select {
 }
 
 .print-ar {
-  font-size: 1.6rem;
+  font-size: calc(1.6rem * var(--ar-scale));
   line-height: 1.8;
   text-align: right;
 }
@@ -2512,4 +2514,31 @@ code {
 .gdict-term:hover {
   border-color: var(--accent);
   color: var(--accent);
+}
+
+/* Bigger Arabic needs a little more room between the lines. */
+.line-ar {
+  line-height: 1.7;
+}
+
+.ar-size {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.ar-size .btn {
+  min-width: 34px;
+  font-weight: 650;
+}
+
+.settings-ar-sample {
+  font-size: calc(1.6rem * var(--ar-scale));
+  line-height: 1.7;
+  text-align: right;
+}
+
+.ar-size .ar {
+  font-size: 1.15rem;
+  line-height: 1;
 }

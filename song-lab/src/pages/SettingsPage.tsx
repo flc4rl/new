@@ -3,6 +3,7 @@ import { Download, Upload } from 'lucide-react'
 import { api } from '../api'
 import { useApp } from '../App'
 import { useTheme, type ThemeChoice } from '../lib/theme'
+import { AR_SCALES, useArabicSize } from '../lib/arabicSize'
 import { Button, Confirm, useToast } from '../components/ui'
 import type { Settings } from '../../shared/types'
 
@@ -164,6 +165,7 @@ export function SettingsPage() {
   const toast = useToast()
   const { meta, settings, saveSettings } = useApp()
   const { choice, setChoice } = useTheme()
+  const arabic = useArabicSize()
   const save = (patch: Partial<Settings>) => saveSettings(patch).catch(toast.error)
 
   return (
@@ -181,6 +183,19 @@ export function SettingsPage() {
             </button>
           ))}
         </div>
+        <div className="stage-row">
+          <span>Arabic text size</span>
+          <div className="segmented" role="group" aria-label="Arabic text size">
+            {AR_SCALES.map((n, i) => (
+              <button key={n} type="button" aria-pressed={arabic.scale === n} onClick={() => arabic.setScale(n)}>
+                {['S', 'M', 'L', 'XL', 'XXL', 'XXXL'][i]}
+              </button>
+            ))}
+          </div>
+        </div>
+        <p className="ar settings-ar-sample" lang="ar">
+          الشمس طلعت بدري
+        </p>
       </section>
 
       <section className="panel settings-section">

@@ -11,6 +11,7 @@ import { EditSongDialog } from '../components/SongDialogs'
 import { LineRow, type LineActions } from '../components/LineRow'
 import { Menu } from '../components/Menu'
 import { PasteLyricsDialog } from '../components/PasteLyricsDialog'
+import { ArabicSizeButtons } from '../components/ArabicSize'
 import { DraftDialog } from '../components/DraftDialog'
 import { ShadowPanel, type ShadowControls } from '../components/ShadowPanel'
 import type { CardRef, Line, Question, SongDetail, Word } from '../../shared/types'
@@ -642,6 +643,7 @@ function SongView({ detail, setDetail, reload }: { detail: SongDetail; setDetail
                     {lines.length} {lines.length === 1 ? 'line' : 'lines'} · {timedCount} timed
                   </span>
                   <span className="push" />
+                  <ArabicSizeButtons />
                   {translating > 0 && (
                     <span className="translating" role="status">
                       <span className="spinner-dot" />

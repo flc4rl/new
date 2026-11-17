@@ -10,6 +10,7 @@ import { DeckPage } from './pages/DeckPage'
 import { TutorPage } from './pages/TutorPage'
 import { SettingsPage } from './pages/SettingsPage'
 import { useTheme, type ThemeChoice } from './lib/theme'
+import { useArabicSize } from './lib/arabicSize'
 import { DEFAULT_SETTINGS, type Meta, type Settings } from '../shared/types'
 
 interface AppState {
@@ -75,6 +76,8 @@ function ThemeButton() {
 }
 
 export function App() {
+  // Apply the remembered Arabic size from the first render.
+  useArabicSize()
   const route = useRoute()
   const [meta, setMeta] = useState<Meta | null>(null)
   const [settings, setSettings] = useState<Settings>(DEFAULT_SETTINGS)
