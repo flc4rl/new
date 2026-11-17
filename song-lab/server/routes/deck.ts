@@ -13,6 +13,7 @@ const wordPatch = z.object({
   register: z.enum(['everyday', 'poetic', 'unknown']).optional(),
   status: z.enum(['draft', 'verified']).optional(),
   note: text(2000).optional(),
+  glossPart: text(500).optional(),
 })
 
 const newCard = z.object({

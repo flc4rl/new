@@ -40,6 +40,9 @@ function wordIsInLine(word: string, lineArabic: string): boolean {
 
 const filled = (current: string, next: string) => current.trim() === '' && next.trim() !== ''
 
+/** A link to the gloss is kept only if those words really are in the line's English. */
+const glossHas = (gloss: string, part: string) => !!part.trim() && gloss.toLowerCase().includes(part.trim().toLowerCase())
+
 interface Outcome {
   lineChanged: boolean
   wordsChanged: number
@@ -47,7 +50,7 @@ interface Outcome {
 }
 
 /** Fill a draft word's empty fields. A verified word is never touched. */
-function fillWord(word: Word, draft: DraftWord): boolean {
+function fillWord(word: Word, draft: DraftWord, lineGloss: string): boolean {
   if (word.status === 'verified') return false
   const patch: store.WordPatch = {}
   if (filled(word.translit, draft.translit)) patch.translit = draft.translit.trim()
@@ -55,6 +58,7 @@ function fillWord(word: Word, draft: DraftWord): boolean {
   if (filled(word.root, draft.root)) patch.root = draft.root.trim()
   if (filled(word.note, draft.note)) patch.note = draft.note.trim()
   if (word.register === 'unknown' && draft.register !== 'unknown') patch.register = draft.register
+  if (filled(word.glossPart, draft.glossPart) && glossHas(lineGloss, draft.glossPart)) patch.glossPart = draft.glossPart.trim()
   if (Object.keys(patch).length === 0) return false
   if (draft.unsure) patch.unsure = true
   store.updateWord(word.id, patch)
@@ -102,7 +106,7 @@ export function applyDraft(line: Line, draft: DraftLine, number: number): Outcom
     const index = suggestions.findIndex((s, i) => !used.has(i) && normalizeArabic(s.arabic) === key)
     if (index < 0) continue
     used.add(index)
-    if (fillWord(word, suggestions[index])) outcome.wordsChanged++
+    if (fillWord(word, suggestions[index], store.getLine(line.id).gloss)) outcome.wordsChanged++
   }
   return outcome
 }

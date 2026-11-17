@@ -29,6 +29,7 @@ const backupSchema = z.object({
     z.object({
       id, lineId: id, order: z.number().int().min(0), arabic: text, translit: text, gloss: text, root: text,
       register: z.enum(['everyday', 'poetic', 'unknown']), status, note: text, unsure: z.boolean().default(false),
+      glossPart: text.default(''),
     }),
   ),
   cards: z.array(

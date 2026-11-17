@@ -48,6 +48,8 @@ export interface Word {
   register: Register
   status: Status
   note: string
+  /** The exact words in the line's English gloss that translate this word, for linking them on hover. */
+  glossPart: string
   /** Set by a Claude draft when it could not be confident about the word. */
   unsure: boolean
 }
@@ -108,6 +110,8 @@ export interface Settings {
   loopRepeats: number
   /** Seconds of silence between repeats. */
   loopPauseSec: number
+  /** Translate pasted lyrics with Claude straight away, when a key is set. */
+  autoDraft: boolean
 }
 
 export const DEFAULT_SETTINGS: Settings = {
@@ -117,6 +121,7 @@ export const DEFAULT_SETTINGS: Settings = {
   loopLeadInSec: 0.2,
   loopRepeats: 5,
   loopPauseSec: 1,
+  autoDraft: true,
 }
 
 // ---- API payloads ----

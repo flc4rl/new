@@ -50,6 +50,25 @@ function SongView({ detail, setDetail, reload }: { detail: SongDetail; setDetail
   const [deleting, setDeleting] = useState<Line | null>(null)
   const [clearing, setClearing] = useState(false)
   const [drafting, setDrafting] = useState(false)
+  /** Lines Claude is translating in the background, after a paste. */
+  const [translating, setTranslating] = useState(0)
+
+  /** Translate new lines straight away, when a key is set and the setting is on. */
+  const autoTranslate = (lineIds: string[]) => {
+    if (!meta.claude || !settings.autoDraft || lineIds.length === 0) return
+    setTranslating((n) => n + lineIds.length)
+    api
+      .draft(song.id, lineIds)
+      .then((result) => {
+        void reload()
+        toast.info(
+          `Claude translated ${result.updatedLines} ${result.updatedLines === 1 ? 'line' : 'lines'}. ` +
+            'They are drafts: check them, then mark them verified.',
+        )
+      })
+      .catch(toast.error)
+      .finally(() => setTranslating((n) => Math.max(0, n - lineIds.length)))
+  }
 
   /** The highlighted line: the one being sung, looped or picked by hand. */
   const [cursorId, setCursorId] = useState<string | null>(null)
@@ -612,6 +631,12 @@ function SongView({ detail, setDetail, reload }: { detail: SongDetail; setDetail
                     {lines.length} {lines.length === 1 ? 'line' : 'lines'} · {timedCount} timed
                   </span>
                   <span className="push" />
+                  {translating > 0 && (
+                    <span className="translating" role="status">
+                      <span className="spinner-dot" />
+                      Claude is translating {translating} {translating === 1 ? 'line' : 'lines'}…
+                    </span>
+                  )}
                   {meta.claude && (
                     <Button size="sm" icon={<Sparkles size={14} />} onClick={() => setDrafting(true)}>
                       Draft with Claude
@@ -687,10 +712,14 @@ function SongView({ detail, setDetail, reload }: { detail: SongDetail; setDetail
       {pasting && (
         <PasteLyricsDialog
           hasLines={lines.length > 0}
+          autoTranslate={meta.claude && settings.autoDraft}
           onClose={() => setPasting(false)}
           onAdd={async (text) => {
             try {
-              actions.setLines(await api.addLines(song.id, text))
+              const known = new Set(lines.map((l) => l.id))
+              const next = await api.addLines(song.id, text)
+              actions.setLines(next)
+              autoTranslate(next.filter((l) => !known.has(l.id)).map((l) => l.id))
             } catch (err) {
               toast.error(err)
               throw err

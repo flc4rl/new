@@ -74,6 +74,7 @@ const toWord = (r: Row): Word => ({
   register: r.register,
   status: r.status,
   note: r.note,
+  glossPart: r.glossPart ?? '',
   unsure: !!r.unsure,
 })
 
@@ -405,6 +406,7 @@ export interface WordPatch {
   register?: Register
   status?: Status
   note?: string
+  glossPart?: string
   unsure?: boolean
 }
 
@@ -422,6 +424,7 @@ export function updateWord(id: string, patch: WordPatch): Word {
     register: patch.register,
     status,
     note: patch.note,
+    glossPart: patch.glossPart,
     unsure: status === 'verified' ? 0 : flag(patch.unsure),
   })
   return getWord(id)
@@ -891,9 +894,9 @@ export function importBackup(backup: Backup): Record<string, number> {
     }
     for (const w of words) {
       run(
-        `INSERT INTO words (id, lineId, ord, arabic, translit, gloss, root, register, status, note, unsure)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        w.id, w.lineId, w.order, w.arabic, w.translit, w.gloss, w.root, w.register, w.status, w.note, w.unsure ? 1 : 0,
+        `INSERT INTO words (id, lineId, ord, arabic, translit, gloss, root, register, status, note, unsure, glossPart)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        w.id, w.lineId, w.order, w.arabic, w.translit, w.gloss, w.root, w.register, w.status, w.note, w.unsure ? 1 : 0, w.glossPart ?? '',
       )
     }
     for (const c of backup.cards) {

@@ -45,7 +45,8 @@ CREATE TABLE IF NOT EXISTS words (
   register TEXT NOT NULL DEFAULT 'unknown',
   status TEXT NOT NULL DEFAULT 'draft',
   note TEXT NOT NULL DEFAULT '',
-  unsure INTEGER NOT NULL DEFAULT 0
+  unsure INTEGER NOT NULL DEFAULT 0,
+  glossPart TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS words_line ON words(lineId, ord);
 CREATE TABLE IF NOT EXISTS cards (
@@ -115,8 +116,15 @@ export function getDb(): DatabaseSync {
     db = new DatabaseSync(DB_PATH)
     db.exec('PRAGMA foreign_keys = ON;')
     db.exec(SCHEMA)
+    migrate(db)
   }
   return db
+}
+
+/** Bring a database made by an earlier version up to date. */
+function migrate(d: DatabaseSync): void {
+  const wordColumns = (d.prepare('PRAGMA table_info(words)').all() as { name: string }[]).map((c) => c.name)
+  if (!wordColumns.includes('glossPart')) d.exec("ALTER TABLE words ADD COLUMN glossPart TEXT NOT NULL DEFAULT ''")
 }
 
 export function closeDb(): void {

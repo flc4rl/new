@@ -13,24 +13,24 @@ const DRAFTS: Record<string, Omit<DraftLine, 'key'>> = {
   'الشمس طلعت': {
     translit: 'ash-shamis Tal3at', gloss: 'The sun came out', unsure: false, note: '',
     words: [
-      { arabic: 'الشمس', translit: 'ash-shamis', gloss: 'the sun', root: 'ش م س', register: 'everyday', unsure: false, note: '' },
-      { arabic: 'طلعت', translit: 'Tal3at', gloss: 'came out', root: 'ط ل ع', register: 'everyday', unsure: false, note: '' },
+      { arabic: 'الشمس', translit: 'ash-shamis', gloss: 'the sun', root: 'ش م س', register: 'everyday', unsure: false, note: '', glossPart: 'The sun' },
+      { arabic: 'طلعت', translit: 'Tal3at', gloss: 'came out', root: 'ط ل ع', register: 'everyday', unsure: false, note: '', glossPart: 'came out' },
     ],
   },
   'القمر غاب': {
     translit: 'al-gamar gaab', gloss: 'The moon set', unsure: true, note: 'gaab: the ghayn is softened here',
     words: [
-      { arabic: 'القمر', translit: 'al-gamar', gloss: 'the moon', root: '', register: 'everyday', unsure: false, note: '' },
-      { arabic: 'غاب', translit: 'gaab', gloss: 'set, went away', root: 'غ ي ب', register: 'poetic', unsure: true, note: '' },
+      { arabic: 'القمر', translit: 'al-gamar', gloss: 'the moon', root: '', register: 'everyday', unsure: false, note: '', glossPart: 'The moon' },
+      { arabic: 'غاب', translit: 'gaab', gloss: 'set, went away', root: 'غ ي ب', register: 'poetic', unsure: true, note: '', glossPart: 'went down' },
       // Not in the line: must never be saved.
-      { arabic: 'والنجوم', translit: 'wa-n-nujuum', gloss: 'and the stars', root: '', register: 'poetic', unsure: false, note: '' },
+      { arabic: 'والنجوم', translit: 'wa-n-nujuum', gloss: 'and the stars', root: '', register: 'poetic', unsure: false, note: '', glossPart: '' },
     ],
   },
   'النيل طويل': {
     translit: 'an-niil Tawiil', gloss: 'The Nile is long', unsure: false, note: '',
     words: [
-      { arabic: 'النيل', translit: 'an-niil', gloss: 'the Nile', root: '', register: 'everyday', unsure: false, note: '' },
-      { arabic: 'طويل', translit: 'Tawiil', gloss: 'long', root: 'ط و ل', register: 'everyday', unsure: false, note: '' },
+      { arabic: 'النيل', translit: 'an-niil', gloss: 'the Nile', root: '', register: 'everyday', unsure: false, note: '', glossPart: 'The Nile' },
+      { arabic: 'طويل', translit: 'Tawiil', gloss: 'long', root: 'ط و ل', register: 'everyday', unsure: false, note: '', glossPart: 'long' },
     ],
   },
 }
@@ -74,7 +74,10 @@ test('drafting fills empty fields as drafts and leaves verified fields untouched
 
   assert.deepEqual([l3.translit, l3.gloss, l3.status, l3.source], ['in-niil Tawiil', 'The Nile is long indeed', 'verified', 'user'], 'verified line untouched')
 
+  const words1 = d.words.filter((w: any) => w.lineId === l1.id)
+  assert.deepEqual(words1.map((w: any) => w.glossPart), ['The sun', 'came out'], 'each word is linked to its words in the English')
   const words2 = d.words.filter((w: any) => w.lineId === l2.id)
+  assert.equal(words2[1].glossPart, '', 'a link to words that are not in the English is dropped')
   assert.deepEqual(words2.map((w: any) => w.arabic), ['القمر', 'غاب'], 'a word that is not in the line is never saved')
   assert.ok(words2.every((w: any) => w.status === 'draft'))
   assert.equal(words2[1].register, 'poetic')

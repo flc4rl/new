@@ -2388,3 +2388,62 @@ code {
   color: var(--accent);
   background: var(--accent-soft);
 }
+
+/* ---------- linked words ---------- */
+
+.editable-view {
+  overflow: visible;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  cursor: text;
+}
+
+.link {
+  position: relative;
+  border-radius: 4px;
+  transition: background 0.1s;
+}
+
+.link.is-linked {
+  background: var(--link-bg);
+  box-shadow: 0 0 0 2px var(--link-bg);
+  color: var(--ink);
+}
+
+/* Over an Arabic word: its transliteration and meaning, just above it. */
+.link[data-tip]:hover::after {
+  content: attr(data-tip);
+  position: absolute;
+  bottom: calc(100% + 2px);
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 5;
+  padding: 3px 8px;
+  border-radius: var(--radius-sm);
+  background: var(--ink);
+  color: var(--bg);
+  font: 500 0.8rem/1.4 var(--font);
+  direction: ltr;
+  white-space: nowrap;
+  pointer-events: none;
+}
+
+.word-chip.is-linked {
+  background: var(--link-bg);
+}
+
+:root {
+  --link-bg: #cfe9f9;
+}
+
+:root[data-theme='dark'] {
+  --link-bg: #1d4a66;
+}
+
+.translating {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.85rem;
+  color: var(--accent);
+}

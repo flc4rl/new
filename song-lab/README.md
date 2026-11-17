@@ -28,7 +28,9 @@ To use another port: `PORT=5180 npm start` (macOS and Linux) or `$env:PORT=5180;
 
 ## Turn on "Draft with Claude" (optional)
 
-Claude can draft the transliteration, the English gloss and the word list for lines you choose. Without an API key the app works fully; the draft button is simply hidden.
+Claude translates the lyrics for you: the transliteration in Khartoum pronunciation, the English, and each word with its meaning. With a key set, it does this by itself as soon as you paste lyrics (switch that off in Settings), and the **Draft with Claude** button redoes it for lines you choose. Without an API key the app works fully; you type translations yourself.
+
+Claude is used rather than Google Translate because Google reads Sudanese as Modern Standard Arabic, gives no transliteration or word breakdown, and needs its own paid Google Cloud key.
 
 1. Create an API key at <https://console.anthropic.com>. Requests are billed to that account.
 2. Give the key to the app in one of two ways:
@@ -50,11 +52,12 @@ What Claude does and does not do:
 2. **Paste the lyrics**, one line per row. Lyrics are never fetched from the internet; you type or paste them.
 3. **Tap to sync.** Press `S`, start the song with Space, and press Enter on the first syllable of each line. A line ends where the next begins. Undo a tap with Backspace. Fine-tune a line with the start and end buttons (0.25 s steps) or `,` `.` `<` `>`.
 4. **Listen slowly.** Pick 0.5× or 0.75× (the app offers only the speeds YouTube allows for the video, and remembers the last one per song). Loop a line with `L`, with a number of repeats and a pause between them.
-5. **Break lines down.** Type the transliteration and gloss under each line, or use Draft with Claude. Open a line's words to give each word a transliteration, meaning, root, register (everyday, poetic or unknown) and a note.
-6. **Make cards.** The card button next to a line or a word adds it to the deck. Phrases from lessons or the coursebook go in under Review, "Add a phrase".
-7. **Review daily.** A song card plays its clip at the song's speed, then shows the Arabic and transliteration, then the meaning when you reveal it. Grade with 1 to 4. New cards per day: 10 by default, changed under Review, "All cards".
-8. **Shadow.** Wear headphones, press `R` to record yourself while the line loops, `R` again to stop, and `C` to hear the original line and then your take.
-9. **Before a lesson.** The Tutor page lists every draft line, draft word and open question by song. Correct and verify in place with your tutor, or send them the Markdown file or the printable page.
+5. **Break lines down.** Type the transliteration and gloss under each line, or let Claude translate them. Open a line's words to give each word a transliteration, meaning, root, register (everyday, poetic or unknown) and a note.
+6. **Hover to see which word is which.** Once a line has words, point at an Arabic word to light up its transliteration and the English words that translate it, with its meaning shown above it. It works the other way round too: point at English or transliterated words to find the Arabic. Claude fills in the links; for words you add yourself, type the matching English under "In the line's English" in the word editor (a word whose meaning appears in the line's English is linked anyway). Click a row to edit it.
+7. **Make cards.** The card button next to a line or a word adds it to the deck. Phrases from lessons or the coursebook go in under Review, "Add a phrase".
+8. **Review daily.** A song card plays its clip at the song's speed, then shows the Arabic and transliteration, then the meaning when you reveal it. Grade with 1 to 4. New cards per day: 10 by default, changed under Review, "All cards".
+9. **Shadow.** Wear headphones, press `R` to record yourself while the line loops, `R` again to stop, and `C` to hear the original line and then your take.
+10. **Before a lesson.** The Tutor page lists every draft line, draft word and open question by song. Correct and verify in place with your tutor, or send them the Markdown file or the printable page.
 
 ### Keyboard shortcuts on a song
 

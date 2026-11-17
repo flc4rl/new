@@ -1,4 +1,4 @@
-import { memo, useState } from 'react'
+import { memo, useMemo, useState } from 'react'
 import {
   ArrowDown,
   ArrowUp,
@@ -17,6 +17,8 @@ import { EditableText } from './EditableText'
 import { Menu } from './Menu'
 import { WordsPanel, type WordActions } from './WordsPanel'
 import { AskForm, QuestionList } from './Questions'
+import { LinkedText } from './LinkedText'
+import { hasLinks, linkArabic, linkGloss, linkTranslit } from '../lib/links'
 import { formatTime } from '../../shared/text'
 import type { CardRef, Line, Question, Word } from '../../shared/types'
 
@@ -92,6 +94,20 @@ export const LineRow = memo(function LineRow({
   actions: LineActions
 }) {
   const [asking, setAsking] = useState(false)
+  /** The word under the pointer, in any of the three rows or the word chips. */
+  const [hover, setHover] = useState<string | null>(null)
+  const links = useMemo(() => {
+    if (words.length === 0) return null
+    const tips = new Map(words.map((w) => [w.id, [w.translit, w.gloss].filter(Boolean).join(' · ')]))
+    return {
+      arabic: linkArabic(line.arabic, words),
+      translit: linkTranslit(line.translit, words),
+      gloss: linkGloss(line.gloss, words),
+      tips,
+    }
+  }, [line.arabic, line.translit, line.gloss, words])
+  const view = (segments: ReturnType<typeof linkArabic> | undefined, tips?: Map<string, string>) =>
+    segments && hasLinks(segments) ? <LinkedText segments={segments} hover={hover} onHover={setHover} tips={tips} /> : undefined
   const timed = line.startSec != null
   const hasLineCard = cards.some((c) => c.kind === 'line')
   const verified = line.status === 'verified'
@@ -125,6 +141,7 @@ export const LineRow = memo(function LineRow({
           value={line.arabic}
           label={`Line ${number}, Arabic`}
           placeholder="اكتب هنا"
+          view={view(links?.arabic, links?.tips)}
           onSave={(arabic) => actions.saveLine(line.id, { arabic })}
         />
         <EditableText
@@ -132,6 +149,7 @@ export const LineRow = memo(function LineRow({
           value={line.translit}
           label={`Line ${number}, transliteration`}
           placeholder="transliteration"
+          view={view(links?.translit)}
           onSave={(translit) => actions.saveLine(line.id, { translit, source: 'user' })}
         />
         <EditableText
@@ -139,6 +157,7 @@ export const LineRow = memo(function LineRow({
           value={line.gloss}
           label={`Line ${number}, English`}
           placeholder="English"
+          view={view(links?.gloss)}
           onSave={(gloss) => actions.saveLine(line.id, { gloss, source: 'user' })}
         />
 
@@ -192,7 +211,7 @@ export const LineRow = memo(function LineRow({
           </div>
         )}
 
-        {wordsOpen && <WordsPanel line={line} words={words} cards={cards} questions={wordQuestions} actions={actions} />}
+        {wordsOpen && <WordsPanel line={line} words={words} cards={cards} questions={wordQuestions} hover={hover} onHover={setHover} actions={actions} />}
       </div>
 
       <div className="line-actions">

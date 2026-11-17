@@ -14,6 +14,7 @@ export const DraftWordSchema = z.object({
   register: z.enum(['everyday', 'poetic', 'unknown']),
   unsure: z.boolean(),
   note: z.string(),
+  glossPart: z.string(),
 })
 
 export const DraftLineSchema = z.object({
@@ -75,6 +76,7 @@ Word split:
 Fields:
 - root: the root consonants in Arabic letters separated by spaces (for example ش م س), only when you are confident. Otherwise an empty string.
 - register: "everyday" if the word is used in ordinary Khartoum speech, "poetic" if it is poetic, literary, Modern Standard or old-fashioned and would sound odd in conversation, "unknown" if you cannot tell.
+- glossPart: the words of your line gloss that translate this word, copied exactly as they appear in the gloss (same spelling and case), so the app can link them. Use the shortest such run of words. An empty string when no words of the gloss match it, for example a particle with no English equivalent.
 - note: one short sentence only when it helps the learner (a Sudanese form, a poetic form, a difference from Modern Standard Arabic). Otherwise an empty string.
 
 Honesty:

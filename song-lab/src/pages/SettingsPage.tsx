@@ -208,10 +208,16 @@ export function SettingsPage() {
       <section className="panel settings-section">
         <h2>Claude drafts</h2>
         {meta.claude ? (
-          <p>
-            On. Drafts use <code>{meta.model}</code>. The API key stays on this computer’s server and never reaches the
-            browser.
-          </p>
+          <>
+            <p>
+              On. Drafts use <code>{meta.model}</code>. The API key stays on this computer’s server and never reaches
+              the browser.
+            </p>
+            <label className="check">
+              <input type="checkbox" checked={settings.autoDraft} onChange={(e) => void save({ autoDraft: e.target.checked })} />
+              Translate pasted lyrics straight away (transliteration, English and words, as drafts)
+            </label>
+          </>
         ) : (
           <p>
             Off. To turn them on, set the <code>ANTHROPIC_API_KEY</code> environment variable (or put it in a{' '}

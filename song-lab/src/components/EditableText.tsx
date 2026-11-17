@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useRef, useState } from 'react'
+import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react'
 
 const AUTO_SIZES = typeof CSS !== 'undefined' && CSS.supports('field-sizing', 'content')
 const SAVE_DELAY_MS = 900
@@ -14,6 +14,7 @@ export function EditableText({
   placeholder,
   className,
   rtl,
+  view,
 }: {
   value: string
   onSave: (next: string) => void
@@ -22,8 +23,14 @@ export function EditableText({
   className?: string
   /** Arabic script: right to left, in the Arabic typeface. */
   rtl?: boolean
+  /**
+   * What to show while the text is not being edited, such as words that light up on hover.
+   * A click or the Tab key switches to editing.
+   */
+  view?: ReactNode
 }) {
   const [draft, setDraft] = useState(value)
+  const [editing, setEditing] = useState(false)
   const ref = useRef<HTMLTextAreaElement>(null)
   const focused = useRef(false)
   const timer = useRef<number | undefined>(undefined)
@@ -54,10 +61,28 @@ export function EditableText({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
+  const classes = `editable${rtl ? ' ar' : ' ltr'}${className ? ` ${className}` : ''}`
+
+  if (view && value && !editing) {
+    return (
+      <div
+        className={`${classes} editable-view`}
+        dir={rtl ? 'rtl' : 'ltr'}
+        lang={rtl ? 'ar' : undefined}
+        tabIndex={0}
+        aria-label={`${label}: ${value}. Click to edit.`}
+        onFocus={() => setEditing(true)}
+      >
+        {view}
+      </div>
+    )
+  }
+
   return (
     <textarea
       ref={ref}
-      className={`editable${rtl ? ' ar' : ' ltr'}${className ? ` ${className}` : ''}`}
+      autoFocus={!!view && editing}
+      className={classes}
       rows={1}
       value={draft}
       aria-label={label}
@@ -69,8 +94,10 @@ export function EditableText({
       autoCorrect="off"
       autoComplete="off"
       spellCheck={false}
-      onFocus={() => {
+      onFocus={(e) => {
         focused.current = true
+        // Coming from the word view, put the cursor at the end.
+        if (view) e.currentTarget.setSelectionRange(e.currentTarget.value.length, e.currentTarget.value.length)
       }}
       onChange={(e) => {
         setDraft(e.target.value.replace(/\n/g, ' '))
@@ -79,6 +106,7 @@ export function EditableText({
       }}
       onBlur={() => {
         focused.current = false
+        setEditing(false)
         commit()
         setDraft((d) => d.replace(/\s+/g, ' ').trim())
       }}

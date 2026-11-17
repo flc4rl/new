@@ -81,6 +81,7 @@ export interface WordPatch {
   register?: Register
   status?: Status
   note?: string
+  glossPart?: string
 }
 
 export type NewCard =

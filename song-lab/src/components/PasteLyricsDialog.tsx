@@ -4,10 +4,12 @@ import { splitLines } from '../../shared/text'
 
 export function PasteLyricsDialog({
   hasLines,
+  autoTranslate,
   onAdd,
   onClose,
 }: {
   hasLines: boolean
+  autoTranslate: boolean
   onAdd: (text: string) => Promise<void>
   onClose: () => void
 }) {
@@ -31,6 +33,8 @@ export function PasteLyricsDialog({
       <p className="muted">
         Type or paste the Arabic, one line of the song per row. {hasLines ? 'New lines are added at the end. ' : ''}
         Lyrics stay on this computer, in the app’s data folder.
+        {autoTranslate &&
+          ' Claude then translates them for you: transliteration, English and words, saved as drafts for you to check.'}
       </p>
       <textarea
         className="input ar paste-area"

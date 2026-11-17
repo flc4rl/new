@@ -86,6 +86,15 @@ function WordEditor({
         </div>
       </div>
       <label className="field word-field-note">
+        <span>In the line’s English</span>
+        <CommitInput
+          value={word.glossPart}
+          label="Word, its words in the line's English"
+          placeholder="the words of the line’s English that translate it, to link them on hover"
+          onCommit={(glossPart) => save({ glossPart })}
+        />
+      </label>
+      <label className="field word-field-note">
         <span>Note</span>
         <CommitInput value={word.note} label="Word, note" placeholder="optional" onCommit={(note) => save({ note })} />
       </label>
@@ -126,10 +135,14 @@ export const WordsPanel = memo(function WordsPanel({
   words,
   cards,
   questions,
+  hover,
+  onHover,
   actions,
 }: {
   line: Line
   words: Word[]
+  hover: string | null
+  onHover: (wordId: string | null) => void
   cards: CardRef[]
   /** Questions about this line's words. */
   questions: Question[]
@@ -172,7 +185,9 @@ export const WordsPanel = memo(function WordsPanel({
               key={word.id}
               className={`word-chip reg-${word.register}${word.status === 'verified' ? ' is-verified' : ''}${
                 word.id === selectedId ? ' is-selected' : ''
-              }`}
+              }${word.id === hover ? ' is-linked' : ''}`}
+              onMouseEnter={() => onHover(word.id)}
+              onMouseLeave={() => onHover(null)}
             >
               <button
                 type="button"
