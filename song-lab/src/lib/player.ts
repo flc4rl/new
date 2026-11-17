@@ -372,13 +372,19 @@ export class SongPlayer {
   /** Switch to another video, for review cards drawn from different songs. */
   load(videoId: string, rate: number, startSec = 0): void {
     if (!this.yt) return
+    // The first video may have failed before the player was ready; the clock still has to run.
+    if (this.poll === undefined) this.poll = window.setInterval(() => this.tick(), POLL_MS)
     this.clearLoop()
     this.wantedRate = rate
-    this.set({ loop: null, rate })
     if (videoId !== this.videoId) {
       this.videoId = videoId
       this.pendingSeek = { target: startSec, at: performance.now() }
+      // A new video starts with a clean slate, whatever happened to the last one.
+      this.set({ loop: null, rate, status: 'ready', error: null })
       this.yt.loadVideoById({ videoId, startSeconds: startSec })
+    } else {
+      this.set({ loop: null, rate })
+      if (this.yt.getPlaybackRate() !== rate) this.yt.setPlaybackRate(rate)
     }
   }
 

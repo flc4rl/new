@@ -158,6 +158,10 @@ export interface CardView extends Card {
   songId: string | null
   songTitle: string | null
   clip: Clip | null
+  /** For a word card: the line the word comes from, shown with the answer. */
+  lineArabic: string | null
+  /** Whether the word or line behind the card has been confirmed; null for hand-made phrases. */
+  status: Status | null
 }
 
 export interface ReviewQueue {

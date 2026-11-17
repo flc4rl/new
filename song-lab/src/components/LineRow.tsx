@@ -1,12 +1,13 @@
 import { memo } from 'react'
-import { ArrowDown, ArrowUp, Minus, Play, Plus, Timer, Trash2 } from 'lucide-react'
+import { ArrowDown, ArrowUp, Layers, Minus, Play, Plus, Rows3, Timer, Trash2 } from 'lucide-react'
 import type { LinePatch } from '../api'
 import { EditableText } from './EditableText'
 import { Menu } from './Menu'
+import { WordsPanel, type WordActions } from './WordsPanel'
 import { formatTime } from '../../shared/text'
-import type { Line } from '../../shared/types'
+import type { CardRef, Line, Word } from '../../shared/types'
 
-export interface LineActions {
+export interface LineActions extends WordActions {
   saveLine: (id: string, patch: LinePatch) => void
   deleteLine: (line: Line) => void
   moveLine: (id: string, delta: -1 | 1) => void
@@ -17,6 +18,8 @@ export interface LineActions {
   playLine: (line: Line) => void
   nudgeLine: (line: Line, edge: 'start' | 'end', direction: -1 | 1) => void
   syncFrom: (line: Line) => void
+  toggleWords: (lineId: string) => void
+  makeLineCard: (line: Line) => void
 }
 
 function Nudger({
@@ -50,6 +53,9 @@ export const LineRow = memo(function LineRow({
   isCurrent,
   isNextTap,
   endSec,
+  words,
+  cards,
+  wordsOpen,
   actions,
 }: {
   line: Line
@@ -62,9 +68,14 @@ export const LineRow = memo(function LineRow({
   isNextTap: boolean
   /** Where the line ends, worked out from the next line when it has no end of its own. */
   endSec: number | null
+  words: Word[]
+  /** Review cards made from this line or its words. */
+  cards: CardRef[]
+  wordsOpen: boolean
   actions: LineActions
 }) {
   const timed = line.startSec != null
+  const hasLineCard = cards.some((c) => c.kind === 'line')
   return (
     <li
       className={`line${isCurrent ? ' is-current' : ''}${isNextTap ? ' is-next-tap' : ''}`}
@@ -122,9 +133,31 @@ export const LineRow = memo(function LineRow({
             )}
           </div>
         )}
+
+        {wordsOpen && <WordsPanel line={line} words={words} cards={cards} actions={actions} />}
       </div>
 
       <div className="line-actions">
+        <button
+          type="button"
+          className="btn btn-ghost btn-sm btn-icon"
+          aria-pressed={wordsOpen}
+          aria-label={`Words of line ${number}`}
+          title={wordsOpen ? 'Hide the words' : words.length ? `Show the ${words.length} words` : 'Split into words'}
+          onClick={() => actions.toggleWords(line.id)}
+        >
+          <Rows3 size={16} />
+        </button>
+        <button
+          type="button"
+          className="btn btn-ghost btn-sm btn-icon"
+          aria-pressed={hasLineCard}
+          aria-label={hasLineCard ? `Line ${number} is in the deck` : `Make a card from line ${number}`}
+          title={hasLineCard ? 'This line is in the deck' : 'Make a card from this line'}
+          onClick={() => !hasLineCard && actions.makeLineCard(line)}
+        >
+          <Layers size={16} />
+        </button>
         <Menu
           label={`More actions for line ${number}`}
           items={[

@@ -444,8 +444,8 @@ export function deleteWord(id: string): void {
 
 const CARD_VIEW_SQL = `
   SELECT c.*,
-    w.arabic AS wArabic, w.translit AS wTranslit, w.gloss AS wGloss,
-    l.arabic AS lArabic, l.translit AS lTranslit, l.gloss AS lGloss,
+    w.arabic AS wArabic, w.translit AS wTranslit, w.gloss AS wGloss, w.status AS wStatus,
+    l.arabic AS lArabic, l.translit AS lTranslit, l.gloss AS lGloss, l.status AS lStatus,
     l.startSec AS lStart, l.endSec AS lEnd,
     s.id AS songId, s.title AS songTitle, s.youtubeId AS youtubeId, s.savedRate AS savedRate,
     NOT EXISTS (SELECT 1 FROM reviews r WHERE r.cardId = c.id) AS isNew
@@ -459,15 +459,20 @@ const FALLBACK_CLIP_SEC = 6
 
 function toCardView(r: Row): CardView {
   const card = toCard(r)
+  let status: Status | null = null
+  let lineArabic: string | null = null
   // A song card reads its text from the word or line it points to.
   if (card.kind === 'word' && r.wArabic != null) {
     card.arabic = r.wArabic
     card.translit = r.wTranslit
     card.gloss = r.wGloss
+    status = r.wStatus
+    lineArabic = r.lArabic ?? null
   } else if (card.kind === 'line' && r.lArabic != null) {
     card.arabic = r.lArabic
     card.translit = r.lTranslit
     card.gloss = r.lGloss
+    status = r.lStatus
   }
   const clip =
     r.youtubeId && r.lStart != null
@@ -478,7 +483,15 @@ function toCardView(r: Row): CardView {
           rate: r.savedRate as number,
         }
       : null
-  return { ...card, isNew: !!r.isNew, songId: r.songId ?? null, songTitle: r.songTitle ?? null, clip }
+  return {
+    ...card,
+    isNew: !!r.isNew,
+    songId: r.songId ?? null,
+    songTitle: r.songTitle ?? null,
+    clip,
+    lineArabic,
+    status,
+  }
 }
 
 export function getCardView(id: string): CardView {

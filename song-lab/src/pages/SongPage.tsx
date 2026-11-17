@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { ArrowLeft, ClipboardPaste, Eraser, Pencil } from 'lucide-react'
-import { api, type LinePatch } from '../api'
+import { ArrowLeft, ClipboardPaste, Eraser, Pencil, Rows3, SplitSquareHorizontal } from 'lucide-react'
+import { api, type LinePatch, type NewCard } from '../api'
 import { useApp } from '../App'
 import { useHotkeys, useLoad, usePlayer } from '../lib/hooks'
 import { activeLineAt, lineEnd, nudge, NUDGE_SEC, round2 } from '../lib/timing'
@@ -11,9 +11,12 @@ import { EditSongDialog } from '../components/SongDialogs'
 import { LineRow, type LineActions } from '../components/LineRow'
 import { Menu } from '../components/Menu'
 import { PasteLyricsDialog } from '../components/PasteLyricsDialog'
-import type { Line, SongDetail } from '../../shared/types'
+import type { CardRef, Line, SongDetail, Word } from '../../shared/types'
 
 type SetDetail = (next: SongDetail | ((prev: SongDetail) => SongDetail)) => void
+
+const NO_WORDS: Word[] = []
+const NO_CARDS: CardRef[] = []
 
 /** How much of a line is played back after a nudge, so the new edge can be heard. */
 const NUDGE_PREVIEW_SEC = 2.5
@@ -36,7 +39,7 @@ export function SongPage({ songId }: { songId: string }) {
 function SongView({ detail, setDetail, reload }: { detail: SongDetail; setDetail: SetDetail; reload: () => Promise<void> }) {
   const { song, lines } = detail
   const toast = useToast()
-  const { settings, saveSettings } = useApp()
+  const { settings, saveSettings, refreshCounts } = useApp()
   const { hostRef, player, snap, retry } = usePlayer(song.youtubeId, song.savedRate)
 
   const [editing, setEditing] = useState(false)
@@ -52,10 +55,13 @@ function SongView({ detail, setDetail, reload }: { detail: SongDetail; setDetail
   const [syncing, setSyncing] = useState(false)
   /** In sync mode: the line the next tap will time. Equal to lines.length when only the final end is missing. */
   const [syncIndex, setSyncIndex] = useState(0)
+  /** Lines whose word breakdown is open. */
+  const [openWords, setOpenWords] = useState<ReadonlySet<string>>(new Set())
+  const [allWordsOpen, setAllWordsOpen] = useState(false)
 
   // The newest state, for handlers that must not be recreated on every change.
-  const live = useRef({ detail, snap, player, settings, cursorId, spanLineId, looping, syncing, syncIndex })
-  live.current = { detail, snap, player, settings, cursorId, spanLineId, looping, syncing, syncIndex }
+  const live = useRef({ detail, snap, player, settings, cursorId, spanLineId, looping, syncing, syncIndex, openWords, allWordsOpen })
+  live.current = { detail, snap, player, settings, cursorId, spanLineId, looping, syncing, syncIndex, openWords, allWordsOpen }
 
   const focusLine = useRef<string | null>(null)
   useEffect(() => {
@@ -123,6 +129,37 @@ function SongView({ detail, setDetail, reload }: { detail: SongDetail; setDetail
       } catch (err) {
         fail(err)
       }
+    }
+
+    const patchWord = (word: Word) =>
+      setDetail((d) => ({ ...d, words: d.words.map((w) => (w.id === word.id ? word : w)) }))
+
+    const addCards = (card: NewCard) => {
+      api
+        .addCards(card)
+        .then((created) => {
+          const refs: CardRef[] = created.map((c) => ({
+            id: c.id,
+            kind: c.kind,
+            wordId: c.wordId,
+            lineId: c.lineId,
+            direction: c.direction,
+          }))
+          setDetail((d) => ({ ...d, cards: [...d.cards, ...refs] }))
+          toast.info(
+            created.length === 0
+              ? 'Already in the deck.'
+              : created.length === 2
+                ? 'Added to the deck, in both directions.'
+                : 'Added to the deck.',
+          )
+          refreshCounts()
+        })
+        .catch(fail)
+    }
+
+    const splitLine = (lineId: string) => {
+      api.splitLine(lineId).then(reload).catch(fail)
     }
 
     const cursorLine = () => {
@@ -286,6 +323,60 @@ function SongView({ detail, setDetail, reload }: { detail: SongDetail; setDetail
       syncFrom(line) {
         startSync(live.current.detail.lines.findIndex((l) => l.id === line.id))
       },
+      toggleWords(lineId) {
+        const d = live.current.detail
+        const opening = !live.current.openWords.has(lineId) && !live.current.allWordsOpen
+        setOpenWords((open) => {
+          const next = new Set(open)
+          if (next.has(lineId)) next.delete(lineId)
+          else next.add(lineId)
+          return next
+        })
+        // Opening a line for the first time splits it, so the words are there straight away.
+        const line = d.lines.find((l) => l.id === lineId)
+        if (opening && line?.arabic && !d.words.some((w) => w.lineId === lineId)) splitLine(lineId)
+      },
+      makeLineCard(line) {
+        if (!line.gloss) {
+          toast.info('Give the line an English gloss first, so the card has an answer.')
+          return
+        }
+        addCards({ kind: 'line', lineId: line.id })
+      },
+      splitLine,
+      addWord(lineId, arabic) {
+        api
+          .addWord(lineId, arabic)
+          .then((word) => setDetail((d) => ({ ...d, words: [...d.words, word] })))
+          .catch(fail)
+      },
+      saveWord(id, patch) {
+        setDetail((d) => ({ ...d, words: d.words.map((w) => (w.id === id ? { ...w, ...patch } : w)) }))
+        api.updateWord(id, patch).then(patchWord).catch(fail)
+      },
+      deleteWord(word) {
+        api.deleteWord(word.id).then(reload).catch(fail)
+      },
+      makeWordCard(word) {
+        if (!word.gloss) {
+          toast.info('Give the word a meaning first, so the card has an answer.')
+          return
+        }
+        addCards({ kind: 'word', wordId: word.id })
+      },
+    }
+
+    const splitAllLines = async () => {
+      const d = live.current.detail
+      try {
+        for (const line of d.lines) {
+          if (line.arabic && !d.words.some((w) => w.lineId === line.id)) await api.splitLine(line.id)
+        }
+        setAllWordsOpen(true)
+        await reload()
+      } catch (err) {
+        fail(err)
+      }
     }
 
     const stepLine = (delta: -1 | 1) => {
@@ -314,8 +405,9 @@ function SongView({ detail, setDetail, reload }: { detail: SongDetail; setDetail
       undoTap,
       stepLine,
       nudgeCursor,
+      splitAllLines,
     }
-  }, [reload, setDetail, toast])
+  }, [reload, setDetail, toast, refreshCounts])
 
   useHotkeys({
     ' ': () => player?.toggle(),
@@ -347,6 +439,27 @@ function SongView({ detail, setDetail, reload }: { detail: SongDetail; setDetail
   })
 
   const cursor = lines.find((l) => l.id === cursorId) ?? null
+
+  // Words and cards grouped by line, so a row only re-renders when its own change.
+  const wordsByLine = useMemo(() => {
+    const map = new Map<string, Word[]>()
+    for (const word of detail.words) {
+      const list = map.get(word.lineId)
+      if (list) list.push(word)
+      else map.set(word.lineId, [word])
+    }
+    return map
+  }, [detail.words])
+  const cardsByLine = useMemo(() => {
+    const map = new Map<string, CardRef[]>()
+    for (const card of detail.cards) {
+      if (!card.lineId) continue
+      const list = map.get(card.lineId)
+      if (list) list.push(card)
+      else map.set(card.lineId, [card])
+    }
+    return map
+  }, [detail.cards])
   const timedCount = lines.filter((l) => l.startSec != null).length
 
   return (
@@ -430,12 +543,29 @@ function SongView({ detail, setDetail, reload }: { detail: SongDetail; setDetail
                     {lines.length} {lines.length === 1 ? 'line' : 'lines'} · {timedCount} timed
                   </span>
                   <span className="push" />
+                  <Button
+                    size="sm"
+                    icon={<Rows3 size={14} />}
+                    pressed={allWordsOpen}
+                    onClick={() => {
+                      setAllWordsOpen((open) => !open)
+                      setOpenWords(new Set())
+                    }}
+                    title="Show or hide the word breakdown of every line"
+                  >
+                    Words
+                  </Button>
                   <Button size="sm" icon={<ClipboardPaste size={14} />} onClick={() => setPasting(true)}>
                     Add lyrics
                   </Button>
                   <Menu
                     label="More lyric actions"
                     items={[
+                      {
+                        label: 'Split every line into words',
+                        icon: <SplitSquareHorizontal size={15} />,
+                        onSelect: () => void actions.splitAllLines(),
+                      },
                       {
                         label: 'Clear all timings',
                         icon: <Eraser size={15} />,
@@ -457,6 +587,9 @@ function SongView({ detail, setDetail, reload }: { detail: SongDetail; setDetail
                       isCurrent={line.id === cursorId}
                       isNextTap={syncing && i === syncIndex}
                       endSec={line.id === cursorId ? lineEnd(lines, line) : null}
+                      words={wordsByLine.get(line.id) ?? NO_WORDS}
+                      cards={cardsByLine.get(line.id) ?? NO_CARDS}
+                      wordsOpen={allWordsOpen || openWords.has(line.id)}
                       actions={actions}
                     />
                   ))}
