@@ -758,13 +758,18 @@ select {
 }
 
 .stage {
-  display: grid;
+  /* A column that scrolls; nothing in it may shrink, or the video would cover the controls. */
+  display: flex;
+  flex-direction: column;
   gap: 12px;
-  align-content: start;
   padding: 14px 16px 24px;
   border-right: 1px solid var(--line);
   overflow-y: auto;
   min-height: 0;
+}
+
+.stage > * {
+  flex-shrink: 0;
 }
 
 .lyrics {
@@ -2263,4 +2268,41 @@ select {
   .page {
     padding: 0;
   }
+}
+
+/* ---------- shadowing ---------- */
+
+.rec-dot {
+  color: var(--danger);
+  fill: var(--danger);
+}
+
+.rec-live {
+  color: var(--danger);
+  font-weight: 600;
+}
+
+.rec-live::before {
+  content: '';
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  margin-inline-end: 6px;
+  border-radius: 50%;
+  background: var(--danger);
+  animation: pulse 1s ease-in-out infinite;
+}
+
+@keyframes pulse {
+  50% {
+    opacity: 0.3;
+  }
+}
+
+.stage-error {
+  color: var(--danger);
+}
+
+.inline-icon {
+  vertical-align: -2px;
 }

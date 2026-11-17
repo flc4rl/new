@@ -28,7 +28,7 @@ export interface LineActions extends WordActions {
   /** Make this the highlighted line and move the song to it. */
   selectLine: (line: Line) => void
   /** Play the line once. */
-  playLine: (line: Line) => void
+  playLine: (line: Line, onFinish?: () => void) => void
   nudgeLine: (line: Line, edge: 'start' | 'end', direction: -1 | 1) => void
   syncFrom: (line: Line) => void
   toggleWords: (lineId: string) => void

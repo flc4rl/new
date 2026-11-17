@@ -158,6 +158,8 @@ const KEYS: [string, string][] = [
   [', .', 'Move the line’s start earlier or later'],
   ['< >', 'Move the line’s end earlier or later'],
   ['S', 'Sync mode on or off'],
+  ['R', 'Record a take on or off'],
+  ['C', 'Original line, then your take'],
   ['Esc', 'Stop the loop, or leave a text field'],
 ]
 

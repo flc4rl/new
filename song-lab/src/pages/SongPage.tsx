@@ -12,6 +12,7 @@ import { LineRow, type LineActions } from '../components/LineRow'
 import { Menu } from '../components/Menu'
 import { PasteLyricsDialog } from '../components/PasteLyricsDialog'
 import { DraftDialog } from '../components/DraftDialog'
+import { ShadowPanel, type ShadowControls } from '../components/ShadowPanel'
 import type { CardRef, Line, Question, SongDetail, Word } from '../../shared/types'
 
 type SetDetail = (next: SongDetail | ((prev: SongDetail) => SongDetail)) => void
@@ -171,13 +172,21 @@ function SongView({ detail, setDetail, reload }: { detail: SongDetail; setDetail
     }
 
     /** Play one stretch of the song a number of times, holding the highlight on its line. */
-    const playSpan = (lineId: string, start: number, end: number, repeats: number, pauseSec: number, leadInSec: number) => {
+    const playSpan = (
+      lineId: string,
+      start: number,
+      end: number,
+      repeats: number,
+      pauseSec: number,
+      leadInSec: number,
+      onFinish?: () => void,
+    ) => {
       const s = live.current
       if (!s.player || s.snap.status !== 'ready') return
       setCursorId(lineId)
       setSpanLineId(lineId)
       setLooping(repeats !== 1)
-      s.player.startLoop({ start, end, repeats: repeats === 0 ? Infinity : repeats, pauseSec, leadInSec })
+      s.player.startLoop({ start, end, repeats: repeats === 0 ? Infinity : repeats, pauseSec, leadInSec, onFinish })
     }
 
     const loopLine = (line: Line) => {
@@ -187,10 +196,17 @@ function SongView({ detail, setDetail, reload }: { detail: SongDetail; setDetail
       playSpan(line.id, line.startSec, lineEnd(s.detail.lines, line)!, loopRepeats, loopPauseSec, loopLeadInSec)
     }
 
-    const playLine = (line: Line) => {
+    const playLine = (line: Line, onFinish?: () => void) => {
       const s = live.current
       if (line.startSec == null) return
-      playSpan(line.id, line.startSec, lineEnd(s.detail.lines, line)!, 1, 0, s.settings.loopLeadInSec)
+      playSpan(line.id, line.startSec, lineEnd(s.detail.lines, line)!, 1, 0, s.settings.loopLeadInSec, onFinish)
+    }
+
+    /** While a take is recorded, the line loops until the take stops. */
+    const loopForTake = (line: Line) => {
+      const s = live.current
+      if (line.startSec == null) return
+      playSpan(line.id, line.startSec, lineEnd(s.detail.lines, line)!, 0, s.settings.loopPauseSec, s.settings.loopLeadInSec)
     }
 
     const toggleLoop = () => {
@@ -426,10 +442,15 @@ function SongView({ detail, setDetail, reload }: { detail: SongDetail; setDetail
       stepLine,
       nudgeCursor,
       splitAllLines,
+      loopForTake,
     }
   }, [reload, setDetail, toast, refreshCounts])
 
+  const shadow = useRef<ShadowControls>(null)
+
   useHotkeys({
+    r: () => !syncing && shadow.current?.toggleRecord(),
+    c: () => !syncing && shadow.current?.compare(),
     ' ': () => player?.toggle(),
     ArrowUp: () => actions.stepLine(-1),
     ArrowDown: () => actions.stepLine(1),
@@ -525,6 +546,24 @@ function SongView({ detail, setDetail, reload }: { detail: SongDetail; setDetail
               canLoop={snap.status === 'ready' && cursor?.startSec != null}
               onToggle={actions.toggleLoop}
               onSettings={(patch) => saveSettings(patch).catch(toast.error)}
+            />
+          )}
+          {!syncing && (
+            <ShadowPanel
+              line={cursor}
+              recording={detail.recordings.find((r) => r.lineId === cursorId) ?? null}
+              canPlayLine={snap.status === 'ready' && cursor?.startSec != null}
+              controls={shadow}
+              onLoopForTake={actions.loopForTake}
+              onStopLoop={() => {
+                player?.stopLoop()
+                player?.pause()
+              }}
+              onPlayLine={(line, onFinish) => actions.playLine(line, onFinish)}
+              onSaved={(rec) =>
+                setDetail((d) => ({ ...d, recordings: [...d.recordings.filter((r) => r.lineId !== rec.lineId), rec] }))
+              }
+              onDeleted={(lineId) => setDetail((d) => ({ ...d, recordings: d.recordings.filter((r) => r.lineId !== lineId) }))}
             />
           )}
           <SyncPanel
